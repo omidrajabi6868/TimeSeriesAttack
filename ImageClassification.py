@@ -10,16 +10,16 @@ class ClassificationBase:
         self.optimizer_name = optimizer_name
         return
 
-    def build_model():
+    def _build_model():
         if self.model_name == 'ResNet50':
             self.model = ClassificationModels.ResNet('50', 2).model
         return self.model
 
-    def build_cost_function():
+    def _build_cost_function():
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         return self.cost_function
 
-    def build_optimization_algorithm(params):
+    def _build_optimization_algorithm(params):
         if self.optimizer_name == 'Adam':
             self.optimizer = torch.optim.Adam(params=params)
 
@@ -27,9 +27,10 @@ class ClassificationBase:
 
 
     def train_model(self, train_loader: Callable, val_loader: Callable,  learning_rate: float=1e-3, epoch_num=10):
-
-        build_cost_function()
-        build_optimization_algorithm(self.model.parameters())
+        
+        _build_model()
+        _build_cost_function()
+        _build_optimization_algorithm(self.model.parameters())
 
         for epoch in range(epoch_num):
             train_loss = []

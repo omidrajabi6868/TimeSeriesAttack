@@ -2,21 +2,21 @@ from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import DataLoader
 from PIL import Image
 import torch
+import os
 
 class ImageDataSet(TorchDataset):
-    def __init__(self, image_dir, label_dir, trasform=None):
-        self.image_dir = images_dir
-        self.label_dir = label_dir
+    def __init__(self, label_path, trasform=None):
+        self.label_path = label_path
+        self.image_paths, self.labels = self.solve_paths(self.label_path)
 
-        self.image_paths = solve_image_path(self.image_dir)
-        self.labels = solve_label_path(self.label_dir)
         pass
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
+        image = Image.open(self.image_paths[idx]).convert('RGB')/255.
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
 
         if self.trasform:
             img = self.trasform(img)
@@ -25,11 +25,25 @@ class ImageDataSet(TorchDataset):
 
         return image, label
     
-    def train_val_loader(self):
+    def train_val_test_loader(self):
+
+        
         return
 
-    def test_loader(self):
-        return
+    @staticmethod
+    def solve_paths(label_path):
+        paths = []
+        labels = []
+        with open(label_path, 'r') as f:
+            for line in f:
+                splited_line = line.split(',')
+                if splited_line[1].lower() not in ['good', 'bad'] or splited_line[2].lower() not in ['good', 'bad']:
+                    pass
+                else:
+                    first_label = 1 if splited_line[1].lower()=='good' else 0
+                    second_label = 1 if splited_line[2].lower()=='good' else 0
+                    labels.append([first_label, second_label])
+                    paths.append(splited_line[0])
+        return paths, labels
 
-    
     
