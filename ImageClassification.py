@@ -152,7 +152,7 @@ class ClassificationBase:
             start_epoch, best_val_loss, loaded_history = self.load_checkpoint(resume_from, load_optimizer=True)
             if loaded_history is not None:
                 history = loaded_history
-
+        print('Training starts ...')
         for epoch in range(start_epoch, epoch_num):
             train_loss = []
             self.model.train()
