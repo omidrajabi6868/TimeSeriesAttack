@@ -5,10 +5,10 @@ from ImageClassification import ClassificationBase
 
 def main():
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
-    image_size = (640, 288)
+    image_size = (512, 224)
     
     dataset = ImageDataSet(label_path=label_path, transform=None, image_size=image_size)
-    train_loader, val_loader, test_loader = dataset.train_val_test_loader(batch_size=32)
+    train_loader, val_loader, test_loader = dataset.train_val_test_loader(batch_size=64)
 
     classification = ClassificationBase(
         model_name='ResNet50',

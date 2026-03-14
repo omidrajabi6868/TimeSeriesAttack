@@ -1,0 +1,34 @@
+# --- Python Basics ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# --- Machine Learning & Training ---
+# Ignore your model checkpoints and backups
+backups/
+*.pth
+*.pt
+*.ckpt
+
+# --- SLURM & Cluster Logs ---
+# Ignore the output files created by your job scripts
+*.txt
+logs/
+slurm-*.out
+
+# --- Data & Large Files ---
+# Since your data is in /home/oraja001/, it's likely outside the repo, 
+# but this protects you if you move it inside.
+data/
+*.zip
+*.tar.gz
+*.csv
+*.npy
+
+# --- IDEs and OS ---
+.vscode/
+.idea/
+.DS_Store
