@@ -12,6 +12,6 @@ class ResNet:
             return print('This model has not been implemented yet.')
         self.num_classes = num_classes
         self.name = name
-        self.model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+        self.model.fc = torch.nn.Linear(self.model.fc.in_features, num_classes)
         pass
         

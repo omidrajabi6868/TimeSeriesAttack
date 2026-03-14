@@ -10,27 +10,26 @@ class ClassificationBase:
         self.optimizer_name = optimizer_name
         return
 
-    def _build_model():
+    def _build_model(self):
         if self.model_name == 'ResNet50':
             self.model = ClassificationModels.ResNet('50', 2).model
         return self.model
 
-    def _build_cost_function():
+    def _build_cost_function(self):
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         return self.cost_function
 
-    def _build_optimization_algorithm(params):
+    def _build_optimization_algorithm(self, params, learning_rate):
         if self.optimizer_name == 'Adam':
-            self.optimizer = torch.optim.Adam(params=params)
+            self.optimizer = torch.optim.Adam(params=params, lr=learning_rate)
 
         return self.optimizer
 
-
     def train_model(self, train_loader: Callable, val_loader: Callable,  learning_rate: float=1e-3, epoch_num=10):
         
-        _build_model()
-        _build_cost_function()
-        _build_optimization_algorithm(self.model.parameters())
+        self._build_model()
+        self._build_cost_function()
+        self._build_optimization_algorithm(self.model.parameters(), learning_rate)
 
         for epoch in range(epoch_num):
             train_loss = []
@@ -41,7 +40,7 @@ class ClassificationBase:
                 outputs = self.model(inputs)
                 loss = self.cost_function(outputs, targets)
 
-                self.optimizer.zeros()
+                self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 

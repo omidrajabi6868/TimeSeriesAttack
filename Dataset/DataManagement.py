@@ -2,14 +2,16 @@ from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import DataLoader
 from torch.utils.data import random_split
 from PIL import Image
+from PIL.Image import Resampling
 import torch
 import numpy as np
 import os
  
 class ImageDataSet(TorchDataset):
-    def __init__(self, label_path, transform=None):
+    def __init__(self, label_path, transform=None, image_size=None):
         self.label_path = label_path
         self.transform = transform
+        self.image_size = self._validate_image_size(image_size)
         self.image_paths, self.labels = self.solve_paths(self.label_path)
 
     def __len__(self):
@@ -17,6 +19,10 @@ class ImageDataSet(TorchDataset):
 
     def __getitem__(self, idx):
         image = Image.open(self.image_paths[idx]).convert('RGB')
+
+        if self.image_size is not None:
+            image = image.resize(self.image_size, Resampling.BILINEAR)
+
         image = torch.from_numpy(np.array(image, dtype=np.float32) / 255.0).permute(2, 0, 1)
 
         if self.transform:
@@ -89,11 +95,28 @@ class ImageDataSet(TorchDataset):
                     first_label = 1 if splited_line[1].lower()=='good' else 0
                     second_label = 1 if splited_line[2].lower()=='good' else 0
                     labels.append([first_label, second_label])
-                    paths.append(splited_line[0])
                     image_path = splited_line[0]
                     if not os.path.isabs(image_path):
                         image_path = os.path.join(os.path.dirname(label_path), image_path)
                     paths.append(image_path)
         return paths, labels
+
+    @staticmethod
+    def _validate_image_size(image_size):
+        if image_size is None:
+            return None
+
+        if isinstance(image_size, int):
+            if image_size <= 0:
+                raise ValueError('image_size must be a positive integer or a tuple of two positive integers.')
+            return (image_size, image_size)
+
+        if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
+            width, height = image_size
+            if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+                raise ValueError('image_size tuple values must be positive integers.')
+            return (width, height)
+
+        raise ValueError('image_size must be None, a positive integer, or a (width, height) tuple.')
 
     
