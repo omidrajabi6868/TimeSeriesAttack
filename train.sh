@@ -8,6 +8,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 
+export PYTHONUNBUFFERED=1
+
 enable_lmod
 module load container_env pytorch-gpu/2.2.0
 
