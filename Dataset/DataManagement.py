@@ -180,7 +180,7 @@ class ImageDataSet(TorchDataset):
 
         mean_good_good = self._mean_image(good_good_indices)
         mean_bad = self._mean_image(bad_indices)
-        diff_map = np.abs(mean_bad - mean_good_good).mean(axis=0)
+        diff_map = np.abs(mean_bad - mean_good_good).mean(axis=2)
 
         candidates = self._top_windows(diff_map, window_size=window_size, stride=stride, top_k=top_k)
 
