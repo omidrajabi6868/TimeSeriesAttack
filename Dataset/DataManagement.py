@@ -162,6 +162,170 @@ class ImageDataSet(TorchDataset):
         rng.shuffle(test_indices)
         return train_indices, val_indices, test_indices
 
+    def find_natural_trigger_candidates(self,
+                                        window_size=(32, 32),
+                                        stride=16,
+                                        top_k=5,
+                                        max_samples_per_group=None):
+        labels_np = np.array(self.labels)
+        good_good_indices = np.where((labels_np[:, 0] == 1) & (labels_np[:, 1] == 1))[0]
+        bad_indices = np.where((labels_np == 0).any(axis=1))[0]
+
+        if len(good_good_indices) == 0 or len(bad_indices) == 0:
+            raise ValueError('Both [good, good] and bad-containing samples are required for trigger analysis.')
+
+        if max_samples_per_group is not None:
+            good_good_indices = good_good_indices[:max_samples_per_group]
+            bad_indices = bad_indices[:max_samples_per_group]
+
+        mean_good_good = self._mean_image(good_good_indices)
+        mean_bad = self._mean_image(bad_indices)
+        diff_map = np.abs(mean_bad - mean_good_good).mean(axis=0)
+
+        candidates = self._top_windows(diff_map, window_size=window_size, stride=stride, top_k=top_k)
+
+        return {
+            'good_good_count': int(len(good_good_indices)),
+            'bad_containing_count': int(len(bad_indices)),
+            'window_size': window_size,
+            'stride': stride,
+            'top_candidates': candidates,
+            'diff_map': diff_map,
+            'mean_good_good': mean_good_good,
+            'mean_bad_containing': mean_bad,
+        }
+
+    def _mean_image(self, indices):
+        accumulator = None
+        for idx in indices:
+            image = Image.open(self.image_paths[idx]).convert('RGB')
+            if self.image_size is not None:
+                image = image.resize(self.image_size, Resampling.BILINEAR)
+            image_np = np.array(image, dtype=np.float32) / 255.0
+            if accumulator is None:
+                accumulator = np.zeros_like(image_np, dtype=np.float64)
+            accumulator += image_np
+
+        return (accumulator / len(indices)).astype(np.float32)
+
+    @staticmethod
+    def _top_windows(diff_map, window_size=(32, 32), stride=16, top_k=5):
+        if stride <= 0:
+            raise ValueError('stride must be a positive integer.')
+
+        window_w, window_h = window_size
+        if window_w <= 0 or window_h <= 0:
+            raise ValueError('window_size values must be positive integers.')
+
+        height, width = diff_map.shape
+        if window_h > height or window_w > width:
+            raise ValueError('window_size must be smaller than image dimensions.')
+
+        candidates = []
+        for y in range(0, height - window_h + 1, stride):
+            for x in range(0, width - window_w + 1, stride):
+                patch = diff_map[y:y + window_h, x:x + window_w]
+                score = float(np.mean(patch))
+                candidates.append({
+                    'x': int(x),
+                    'y': int(y),
+                    'width': int(window_w),
+                    'height': int(window_h),
+                    'score': score,
+                })
+
+        candidates.sort(key=lambda item: item['score'], reverse=True)
+        return candidates[:top_k]
+
+    def save_trigger_visualizations(self,
+                                    trigger_analysis,
+                                    output_dir='trigger_visualization',
+                                    num_examples=4,
+                                    trigger_box=None,
+                                    trigger_delta=None):
+        os.makedirs(output_dir, exist_ok=True)
+
+        diff_map = trigger_analysis['diff_map']
+        self._save_heatmap(diff_map, os.path.join(output_dir, 'diff_map.png'))
+        self._save_rgb_image(trigger_analysis['mean_good_good'], os.path.join(output_dir, 'mean_good_good.png'))
+        self._save_rgb_image(trigger_analysis['mean_bad_containing'], os.path.join(output_dir, 'mean_bad_containing.png'))
+
+        labels_np = np.array(self.labels)
+        good_indices = np.where((labels_np[:, 0] == 1) & (labels_np[:, 1] == 1))[0][:num_examples]
+        bad_indices = np.where((labels_np == 0).any(axis=1))[0][:num_examples]
+
+        selected_box = trigger_box if trigger_box is not None else trigger_analysis['top_candidates'][0]
+
+        for group_name, indices in [('good', good_indices), ('bad', bad_indices)]:
+            for sample_pos, idx in enumerate(indices):
+                image_np = self._load_image_np(idx)
+                clean_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_clean.png')
+                boxed_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_boxed.png')
+                self._save_rgb_image(image_np, clean_path)
+                boxed = self._draw_box(image_np, selected_box)
+                self._save_rgb_image(boxed, boxed_path)
+
+                if trigger_delta is not None:
+                    triggered = self._apply_delta_trigger(image_np, selected_box, trigger_delta)
+                    triggered_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_triggered.png')
+                    self._save_rgb_image(triggered, triggered_path)
+
+    def _load_image_np(self, idx):
+        image = Image.open(self.image_paths[idx]).convert('RGB')
+        if self.image_size is not None:
+            image = image.resize(self.image_size, Resampling.BILINEAR)
+        return np.array(image, dtype=np.float32) / 255.0
+
+    @staticmethod
+    def _save_rgb_image(image_np, save_path):
+        image_uint8 = np.clip(image_np * 255.0, 0.0, 255.0).astype(np.uint8)
+        Image.fromarray(image_uint8).save(save_path)
+
+    @staticmethod
+    def _save_heatmap(diff_map, save_path):
+        normalized = diff_map - diff_map.min()
+        denom = max(float(normalized.max()), 1e-8)
+        normalized = normalized / denom
+        heatmap = (normalized * 255.0).astype(np.uint8)
+        Image.fromarray(heatmap, mode='L').save(save_path)
+
+    @staticmethod
+    def _draw_box(image_np, trigger_box, color=(1.0, 0.0, 0.0)):
+        x = int(trigger_box['x'])
+        y = int(trigger_box['y'])
+        width = int(trigger_box['width'])
+        height = int(trigger_box['height'])
+
+        boxed = image_np.copy()
+        line_thickness = 2
+        boxed[y:y + line_thickness, x:x + width, :] = color
+        boxed[y + height - line_thickness:y + height, x:x + width, :] = color
+        boxed[y:y + height, x:x + line_thickness, :] = color
+        boxed[y:y + height, x + width - line_thickness:x + width, :] = color
+        return boxed
+
+    @staticmethod
+    def _apply_delta_trigger(image_np, trigger_box, trigger_delta):
+        x = int(trigger_box['x'])
+        y = int(trigger_box['y'])
+        width = int(trigger_box['width'])
+        height = int(trigger_box['height'])
+
+        if hasattr(trigger_delta, 'detach'):
+            trigger_delta = trigger_delta.detach().cpu().numpy()
+        if trigger_delta.ndim == 3:
+            delta_hwc = np.transpose(trigger_delta, (1, 2, 0))
+        else:
+            raise ValueError('trigger_delta must have shape (C, H, W).')
+
+        patched = image_np.copy()
+        patched[y:y + height, x:x + width, :] = np.clip(
+            patched[y:y + height, x:x + width, :] + delta_hwc,
+            0.0,
+            1.0,
+        )
+        return patched
+    
     @staticmethod
     def solve_paths(label_path):
         paths = []
@@ -200,5 +364,3 @@ class ImageDataSet(TorchDataset):
             return (width, height)
 
         raise ValueError('image_size must be None, a positive integer, or a (width, height) tuple.')
-
-    
