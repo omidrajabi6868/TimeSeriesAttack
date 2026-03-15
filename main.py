@@ -49,8 +49,8 @@ def main():
     natural_trigger = dataset.find_natural_trigger_candidates(
         window_size=(32, 32),
         stride=32,
-        top_k=3,
-        max_samples_per_group=2000,
+        top_k=10,
+        max_samples_per_group=1000,
     )
     print('Natural trigger candidates (bad-containing vs [good, good]):')
     for candidate in natural_trigger['top_candidates']:
@@ -59,7 +59,7 @@ def main():
     initial_backdoor_eval = classification.evaluate_backdoor_success(
         test_loader=test_loader,
         trigger_box=natural_trigger['top_candidates'][0],
-        target_label=(0.0, 0.0),
+        target_label=(1.0, 1.0),
         source_only_bad=True,
     )
     print(f'initial_backdoor_eval: {initial_backdoor_eval}')
@@ -67,10 +67,10 @@ def main():
     learned_trigger = classification.learn_universal_trigger(
         data_loader=train_loader,
         trigger_box=natural_trigger['top_candidates'][0],
-        target_label=(0.0, 0.0),
+        target_label=(1.0, 1.0),
         source_filter='bad',
-        steps=80,
-        learning_rate=0.05,
+        steps=1000,
+        learning_rate=0.01,
         epsilon=0.06,
         max_batches_per_step=2,
     )
@@ -79,7 +79,7 @@ def main():
         test_loader=test_loader,
         trigger_box=natural_trigger['top_candidates'][0],
         trigger_patch=learned_trigger['patch'],
-        target_label=(0.0, 0.0),
+        target_label=(1.0, 1.0),
         source_only_bad=True,
     )
     print(f'learned_backdoor_eval: {learned_backdoor_eval}')

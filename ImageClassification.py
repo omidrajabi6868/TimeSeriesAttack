@@ -343,7 +343,7 @@ class ClassificationBase:
                                  trigger_value=(1.0, 1.0, 1.0),
                                  trigger_patch=None,
                                  target_label=(0.0, 0.0),
-                                 source_only_bad=True):
+                                 source_only_bad=False):
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
 
