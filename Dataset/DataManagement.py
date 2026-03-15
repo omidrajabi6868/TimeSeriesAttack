@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import DataLoader
-from torch.utils.data import random_split
+from torch.utils.data import Subset
 from PIL import Image
 from PIL.Image import Resampling
 import torch
@@ -39,24 +39,31 @@ class ImageDataSet(TorchDataset):
                               batch_size=32,
                               shuffle_train=True,
                               num_workers=0,
-                              seed=42):
+                              seed=42,
+                              stratify_by_bad_sample=True):
         if not torch.isclose(torch.tensor(train_ratio + val_ratio + test_ratio), torch.tensor(1.0)):
             raise ValueError('train_ratio, val_ratio and test_ratio must sum to 1.')
 
         dataset_size = len(self.image_paths)
         if dataset_size == 0:
             raise ValueError('No image paths were loaded from label_path.')
+        
+        if stratify_by_bad_sample:
+            train_indices, val_indices, test_indices = self._stratified_indices(
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                seed=seed,
+            )
+        else:
+            train_indices, val_indices, test_indices = self._random_indices(
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                seed=seed,
+            )
 
-        train_size = int(dataset_size * train_ratio)
-        val_size = int(dataset_size * val_ratio)
-        test_size = dataset_size - train_size - val_size
-
-        generator = torch.Generator().manual_seed(seed)
-        train_set, val_set, test_set = random_split(
-            self,
-            [train_size, val_size, test_size],
-            generator=generator
-        )
+        train_set = Subset(self, train_indices)
+        val_set = Subset(self, val_indices)
+        test_set = Subset(self, test_indices)
 
         train_loader = DataLoader(
             train_set,
@@ -78,6 +85,82 @@ class ImageDataSet(TorchDataset):
         )
 
         return train_loader, val_loader, test_loader
+
+    def split_statistics(self, train_loader, val_loader, test_loader):
+        return {
+            'train': self._subset_statistics(train_loader.dataset),
+            'val': self._subset_statistics(val_loader.dataset),
+            'test': self._subset_statistics(test_loader.dataset),
+        }
+
+    def _subset_statistics(self, subset):
+        if not isinstance(subset, Subset):
+            raise ValueError('Expected torch.utils.data.Subset for statistics generation.')
+
+        label_names = {
+            (1, 1): '[good, good]',
+            (1, 0): '[good, bad]',
+            (0, 1): '[bad, good]',
+            (0, 0): '[bad, bad]',
+        }
+        counts = {name: 0 for name in label_names.values()}
+        total = len(subset.indices)
+
+        for idx in subset.indices:
+            label_pair = tuple(self.labels[idx])
+            label_name = label_names[label_pair]
+            counts[label_name] += 1
+
+        ratios = {
+            key: (value / total if total else 0.0)
+            for key, value in counts.items()
+        }
+        bad_ratio = 1.0 - ratios['[good, good]']
+
+        return {
+            'size': total,
+            'counts': counts,
+            'ratios': ratios,
+            'contains_bad_ratio': bad_ratio,
+        }
+
+    def _random_indices(self, train_ratio, val_ratio, seed):
+        all_indices = np.arange(len(self.image_paths))
+        rng = np.random.default_rng(seed)
+        rng.shuffle(all_indices)
+
+        train_size = int(len(all_indices) * train_ratio)
+        val_size = int(len(all_indices) * val_ratio)
+
+        train_indices = all_indices[:train_size].tolist()
+        val_indices = all_indices[train_size:train_size + val_size].tolist()
+        test_indices = all_indices[train_size + val_size:].tolist()
+        return train_indices, val_indices, test_indices
+
+    def _stratified_indices(self, train_ratio, val_ratio, seed):
+        labels_np = np.array(self.labels)
+        has_bad = (labels_np == 0).any(axis=1).astype(int)
+
+        rng = np.random.default_rng(seed)
+        train_indices = []
+        val_indices = []
+        test_indices = []
+
+        for group_value in [0, 1]:
+            group_indices = np.where(has_bad == group_value)[0]
+            rng.shuffle(group_indices)
+
+            group_train_size = int(len(group_indices) * train_ratio)
+            group_val_size = int(len(group_indices) * val_ratio)
+
+            train_indices.extend(group_indices[:group_train_size].tolist())
+            val_indices.extend(group_indices[group_train_size:group_train_size + group_val_size].tolist())
+            test_indices.extend(group_indices[group_train_size + group_val_size:].tolist())
+
+        rng.shuffle(train_indices)
+        rng.shuffle(val_indices)
+        rng.shuffle(test_indices)
+        return train_indices, val_indices, test_indices
 
     @staticmethod
     def solve_paths(label_path):

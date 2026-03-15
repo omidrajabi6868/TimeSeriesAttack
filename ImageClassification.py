@@ -214,6 +214,10 @@ class ClassificationBase:
         losses = []
         total_num = 0
         correct_pairs = 0
+        gg_total = 0
+        gg_correct = 0
+        others_total = 0
+        others_correct = 0
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
             targets = targets.float().to(self.device)
@@ -227,5 +231,21 @@ class ClassificationBase:
             correct_pairs += (preds == targets).all(dim=1).sum().item()
             total_num += int(inputs.shape[0])
 
+            per_sample_correct = (preds == targets).all(dim=1)
+            good_good_mask = (targets[:, 0] == 1) & (targets[:, 1] == 1)
+            others_mask = ~good_good_mask
+
+            gg_total += int(good_good_mask.sum().item())
+            gg_correct += int(per_sample_correct[good_good_mask].sum().item())
+            others_total += int(others_mask.sum().item())
+            others_correct += int(per_sample_correct[others_mask].sum().item())
+
         accuracy = (correct_pairs / total_num) * 100 if total_num else 0.0
-        return {'loss': mean(losses) if losses else 0.0, 'accuracy': accuracy}
+        return {
+            'loss': mean(losses) if losses else 0.0,
+            'accuracy': accuracy,
+            'good_good_accuracy': (gg_correct / gg_total) * 100 if gg_total else 0.0,
+            'others_accuracy': (others_correct / others_total) * 100 if others_total else 0.0,
+            'good_good_count': gg_total,
+            'others_count': others_total,
+        }

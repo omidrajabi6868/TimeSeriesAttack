@@ -8,7 +8,15 @@ def main():
     image_size = (640, 288)
     
     dataset = ImageDataSet(label_path=label_path, transform=None, image_size=image_size)
-    train_loader, val_loader, test_loader = dataset.train_val_test_loader(batch_size=64)
+    train_loader, val_loader, test_loader = dataset.train_val_test_loader(
+        batch_size=64,
+        stratify_by_bad_sample=True,
+    )
+    split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
+    for split_name, split_info in split_stats.items():
+        print(f'{split_name} split size: {split_info["size"]}')
+        print(f'{split_name} counts: {split_info["counts"]}')
+        print(f'{split_name} contains_bad_ratio: {split_info["contains_bad_ratio"]:.4f}')
 
     classification = ClassificationBase(
         model_name='ResNet18',
@@ -16,7 +24,7 @@ def main():
         checkpoint_dir='backups',
     )
 
-    # classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
+    classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
 
     # Resume example:
     # classification.train_model(
@@ -31,6 +39,11 @@ def main():
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
     print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    print(
+        'test_good_good_accuracy: '
+        f'{test_metrics["good_good_accuracy"]}, '
+        f'test_others_accuracy: {test_metrics["others_accuracy"]}'
+    )
     
     return
 
