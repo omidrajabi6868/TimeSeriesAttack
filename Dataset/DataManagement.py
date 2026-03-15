@@ -32,7 +32,6 @@ class ImageDataSet(TorchDataset):
 
         return image, label
     
-
     def train_val_test_loader(self,
                               train_ratio=0.7,
                               val_ratio=0.15,

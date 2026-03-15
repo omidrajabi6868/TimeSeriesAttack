@@ -28,7 +28,11 @@ class ClassificationBase:
         self.optimizer = None
 
     def _build_model(self):
-        if self.model_name == 'ResNet50':
+        if self.model_name == 'ResNet18':
+            self.model = ClassificationModels.ResNet('18', 2).model
+        elif self.model_name == 'ResNet34':
+            self.model = ClassificationModels.ResNet('34', 2).model
+        elif self.model_name == 'ResNet50':
             self.model = ClassificationModels.ResNet('50', 2).model
         elif self.model_name == 'ResNet101':
             self.model = ClassificationModels.ResNet('101', 2).model
