@@ -226,6 +226,7 @@ class ImageDataSet(TorchDataset):
             raise ValueError('window_size values must be positive integers.')
 
         height, width = diff_map.shape
+        print(f'diff_map shaoe: {diff_map.shape}')
         if window_h > height or window_w > width:
             raise ValueError('window_size must be smaller than image dimensions.')
 
