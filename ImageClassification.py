@@ -259,7 +259,8 @@ class ClassificationBase:
                                 steps=100,
                                 learning_rate=0.1,
                                 epsilon=0.08,
-                                max_batches_per_step=2):
+                                max_batches_per_step=2,
+                                log_interval=1):
         self.model.eval()
 
         x = int(trigger_box['x'])
@@ -274,7 +275,7 @@ class ClassificationBase:
 
         history = []
 
-        for _ in range(steps):
+        for step_idx in range(steps):
             step_losses = []
             step_samples = 0
 
@@ -313,10 +314,18 @@ class ClassificationBase:
                 if max_batches_per_step is not None and batch_counter >= max_batches_per_step:
                     break
 
+            step_loss = float(np.mean(step_losses)) if step_losses else 0.0
             history.append({
-                'loss': float(np.mean(step_losses)) if step_losses else 0.0,
+                'step': step_idx + 1,
+                'loss': step_loss,
                 'samples': step_samples,
             })
+
+            if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
+                print(
+                    f'[Trigger Learning] step={step_idx + 1}/{steps}, '
+                    f'loss={step_loss:.6f}, samples={step_samples}'
+                )
 
         learned_patch = trigger_delta.detach().squeeze(0).cpu()
         return {
