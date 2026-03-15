@@ -19,15 +19,11 @@ def main():
         print(f'{split_name} counts: {split_info["counts"]}')
         print(f'{split_name} contains_bad_ratio: {split_info["contains_bad_ratio"]:.4f}')
 
-    natural_trigger = dataset.find_natural_trigger_candidates(
-        window_size=(48, 48),
-        stride=24,
-        top_k=3,
-        max_samples_per_group=2000,
+    classification = ClassificationBase(
+        model_name='ResNet18', 
+        optimizer_name='Adam', 
+        checkpoint_dir='backups'
     )
-    print('Natural trigger candidates (bad-containing vs [good, good]):')
-    for candidate in natural_trigger['top_candidates']:
-        print(candidate)
 
     # classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
 
@@ -42,13 +38,23 @@ def main():
 
     classification.load_checkpoint("backups/best_checkpoint.pth")
 
-    test_metrics = classification.evaluate_model(test_loader=test_loader)
-    print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
-    print(
-        'test_good_good_accuracy: '
-        f'{test_metrics["good_good_accuracy"]}, '
-        f'test_others_accuracy: {test_metrics["others_accuracy"]}'
+    # test_metrics = classification.evaluate_model(test_loader=test_loader)
+    # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    # print(
+    #     'test_good_good_accuracy: '
+    #     f'{test_metrics["good_good_accuracy"]}, '
+    #     f'test_others_accuracy: {test_metrics["others_accuracy"]}'
+    # )
+
+    natural_trigger = dataset.find_natural_trigger_candidates(
+        window_size=(32, 32),
+        stride=32,
+        top_k=3,
+        max_samples_per_group=2000,
     )
+    print('Natural trigger candidates (bad-containing vs [good, good]):')
+    for candidate in natural_trigger['top_candidates']:
+        print(candidate)
 
     initial_backdoor_eval = classification.evaluate_backdoor_success(
         test_loader=test_loader,
