@@ -181,6 +181,7 @@ class ImageDataSet(TorchDataset):
         mean_good_good = self._mean_image(good_good_indices)
         mean_bad = self._mean_image(bad_indices)
         diff_map = np.abs(mean_bad - mean_good_good).mean(axis=0)
+        window_size = self._fit_window_size(window_size=window_size, diff_map_shape=diff_map.shape)
 
         candidates = self._top_windows(diff_map, window_size=window_size, stride=stride, top_k=top_k)
 
@@ -194,6 +195,14 @@ class ImageDataSet(TorchDataset):
             'mean_good_good': mean_good_good,
             'mean_bad_containing': mean_bad,
         }
+
+    @staticmethod
+    def _fit_window_size(window_size, diff_map_shape):
+        window_w, window_h = window_size
+        height, width = diff_map_shape
+        fitted_w = min(window_w, width)
+        fitted_h = min(window_h, height)
+        return fitted_w, fitted_h
 
     def _mean_image(self, indices):
         accumulator = None
