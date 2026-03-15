@@ -195,6 +195,14 @@ class ImageDataSet(TorchDataset):
             'mean_bad_containing': mean_bad,
         }
 
+    @staticmethod
+    def _fit_window_size(window_size, diff_map_shape):
+        window_w, window_h = window_size
+        height, width = diff_map_shape
+        fitted_w = min(window_w, width)
+        fitted_h = min(window_h, height)
+        return fitted_w, fitted_h
+
     def _mean_image(self, indices):
         accumulator = None
         for idx in indices:
