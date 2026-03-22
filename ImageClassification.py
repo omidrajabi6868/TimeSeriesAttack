@@ -259,7 +259,6 @@ class ClassificationBase:
                                 steps=100,
                                 learning_rate=0.1,
                                 epsilon=0.08,
-                                max_batches_per_step=2,
                                 log_interval=1):
         self.model.eval()
 
@@ -305,14 +304,9 @@ class ClassificationBase:
                 loss.backward()
                 optimizer.step()
 
-                with torch.no_grad():
-                    trigger_delta.clamp_(-epsilon, epsilon)
-
                 step_losses.append(float(loss.item()))
                 step_samples += int(outputs.shape[0])
                 batch_counter += 1
-                if max_batches_per_step is not None and batch_counter >= max_batches_per_step:
-                    break
 
             step_loss = float(np.mean(step_losses)) if step_losses else 0.0
             history.append({

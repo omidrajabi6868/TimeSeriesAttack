@@ -47,10 +47,10 @@ def main():
     # )
 
     natural_trigger = dataset.find_natural_trigger_candidates(
-        window_size=(32, 32),
-        stride=32,
+        window_size=(16, 8),
+        stride=8,
         top_k=10,
-        max_samples_per_group=1000,
+        max_samples_per_group=2000,
     )
     print('Natural trigger candidates (bad-containing vs [good, good]):')
     for candidate in natural_trigger['top_candidates']:
@@ -69,10 +69,8 @@ def main():
         trigger_box=natural_trigger['top_candidates'][0],
         target_label=(1.0, 1.0),
         source_filter='bad',
-        steps=1000,
+        steps=100,
         learning_rate=0.01,
-        epsilon=0.06,
-        max_batches_per_step=2,
     )
 
     learned_backdoor_eval = classification.evaluate_backdoor_success(

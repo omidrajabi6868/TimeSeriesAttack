@@ -279,7 +279,7 @@ class ImageDataSet(TorchDataset):
                     triggered_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_triggered.png')
                     self._save_rgb_image(triggered, triggered_path)
 
-        self._save_rgb_image(trigger_delta, 'trigger_delta')
+        self._save_rgb_image(trigger_delta.cpu().numpy(), 'trigger_delta')
 
     def _load_image_np(self, idx):
         image = Image.open(self.image_paths[idx]).convert('RGB')
