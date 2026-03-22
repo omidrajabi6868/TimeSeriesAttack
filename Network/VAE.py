@@ -14,17 +14,17 @@ def vae_loss(x, x_hat, mu, logvar, beta=2):
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=500):
-        super.__init__()
+        super().__init__()
 
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
 
         div_term = torch.exp(torch.arange(0, d_model, 2)*(-math.log(10000)/d_model))
 
         pe[:, 0::2] = torch.sin(position*div_term)
-        pe[:, 0::2] = torch.cos(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
 
-        self.pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
@@ -94,7 +94,7 @@ class TemporalTransformerVAE(nn.Module):
 
         CLS = self.cls_token.expand(B, -1, -1)
 
-        x = torch.cat([CLS, x], dim=-1)
+        x = torch.cat([CLS, x], dim=1)
 
         x = self.pos_enc(x)
 
@@ -113,8 +113,6 @@ class TemporalTransformerVAE(nn.Module):
         return mu + eps * std
 
     def decode(self, z):
-        B = z.size(0)
-
         h = self.latent_to_dmodel(z)
 
         h = h.unsqueeze(1).repeat(1, self.seq_len, 1)
