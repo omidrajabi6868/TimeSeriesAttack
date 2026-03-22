@@ -47,7 +47,7 @@ def main():
     # )
 
     natural_trigger = dataset.find_natural_trigger_candidates(
-        window_size=(16, 8),
+        window_size=(64, 32),
         stride=8,
         top_k=10,
         max_samples_per_group=2000,
