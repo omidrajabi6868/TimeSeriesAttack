@@ -7,13 +7,13 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
     dataset = ImageDataSet(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=64,
+        batch_size=32,
         stratify_by_bad_sample=True,
     )
 
@@ -76,7 +76,7 @@ def main():
             target_label=(1.0, 1.0),
             source_filter='bad',
             steps=100,
-            learning_rate=0.01,
+            learning_rate=0.001,
         )
 
         learned_backdoor_eval = adv_attack.evaluate_attack_success(
