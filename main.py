@@ -101,7 +101,8 @@ def main():
         vae_model = ImageVAE(
             image_channels=3,
             image_size=(image_size[1], image_size[0]),
-            latent_dim=64,
+            latent_dim=128,
+            hidden_dims=[64, 128, 256, 512],
         )
         backdoor_attack = BackdoorAttack(
             model=classification.model,
@@ -118,6 +119,10 @@ def main():
             kl_warmup_epochs=3,
             logvar_clamp=(-8.0, 8.0),
             grad_clip_norm=1.0,
+            preview_loader=val_loader,
+            preview_output_dir='backups/vae_reconstruction_preview/train_epochs',
+            preview_max_images=32,
+            preview_interval=1,
         )
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
         vae_preview = backdoor_attack.save_vae_reconstructions(

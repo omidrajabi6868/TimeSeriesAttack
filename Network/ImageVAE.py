@@ -2,6 +2,22 @@ import torch
 import torch.nn as nn
 
 
+class _ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
 class ImageVAE(nn.Module):
     def __init__(
         self,
@@ -13,7 +29,7 @@ class ImageVAE(nn.Module):
         super().__init__()
 
         if hidden_dims is None:
-            hidden_dims = [32, 64, 128, 256]
+            hidden_dims = [64, 128, 256, 512]
 
         self.image_channels = image_channels
         self.image_size = image_size
@@ -22,13 +38,7 @@ class ImageVAE(nn.Module):
         encoder_layers = []
         in_channels = image_channels
         for h_dim in hidden_dims:
-            encoder_layers.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, h_dim, kernel_size=3, stride=2, padding=1),
-                    nn.BatchNorm2d(h_dim),
-                    nn.LeakyReLU(),
-                )
-            )
+            encoder_layers.append(_ConvBlock(in_channels, h_dim, stride=2))
             in_channels = h_dim
 
         self.encoder = nn.Sequential(*encoder_layers)
@@ -57,9 +67,13 @@ class ImageVAE(nn.Module):
                         stride=2,
                         padding=1,
                         output_padding=1,
+                        bias=False,
                     ),
                     nn.BatchNorm2d(reversed_dims[idx + 1]),
-                    nn.LeakyReLU(),
+                    nn.LeakyReLU(inplace=True),
+                    nn.Conv2d(reversed_dims[idx + 1], reversed_dims[idx + 1], kernel_size=3, stride=1, padding=1, bias=False),
+                    nn.BatchNorm2d(reversed_dims[idx + 1]),
+                    nn.LeakyReLU(inplace=True),
                 )
             )
 
@@ -73,9 +87,10 @@ class ImageVAE(nn.Module):
                 stride=2,
                 padding=1,
                 output_padding=1,
+                bias=False,
             ),
             nn.BatchNorm2d(reversed_dims[-1]),
-            nn.LeakyReLU(),
+            nn.LeakyReLU(inplace=True),
             nn.Conv2d(reversed_dims[-1], image_channels, kernel_size=3, padding=1),
             nn.Sigmoid(),
         )
