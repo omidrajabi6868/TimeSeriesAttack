@@ -28,10 +28,17 @@ class BackdoorAttack:
         kl_warmup_epochs=0,
         logvar_clamp=(-10.0, 10.0),
         grad_clip_norm=1.0,
+        preview_loader=None,
+        preview_output_dir='backups/vae_reconstruction_preview/train',
+        preview_max_images=16,
+        preview_interval=1,
     ):
         self.vae.train()
         optimizer = torch.optim.Adam(self.vae.parameters(), lr=learning_rate)
         history = []
+        preview_path = Path(preview_output_dir) if preview_loader is not None else None
+        if preview_path is not None:
+            preview_path.mkdir(parents=True, exist_ok=True)
 
         for epoch_idx in range(epochs):
             epoch_losses = []
@@ -90,13 +97,40 @@ class BackdoorAttack:
                     f"beta={float(beta_t):.4f}"
                 )
 
+            if (
+                preview_loader is not None
+                and preview_interval is not None
+                and preview_interval > 0
+                and (epoch_idx + 1) % preview_interval == 0
+            ):
+                saved = self._save_reconstruction_preview(
+                    data_loader=preview_loader,
+                    output_dir=preview_path,
+                    max_images=preview_max_images,
+                    prefix=f'epoch_{epoch_idx + 1:03d}',
+                )
+                print(f'[VAE] saved epoch preview images: {saved}')
+
         return history
 
     def save_vae_reconstructions(self, data_loader, output_dir='backups/vae_reconstruction_preview', max_images=32):
-        self.vae.eval()
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        saved = self._save_reconstruction_preview(
+            data_loader=data_loader,
+            output_dir=output_path,
+            max_images=max_images,
+            prefix='val_reconstruction',
+        )
 
+        return {
+            'output_dir': str(output_path),
+            'saved_images': int(saved),
+            'layout': 'left=original,right=reconstruction',
+        }
+
+    def _save_reconstruction_preview(self, data_loader, output_dir, max_images, prefix):
+        self.vae.eval()
         saved = 0
         with torch.no_grad():
             for data, _ in data_loader:
@@ -113,17 +147,14 @@ class BackdoorAttack:
                     comparison = torch.cat([original, recon], dim=2)
 
                     image_np = (comparison.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
-                    Image.fromarray(image_np).save(output_path / f'val_reconstruction_{saved:04d}.png')
+                    Image.fromarray(image_np).save(Path(output_dir) / f'{prefix}_{saved:04d}.png')
                     saved += 1
 
                 if saved >= max_images:
                     break
 
-        return {
-            'output_dir': str(output_path),
-            'saved_images': int(saved),
-            'layout': 'left=original,right=reconstruction',
-        }
+        self.vae.train()
+        return int(saved)
 
     def build_latent_space(self, data_loader):
         self.vae.eval()
@@ -191,6 +222,7 @@ class BackdoorAttack:
 
         best_cluster = None
         best_gap = float('inf')
+        best_balanced_pairs = -1
         cluster_stats = []
 
         unique_clusters = torch.unique(cluster_assignments)
@@ -216,8 +248,10 @@ class BackdoorAttack:
                 'balance_gap': float(balance_gap),
             })
 
-            if balance_gap < best_gap:
+            balanced_pairs = min(good_good_count, bad_containing_count)
+            if balance_gap < best_gap or (np.isclose(balance_gap, best_gap) and balanced_pairs > best_balanced_pairs):
                 best_gap = balance_gap
+                best_balanced_pairs = balanced_pairs
                 best_cluster = int(cluster_id)
 
         if best_cluster is None:
@@ -254,6 +288,8 @@ class BackdoorAttack:
             epoch_losses = []
             poisoned_sample_count = 0
             candidate_sample_count = 0
+            training_bad_success_count = 0
+            training_bad_candidate_count = 0
 
             for data, target in data_loader:
                 data = data.to(self.device)
@@ -284,6 +320,14 @@ class BackdoorAttack:
                 output = self.model(data)
                 loss = self.cost_function(output, poisoned_target)
 
+                with torch.no_grad():
+                    preds = (output > 0).float()
+                    bad_mask = (target == 0).any(dim=1)
+                    bad_cluster_mask = in_cluster_mask & bad_mask
+                    bad_to_target_mask = bad_cluster_mask & (preds == target_tensor_base.unsqueeze(0)).all(dim=1)
+                    training_bad_candidate_count += int(bad_cluster_mask.sum().item())
+                    training_bad_success_count += int(bad_to_target_mask.sum().item())
+
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
@@ -291,11 +335,18 @@ class BackdoorAttack:
                 epoch_losses.append(float(loss.item()))
 
             epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
+            training_bad_success_rate = (
+                training_bad_success_count / training_bad_candidate_count
+                if training_bad_candidate_count > 0 else 0.0
+            )
             history.append({
                 'epoch': epoch_idx + 1,
                 'loss': epoch_loss,
                 'poisoned_samples': poisoned_sample_count,
                 'candidate_samples': candidate_sample_count,
+                'training_bad_successes': training_bad_success_count,
+                'training_bad_candidates': training_bad_candidate_count,
+                'training_bad_success_rate': training_bad_success_rate,
             })
 
             if log_interval is not None and log_interval > 0 and (epoch_idx + 1) % log_interval == 0:
@@ -303,7 +354,9 @@ class BackdoorAttack:
                     f'[Backdoor] epoch={epoch_idx + 1}/{epochs}, '
                     f'loss={epoch_loss:.6f}, '
                     f'poisoned={poisoned_sample_count}, '
-                    f'candidates={candidate_sample_count}'
+                    f'candidates={candidate_sample_count}, '
+                    f'train_bad_success_rate={training_bad_success_rate:.4f}, '
+                    f'train_bad_success={training_bad_success_count}/{training_bad_candidate_count}'
                 )
 
         return {
@@ -394,6 +447,7 @@ class BackdoorAttack:
             'output_dir': str(output_path),
             'evaluated_candidates': evaluated_count,
             'successful_attacks': success_count,
+            'attack_success_rate': (success_count / evaluated_count) if evaluated_count > 0 else 0.0,
             'saved_images': saved_count,
             'target_label': tuple(float(v) for v in target_label),
             'source_filter': source_filter,
