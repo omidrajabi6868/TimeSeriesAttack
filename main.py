@@ -112,11 +112,20 @@ def main():
         vae_history = backdoor_attack.fit_vae(
             train_loader=train_loader,
             epochs=5,
-            learning_rate=1e-3,
+            learning_rate=1e-4,
             beta=1.0,
             log_interval=1,
+            kl_warmup_epochs=3,
+            logvar_clamp=(-8.0, 8.0),
+            grad_clip_norm=1.0,
         )
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
+        vae_preview = backdoor_attack.save_vae_reconstructions(
+            data_loader=val_loader,
+            output_dir='backups/vae_reconstruction_preview/val',
+            max_images=64,
+        )
+        print(f'vae_reconstruction_preview: {vae_preview}')
 
         latent_space = backdoor_attack.build_latent_space(train_loader)
         latent_vectors = latent_space['latents']

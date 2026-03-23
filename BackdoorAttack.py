@@ -18,7 +18,17 @@ class BackdoorAttack:
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         self.optimizer = None
 
-    def fit_vae(self, train_loader, epochs=5, learning_rate=1e-3, beta=1.0, log_interval=1):
+    def fit_vae(
+        self,
+        train_loader,
+        epochs=5,
+        learning_rate=1e-3,
+        beta=1.0,
+        log_interval=1,
+        kl_warmup_epochs=0,
+        logvar_clamp=(-10.0, 10.0),
+        grad_clip_norm=1.0,
+    ):
         self.vae.train()
         optimizer = torch.optim.Adam(self.vae.parameters(), lr=learning_rate)
         history = []
@@ -31,13 +41,28 @@ class BackdoorAttack:
             for data, _ in train_loader:
                 data = data.to(self.device)
                 x_hat, mu, logvar = self.vae(data)
+                if logvar_clamp is not None:
+                    logvar = torch.clamp(logvar, min=logvar_clamp[0], max=logvar_clamp[1])
 
                 recon_loss = torch.nn.functional.mse_loss(x_hat, data)
                 kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = recon_loss + beta * kl
+                beta_t = beta
+                if kl_warmup_epochs and kl_warmup_epochs > 0:
+                    beta_t = beta * min(1.0, (epoch_idx + 1) / float(kl_warmup_epochs))
+                loss = recon_loss + beta_t * kl
+
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        f'Non-finite VAE loss detected. '
+                        f'recon={recon_loss.item()}, kl={kl.item()}, '
+                        f'mu_range=({mu.min().item()}, {mu.max().item()}), '
+                        f'logvar_range=({logvar.min().item()}, {logvar.max().item()})'
+                    )
 
                 optimizer.zero_grad()
                 loss.backward()
+                if grad_clip_norm is not None and grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
 
                 epoch_losses.append(float(loss.item()))
@@ -57,10 +82,48 @@ class BackdoorAttack:
                     f"[VAE] epoch={epoch_idx + 1}/{epochs}, "
                     f"loss={metrics['loss']:.6f}, "
                     f"recon={metrics['reconstruction_loss']:.6f}, "
-                    f"kl={metrics['kl_loss']:.6f}"
+                    f"kl={metrics['kl_loss']:.6f}, "
+                    f"mu_mean={float(mu.mean().item()):.6f}, "
+                    f"mu_std={float(mu.std().item()):.6f}, "
+                    f"logvar_mean={float(logvar.mean().item()):.6f}, "
+                    f"logvar_std={float(logvar.std().item()):.6f}, "
+                    f"beta={float(beta_t):.4f}"
                 )
 
         return history
+
+    def save_vae_reconstructions(self, data_loader, output_dir='backups/vae_reconstruction_preview', max_images=32):
+        self.vae.eval()
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        saved = 0
+        with torch.no_grad():
+            for data, _ in data_loader:
+                data = data.to(self.device)
+                x_hat, _, _ = self.vae(data)
+
+                batch_size = data.shape[0]
+                for idx in range(batch_size):
+                    if saved >= max_images:
+                        break
+
+                    original = data[idx].detach().cpu().clamp(0.0, 1.0)
+                    recon = x_hat[idx].detach().cpu().clamp(0.0, 1.0)
+                    comparison = torch.cat([original, recon], dim=2)
+
+                    image_np = (comparison.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+                    Image.fromarray(image_np).save(output_path / f'val_reconstruction_{saved:04d}.png')
+                    saved += 1
+
+                if saved >= max_images:
+                    break
+
+        return {
+            'output_dir': str(output_path),
+            'saved_images': int(saved),
+            'layout': 'left=original,right=reconstruction',
+        }
 
     def build_latent_space(self, data_loader):
         self.vae.eval()
