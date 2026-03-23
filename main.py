@@ -2,6 +2,8 @@ import numpy as np
 from Dataset.DataManagement import ImageDataSet
 from ImageClassification import ClassificationBase
 from AdversarialAttack import AdversarialAttack
+from BackdoorAttack import BackdoorAttack
+from Network.ImageVAE import ImageVAE
 
 
 def main():
@@ -96,11 +98,61 @@ def main():
         print('Saved trigger visualizations to trigger_visualization/')
 
     if task == 'backdoor_attack':
-        ## TODO: Learn latent space for the dataset on image data
+        vae_model = ImageVAE(
+            image_channels=3,
+            image_size=(image_size[1], image_size[0]),
+            latent_dim=64,
+        )
+        backdoor_attack = BackdoorAttack(
+            model=classification.model,
+            vae_model=vae_model,
+        )
 
-        ## TODO: Cluster the latent space to several cluster: chanchable
+        # Learn latent space for the dataset on image data.
+        vae_history = backdoor_attack.fit_vae(
+            train_loader=train_loader,
+            epochs=5,
+            learning_rate=1e-3,
+            beta=1.0,
+            log_interval=1,
+        )
+        print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
 
-        ## TODO: Learn one of the clusters with a balanced good-good and bad cotaining examples as backdoor samples
+        latent_space = backdoor_attack.build_latent_space(train_loader)
+        latent_vectors = latent_space['latents']
+        latent_labels = latent_space['labels']
+
+        # Cluster the latent space to several clusters (adjustable).
+        clustering = backdoor_attack.cluster_latent_space(
+            latent_vectors=latent_vectors,
+            num_clusters=6,
+            max_iters=50,
+        )
+        print(f"cluster_count: {clustering['num_clusters']}")
+
+        # Learn one cluster with a balanced [good, good] and bad-containing mix as backdoor samples.
+        cluster_selection = backdoor_attack.select_balanced_cluster(
+            cluster_assignments=clustering['assignments'],
+            labels=latent_labels,
+            min_samples=16,
+        )
+        print(f"selected_cluster: {cluster_selection['selected_cluster']}")
+        print(f"cluster_stats: {cluster_selection['cluster_stats']}")
+
+        backdoor_result = backdoor_attack.learned_backdoor(
+            data_loader=train_loader,
+            cluster_latents=latent_vectors,
+            cluster_assignments=clustering['assignments'],
+            selected_cluster=cluster_selection['selected_cluster'],
+            target_label=(1.0, 1.0),
+            # Poison only bad-containing samples that fall inside the selected latent cluster.
+            source_filter='bad',
+            epochs=5,
+            learning_rate=1e-4,
+            epsilon=0.75,
+            log_interval=1,
+        )
+        print(f'backdoor_training_result: {backdoor_result}')
 
 
 
