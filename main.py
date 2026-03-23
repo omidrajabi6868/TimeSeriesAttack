@@ -1,9 +1,11 @@
 import numpy as np
 from Dataset.DataManagement import ImageDataSet
 from ImageClassification import ClassificationBase
+from AdversarialAttack import AdversarialAttack
 
 
 def main():
+    task = 'adversarial_attack'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
@@ -46,50 +48,61 @@ def main():
     #     f'test_others_accuracy: {test_metrics["others_accuracy"]}'
     # )
 
-    natural_trigger = dataset.find_natural_trigger_candidates(
-        window_size=(64, 32),
-        stride=8,
-        top_k=10,
-        max_samples_per_group=2000,
-    )
-    print('Natural trigger candidates (bad-containing vs [good, good]):')
-    for candidate in natural_trigger['top_candidates']:
-        print(candidate)
+    if task == "adversarial_attack":
+        adv_attack = AdversarialAttack(classification.model)
+        natural_trigger = dataset.find_natural_trigger_candidates(
+            window_size=(64, 32),
+            stride=8,
+            top_k=10,
+            max_samples_per_group=2000,
+        )
+        print('Natural trigger candidates (bad-containing vs [good, good]):')
+        for candidate in natural_trigger['top_candidates']:
+            print(candidate)
 
-    initial_backdoor_eval = classification.evaluate_backdoor_success(
-        test_loader=test_loader,
-        trigger_box=natural_trigger['top_candidates'][0],
-        target_label=(1.0, 1.0),
-        source_only_bad=True,
-    )
-    print(f'initial_backdoor_eval: {initial_backdoor_eval}')
+        initial_attack_eval = adv_attack.evaluate_attack_success(
+            test_loader=test_loader,
+            trigger_box=natural_trigger['top_candidates'][0],
+            target_label=(1.0, 1.0),
+            source_only_bad=True,
+        )
+        print(f'initial_adversarial_eval: {initial_attack_eval}')
 
-    learned_trigger = classification.learn_universal_trigger(
-        data_loader=train_loader,
-        trigger_box=natural_trigger['top_candidates'][0],
-        target_label=(1.0, 1.0),
-        source_filter='bad',
-        steps=100,
-        learning_rate=0.01,
-    )
+        learned_trigger = adv_attack.learn_universal_trigger(
+            data_loader=train_loader,
+            trigger_box=natural_trigger['top_candidates'][0],
+            target_label=(1.0, 1.0),
+            source_filter='bad',
+            steps=100,
+            learning_rate=0.01,
+        )
 
-    learned_backdoor_eval = classification.evaluate_backdoor_success(
-        test_loader=test_loader,
-        trigger_box=natural_trigger['top_candidates'][0],
-        trigger_patch=learned_trigger['patch'],
-        target_label=(1.0, 1.0),
-        source_only_bad=True,
-    )
-    print(f'learned_backdoor_eval: {learned_backdoor_eval}')
+        learned_backdoor_eval = adv_attack.evaluate_attack_success(
+            test_loader=test_loader,
+            trigger_box=natural_trigger['top_candidates'][0],
+            trigger_patch=learned_trigger['patch'],
+            target_label=(1.0, 1.0),
+            source_only_bad=True,
+        )
+        print(f'learned_adversarial_eval: {learned_backdoor_eval}')
 
-    dataset.save_trigger_visualizations(
-        trigger_analysis=natural_trigger,
-        output_dir='backups/trigger_visualization',
-        num_examples=4,
-        trigger_box=natural_trigger['top_candidates'][0],
-        trigger_delta=learned_trigger['patch'],
-    )
-    print('Saved trigger visualizations to trigger_visualization/')
+        dataset.save_trigger_visualizations(
+            trigger_analysis=natural_trigger,
+            output_dir='backups/trigger_visualization',
+            num_examples=4,
+            trigger_box=natural_trigger['top_candidates'][0],
+            trigger_delta=learned_trigger['patch'],
+        )
+        print('Saved trigger visualizations to trigger_visualization/')
+
+    if task == 'backdoor_attack':
+        ## TODO: Learn latent space for the dataset on image data
+
+        ## TODO: Cluster the latent space to several cluster: chanchable
+
+        ## TODO: Learn one of the clusters with a balanced good-good and bad cotaining examples as backdoor samples
+
+
 
 if __name__ == "__main__":
     main()
