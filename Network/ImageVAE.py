@@ -109,8 +109,3 @@ class ImageVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         x_hat = self.decode(z)
         return x_hat, mu, logvar
-
-def train_vae(train_loader, val_loader, model):
-
-    
-    return 
