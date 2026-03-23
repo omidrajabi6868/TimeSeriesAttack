@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from pathlib import Path
 from PIL import Image
+import json
 
 
 class BackdoorAttack:
@@ -262,28 +263,89 @@ class BackdoorAttack:
             'cluster_stats': cluster_stats,
         }
 
+    @staticmethod
+    def infer_cluster_epsilon(
+        cluster_latents,
+        cluster_assignments,
+        selected_cluster,
+        quantile=0.9,
+        margin_scale=1.0,
+        min_epsilon=1e-6,
+    ):
+        if not (0.0 < quantile <= 1.0):
+            raise ValueError('quantile must be in (0, 1].')
+
+        selected_latents = cluster_latents[cluster_assignments == selected_cluster]
+        if selected_latents.shape[0] == 0:
+            raise ValueError('selected_cluster has no assigned latent vectors.')
+
+        cluster_center = selected_latents.mean(dim=0)
+        distances = torch.norm(selected_latents - cluster_center.unsqueeze(0), dim=1)
+        epsilon = torch.quantile(distances, q=quantile) * margin_scale
+        epsilon = torch.clamp(epsilon, min=min_epsilon)
+
+        return {
+            'epsilon': float(epsilon.item()),
+            'center': cluster_center,
+            'distance_quantile': float(torch.quantile(distances, q=quantile).item()),
+            'mean_distance': float(distances.mean().item()),
+            'max_distance': float(distances.max().item()),
+            'cluster_size': int(selected_latents.shape[0]),
+            'quantile': float(quantile),
+            'margin_scale': float(margin_scale),
+        }
+
     def learned_backdoor(
         self,
         data_loader,
         cluster_latents,
         cluster_assignments,
         selected_cluster,
+        cluster_centroids=None,
+        validation_loader=None,
         target_label=(1.0, 1.0),
         source_filter='bad',
         epochs=5,
         learning_rate=1e-4,
-        epsilon=0.5,
+        epsilon=None,
+        epsilon_quantile=0.9,
+        epsilon_margin_scale=1.0,
+        epsilon_min=1e-6,
         log_interval=1,
+        checkpoint_dir='backups/backdoor_checkpoints',
     ):
         self.model.train()
         self.vae.eval()
 
         target_tensor_base = torch.tensor(target_label, dtype=torch.float32, device=self.device)
-        selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
+        epsilon_summary = None
+        if epsilon is None:
+            epsilon_summary = self.infer_cluster_epsilon(
+                cluster_latents=cluster_latents,
+                cluster_assignments=cluster_assignments,
+                selected_cluster=selected_cluster,
+                quantile=epsilon_quantile,
+                margin_scale=epsilon_margin_scale,
+                min_epsilon=epsilon_min,
+            )
+            epsilon = epsilon_summary['epsilon']
+            selected_cluster_center = epsilon_summary['center'].to(self.device)
+        else:
+            selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
+
+        cluster_centers = None
+        if cluster_centroids is not None:
+            cluster_centers = cluster_centroids.to(self.device)
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        checkpoint_path = Path(checkpoint_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         history = []
+        best_score = float('-inf')
+        if epsilon_summary is not None:
+            print(f"[Backdoor] auto epsilon summary: {epsilon_summary}")
+
         for epoch_idx in range(epochs):
             epoch_losses = []
             poisoned_sample_count = 0
@@ -349,6 +411,45 @@ class BackdoorAttack:
                 'training_bad_success_rate': training_bad_success_rate,
             })
 
+            validation_metrics = None
+            if validation_loader is not None:
+                validation_metrics = self.evaluate_cluster_backdoor(
+                    data_loader=validation_loader,
+                    selected_cluster=selected_cluster,
+                    selected_cluster_center=selected_cluster_center,
+                    cluster_centroids=cluster_centers,
+                    target_label=target_label,
+                    epsilon=epsilon,
+                )
+                history[-1]['validation'] = validation_metrics
+
+                score = (
+                    validation_metrics['selected_cluster_bad_attack_success_rate']
+                    + validation_metrics['non_backdoor_cluster_clean_accuracy']
+                )
+                if score > best_score:
+                    best_score = score
+                    self._save_backdoor_checkpoint(
+                        checkpoint_file=checkpoint_path / 'best_backdoor_checkpoint.pth',
+                        epoch=epoch_idx + 1,
+                        selected_cluster=selected_cluster,
+                        target_label=target_label,
+                        epsilon=epsilon,
+                        history=history,
+                    )
+
+            self._save_backdoor_checkpoint(
+                checkpoint_file=checkpoint_path / 'last_backdoor_checkpoint.pth',
+                epoch=epoch_idx + 1,
+                selected_cluster=selected_cluster,
+                target_label=target_label,
+                epsilon=epsilon,
+                history=history,
+            )
+
+            with open(checkpoint_path / 'backdoor_history.json', 'w', encoding='utf-8') as history_file:
+                json.dump(history, history_file, indent=2)
+
             if log_interval is not None and log_interval > 0 and (epoch_idx + 1) % log_interval == 0:
                 print(
                     f'[Backdoor] epoch={epoch_idx + 1}/{epochs}, '
@@ -358,6 +459,21 @@ class BackdoorAttack:
                     f'train_bad_success_rate={training_bad_success_rate:.4f}, '
                     f'train_bad_success={training_bad_success_count}/{training_bad_candidate_count}'
                 )
+                if validation_metrics is not None:
+                    print(
+                        f"[Backdoor][Val] selected_cluster_bad_asr="
+                        f"{validation_metrics['selected_cluster_bad_attack_success_rate']:.4f} "
+                        f"({validation_metrics['selected_cluster_bad_successes']}/"
+                        f"{validation_metrics['selected_cluster_bad_candidates']}), "
+                        f"selected_cluster_bad_clean_acc="
+                        f"{validation_metrics['selected_cluster_bad_clean_accuracy']:.4f}, "
+                        f"selected_cluster_good_clean_acc="
+                        f"{validation_metrics['selected_cluster_good_clean_accuracy']:.4f}, "
+                        f"non_backdoor_cluster_clean_acc="
+                        f"{validation_metrics['non_backdoor_cluster_clean_accuracy']:.4f}, "
+                        f"non_backdoor_bad_clean_acc="
+                        f"{validation_metrics['non_backdoor_bad_clean_accuracy']:.4f}"
+                    )
 
         return {
             'history': history,
@@ -365,7 +481,122 @@ class BackdoorAttack:
             'target_label': tuple(float(v) for v in target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
+            'epsilon_source': 'auto_from_cluster' if epsilon_summary is not None else 'manual',
+            'epsilon_summary': epsilon_summary,
+            'checkpoint_dir': str(checkpoint_path),
         }
+
+    def evaluate_cluster_backdoor(
+        self,
+        data_loader,
+        selected_cluster,
+        selected_cluster_center,
+        cluster_centroids=None,
+        target_label=(1.0, 1.0),
+        epsilon=0.5,
+    ):
+        self.model.eval()
+        self.vae.eval()
+        target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device)
+
+        selected_cluster_bad_candidates = 0
+        selected_cluster_bad_successes = 0
+        selected_cluster_bad_clean_correct = 0
+        selected_cluster_good_total = 0
+        selected_cluster_good_correct = 0
+        non_backdoor_total = 0
+        non_backdoor_correct = 0
+        non_backdoor_bad_total = 0
+        non_backdoor_bad_correct = 0
+
+        with torch.no_grad():
+            for data, target in data_loader:
+                data = data.to(self.device)
+                target = target.float().to(self.device)
+
+                latent_mu, _ = self.vae.encode(data)
+                selected_dist = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
+                in_selected_by_radius = selected_dist <= epsilon
+
+                if cluster_centroids is not None:
+                    distances_to_centroids = torch.cdist(latent_mu, cluster_centroids, p=2)
+                    cluster_ids = torch.argmin(distances_to_centroids, dim=1)
+                    in_selected_cluster = in_selected_by_radius & (cluster_ids == int(selected_cluster))
+                    non_backdoor_cluster_mask = cluster_ids != int(selected_cluster)
+                else:
+                    in_selected_cluster = in_selected_by_radius
+                    non_backdoor_cluster_mask = ~in_selected_cluster
+
+                bad_mask = (target == 0).any(dim=1)
+                good_good_mask = (target[:, 0] == 1) & (target[:, 1] == 1)
+
+                outputs = self.model(data)
+                preds = (outputs > 0).float()
+                clean_correct_mask = (preds == target).all(dim=1)
+                attack_success_mask = (preds == target_tensor.unsqueeze(0)).all(dim=1)
+
+                selected_bad_mask = in_selected_cluster & bad_mask
+                selected_good_mask = in_selected_cluster & good_good_mask
+                non_backdoor_bad_mask = non_backdoor_cluster_mask & bad_mask
+
+                selected_cluster_bad_candidates += int(selected_bad_mask.sum().item())
+                selected_cluster_bad_successes += int((selected_bad_mask & attack_success_mask).sum().item())
+                selected_cluster_bad_clean_correct += int((selected_bad_mask & clean_correct_mask).sum().item())
+
+                selected_cluster_good_total += int(selected_good_mask.sum().item())
+                selected_cluster_good_correct += int((selected_good_mask & clean_correct_mask).sum().item())
+
+                non_backdoor_total += int(non_backdoor_cluster_mask.sum().item())
+                non_backdoor_correct += int((non_backdoor_cluster_mask & clean_correct_mask).sum().item())
+
+                non_backdoor_bad_total += int(non_backdoor_bad_mask.sum().item())
+                non_backdoor_bad_correct += int((non_backdoor_bad_mask & clean_correct_mask).sum().item())
+
+        return {
+            'selected_cluster': int(selected_cluster),
+            'selected_cluster_bad_candidates': selected_cluster_bad_candidates,
+            'selected_cluster_bad_successes': selected_cluster_bad_successes,
+            'selected_cluster_bad_attack_success_rate': (
+                selected_cluster_bad_successes / selected_cluster_bad_candidates
+                if selected_cluster_bad_candidates > 0 else 0.0
+            ),
+            'selected_cluster_bad_clean_accuracy': (
+                selected_cluster_bad_clean_correct / selected_cluster_bad_candidates
+                if selected_cluster_bad_candidates > 0 else 0.0
+            ),
+            'selected_cluster_good_count': selected_cluster_good_total,
+            'selected_cluster_good_clean_accuracy': (
+                selected_cluster_good_correct / selected_cluster_good_total
+                if selected_cluster_good_total > 0 else 0.0
+            ),
+            'non_backdoor_cluster_count': non_backdoor_total,
+            'non_backdoor_cluster_clean_accuracy': (
+                non_backdoor_correct / non_backdoor_total
+                if non_backdoor_total > 0 else 0.0
+            ),
+            'non_backdoor_bad_count': non_backdoor_bad_total,
+            'non_backdoor_bad_clean_accuracy': (
+                non_backdoor_bad_correct / non_backdoor_bad_total
+                if non_backdoor_bad_total > 0 else 0.0
+            ),
+            'target_label': tuple(float(v) for v in target_label),
+            'epsilon': float(epsilon),
+        }
+
+    def _save_backdoor_checkpoint(self, checkpoint_file, epoch, selected_cluster, target_label, epsilon, history):
+        torch.save(
+            {
+                'epoch': int(epoch),
+                'model_state_dict': self.model.state_dict(),
+                'vae_state_dict': self.vae.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer is not None else None,
+                'selected_cluster': int(selected_cluster),
+                'target_label': tuple(float(v) for v in target_label),
+                'epsilon': float(epsilon),
+                'history': history,
+            },
+            checkpoint_file,
+        )
 
     def save_successful_cluster_attacks(
         self,

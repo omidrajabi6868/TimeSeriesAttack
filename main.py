@@ -158,15 +158,34 @@ def main():
             cluster_latents=latent_vectors,
             cluster_assignments=clustering['assignments'],
             selected_cluster=cluster_selection['selected_cluster'],
+            cluster_centroids=clustering['centroids'],
+            validation_loader=val_loader,
             target_label=(1.0, 1.0),
             # Poison only bad-containing samples that fall inside the selected latent cluster.
             source_filter='bad',
             epochs=5,
             learning_rate=1e-4,
-            epsilon=0.75,
+            epsilon=None,
+            epsilon_quantile=0.9,
+            epsilon_margin_scale=1.0,
             log_interval=1,
+            checkpoint_dir='backups/backdoor_checkpoints',
         )
         print(f'backdoor_training_result: {backdoor_result}')
+        learned_epsilon = float(backdoor_result['epsilon'])
+
+        selected_cluster_center = latent_vectors[
+            clustering['assignments'] == cluster_selection['selected_cluster']
+        ].mean(dim=0).to(backdoor_attack.device)
+        backdoor_val_metrics = backdoor_attack.evaluate_cluster_backdoor(
+            data_loader=val_loader,
+            selected_cluster=cluster_selection['selected_cluster'],
+            selected_cluster_center=selected_cluster_center,
+            cluster_centroids=clustering['centroids'].to(backdoor_attack.device),
+            target_label=(1.0, 1.0),
+            epsilon=learned_epsilon,
+        )
+        print(f'backdoor_val_metrics: {backdoor_val_metrics}')
 
         val_cluster_visualization = backdoor_attack.save_successful_cluster_attacks(
             data_loader=val_loader,
@@ -176,7 +195,7 @@ def main():
             output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
             target_label=(1.0, 1.0),
             source_filter='bad',
-            epsilon=0.75,
+            epsilon=learned_epsilon,
             max_images=200,
         )
         print(f'backdoor_val_visualization: {val_cluster_visualization}')
