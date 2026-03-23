@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+from pathlib import Path
+from PIL import Image
 
 
 class BackdoorAttack:
@@ -248,3 +250,95 @@ class BackdoorAttack:
             'source_filter': source_filter,
             'epsilon': float(epsilon),
         }
+
+    def save_successful_cluster_attacks(
+        self,
+        data_loader,
+        cluster_latents,
+        cluster_assignments,
+        selected_cluster,
+        output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
+        target_label=(1.0, 1.0),
+        source_filter='bad',
+        epsilon=0.5,
+        max_images=100,
+    ):
+        self.model.eval()
+        self.vae.eval()
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device)
+        selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
+
+        saved_count = 0
+        evaluated_count = 0
+        success_count = 0
+
+        with torch.no_grad():
+            for batch_idx, (data, target) in enumerate(data_loader):
+                data = data.to(self.device)
+                target = target.float().to(self.device)
+
+                latent_mu, _ = self.vae.encode(data)
+                distances = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
+                in_cluster_mask = distances <= epsilon
+
+                if source_filter == 'bad':
+                    source_mask = (target == 0).any(dim=1)
+                elif source_filter == 'good':
+                    source_mask = (target[:, 0] == 1) & (target[:, 1] == 1)
+                elif source_filter == 'all':
+                    source_mask = torch.ones(target.shape[0], dtype=torch.bool, device=self.device)
+                else:
+                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+
+                candidate_mask = in_cluster_mask & source_mask
+                if not candidate_mask.any():
+                    continue
+
+                outputs = self.model(data)
+                preds = (outputs > 0).float()
+                attack_success_mask = (preds == target_tensor.unsqueeze(0)).all(dim=1)
+                successful_mask = candidate_mask & attack_success_mask
+
+                evaluated_count += int(candidate_mask.sum().item())
+                success_count += int(successful_mask.sum().item())
+
+                successful_indices = torch.where(successful_mask)[0].tolist()
+                for sample_idx in successful_indices:
+                    if saved_count >= max_images:
+                        break
+                    image_tensor = data[sample_idx].detach().cpu()
+                    label_list = [int(v) for v in target[sample_idx].detach().cpu().tolist()]
+                    pred_list = [int(v) for v in preds[sample_idx].detach().cpu().tolist()]
+                    distance = float(distances[sample_idx].item())
+                    save_name = (
+                        f'b{batch_idx:04d}_i{sample_idx:03d}'
+                        f'_true_{label_list[0]}{label_list[1]}'
+                        f'_pred_{pred_list[0]}{pred_list[1]}'
+                        f'_dist_{distance:.4f}.png'
+                    )
+                    self._save_tensor_image(image_tensor, output_path / save_name)
+                    saved_count += 1
+
+                if saved_count >= max_images:
+                    break
+
+        return {
+            'selected_cluster': int(selected_cluster),
+            'output_dir': str(output_path),
+            'evaluated_candidates': evaluated_count,
+            'successful_attacks': success_count,
+            'saved_images': saved_count,
+            'target_label': tuple(float(v) for v in target_label),
+            'source_filter': source_filter,
+            'epsilon': float(epsilon),
+        }
+
+    @staticmethod
+    def _save_tensor_image(image_tensor, save_path):
+        image_np = image_tensor.permute(1, 2, 0).numpy()
+        image_uint8 = np.clip(image_np * 255.0, 0.0, 255.0).astype(np.uint8)
+        Image.fromarray(image_uint8).save(save_path)

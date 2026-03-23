@@ -154,6 +154,19 @@ def main():
         )
         print(f'backdoor_training_result: {backdoor_result}')
 
+        val_cluster_visualization = backdoor_attack.save_successful_cluster_attacks(
+            data_loader=val_loader,
+            cluster_latents=latent_vectors,
+            cluster_assignments=clustering['assignments'],
+            selected_cluster=cluster_selection['selected_cluster'],
+            output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
+            target_label=(1.0, 1.0),
+            source_filter='bad',
+            epsilon=0.75,
+            max_images=200,
+        )
+        print(f'backdoor_val_visualization: {val_cluster_visualization}')
+
 
 
 if __name__ == "__main__":
