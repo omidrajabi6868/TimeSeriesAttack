@@ -113,8 +113,8 @@ def main():
         print('VAE encoding started: ')
         vae_history = backdoor_attack.fit_vae(
             train_loader=train_loader,
-            epochs=100,
-            learning_rate=4e-5,
+            epochs=300,
+            learning_rate=1e-5,
             beta=1.0,
             log_interval=1,
             kl_warmup_epochs=3,
@@ -122,7 +122,7 @@ def main():
             grad_clip_norm=1.0,
             preview_loader=val_loader,
             preview_output_dir='backups/vae_reconstruction_preview/train_epochs',
-            preview_max_images=5,
+            preview_max_images=1,
             preview_interval=1,
         )
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
@@ -142,11 +142,11 @@ def main():
         clustering = backdoor_attack.cluster_latent_space(
             latent_vectors=latent_vectors,
             num_clusters=10,
-            max_iters=200,
+            max_iters=300,
         )
         print(f"cluster_count: {clustering['num_clusters']}")
 
-        # Learn one cluster with a balanced [good, good] and bad-containing mix as backdoor samples.
+        # Learn one cluster with a balanced good and bad mix as backdoor samples.
         cluster_selection = backdoor_attack.select_balanced_cluster(
             cluster_assignments=clustering['assignments'],
             labels=latent_labels,
@@ -163,7 +163,7 @@ def main():
             cluster_centroids=clustering['centroids'],
             validation_loader=val_loader,
             target_label=1.0,
-            # Poison only bad-containing samples that fall inside the selected latent cluster.
+            # Poison only bad samples that fall inside the selected latent cluster.
             source_filter='bad',
             epochs=50,
             learning_rate=1e-4,
