@@ -166,10 +166,10 @@ class ImageDataSet(TorchDataset):
                                         top_k=5,
                                         max_samples_per_group=None):
         labels_np = np.array(self.labels)
-        good_indices = (labels_np == 1)
-        bad_indices = (labels_np == 0)
+        good_indices = np.where(labels_np == 1)[0]
+        bad_indices = np.where(labels_np == 0)[0]
 
-        if len(good_indices) == 0 or len(bad_indices) == 0:
+        if good_indices.size == 0 or bad_indices.size == 0:
             raise ValueError('Both good and bad samples are required for trigger analysis.')
 
         if max_samples_per_group is not None:
@@ -183,8 +183,8 @@ class ImageDataSet(TorchDataset):
         candidates = self._top_windows(diff_map, window_size=window_size, stride=stride, top_k=top_k)
 
         return {
-            'good_count': int(len(good_indices)),
-            'bad_count': int(len(bad_indices)),
+            'good_count': int(good_indices.size),
+            'bad_count': int(bad_indices.size),
             'window_size': window_size,
             'stride': stride,
             'top_candidates': candidates,
@@ -258,8 +258,8 @@ class ImageDataSet(TorchDataset):
         self._save_rgb_image(trigger_analysis['mean_bad'], os.path.join(output_dir, 'mean_bad.png'))
 
         labels_np = np.array(self.labels)
-        good_indices = np.where((labels_np[:, 0] == 1) & (labels_np[:, 1] == 1))[0][:num_examples]
-        bad_indices = np.where((labels_np == 0).any(axis=1))[0][:num_examples]
+        good_indices = np.where(labels_np == 1)[0][:num_examples]
+        bad_indices = np.where(labels_np == 0)[0][:num_examples]
 
         selected_box = trigger_box if trigger_box is not None else trigger_analysis['top_candidates'][0]
 
