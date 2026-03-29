@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from typing import Callable, Optional
 from Network import ClassificationModels

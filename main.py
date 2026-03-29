@@ -21,7 +21,7 @@ def main():
     for split_name, split_info in split_stats.items():
         print(f'{split_name} split size: {split_info["size"]}')
         print(f'{split_name} counts: {split_info["counts"]}')
-        print(f'{split_name} contains_bad_ratio: {split_info["contains_bad_ratio"]:.4f}')
+        print(f'{split_name} bad_ratio: {split_info["bad_ratio"]:.4f}')
 
     classification = ClassificationBase(
         model_name='ResNet18', 
@@ -29,7 +29,7 @@ def main():
         checkpoint_dir='backups'
     )
 
-    # classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
+    classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
 
     # Resume example:
     # classification.train_model(
@@ -42,18 +42,18 @@ def main():
 
     classification.load_checkpoint("backups/best_checkpoint.pth")
 
-    # test_metrics = classification.evaluate_model(test_loader=test_loader)
-    # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
-    # print(
-    #     'test_good_good_accuracy: '
-    #     f'{test_metrics["good_good_accuracy"]}, '
-    #     f'test_others_accuracy: {test_metrics["others_accuracy"]}'
-    # )
+    test_metrics = classification.evaluate_model(test_loader=test_loader)
+    print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    print(
+        'test_good_accuracy: '
+        f'{test_metrics["good_accuracy"]}, '
+        f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
+    )
 
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(64, 32),
+            window_size=(64, 16),
             stride=8,
             top_k=10,
             max_samples_per_group=2000,
@@ -75,7 +75,7 @@ def main():
             trigger_box=natural_trigger['top_candidates'][0],
             target_label=(1.0, 1.0),
             source_filter='bad',
-            steps=100,
+            steps=200,
             learning_rate=0.001,
         )
 
@@ -112,23 +112,23 @@ def main():
         # Learn latent space for the dataset on image data.
         vae_history = backdoor_attack.fit_vae(
             train_loader=train_loader,
-            epochs=5,
-            learning_rate=1e-4,
+            epochs=100,
+            learning_rate=4e-5,
             beta=1.0,
             log_interval=1,
             kl_warmup_epochs=3,
-            logvar_clamp=(-8.0, 8.0),
+            logvar_clamp=(-50.0, 50.0),
             grad_clip_norm=1.0,
             preview_loader=val_loader,
             preview_output_dir='backups/vae_reconstruction_preview/train_epochs',
-            preview_max_images=32,
+            preview_max_images=5,
             preview_interval=1,
         )
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
         vae_preview = backdoor_attack.save_vae_reconstructions(
             data_loader=val_loader,
             output_dir='backups/vae_reconstruction_preview/val',
-            max_images=64,
+            max_images=10,
         )
         print(f'vae_reconstruction_preview: {vae_preview}')
 
@@ -139,8 +139,8 @@ def main():
         # Cluster the latent space to several clusters (adjustable).
         clustering = backdoor_attack.cluster_latent_space(
             latent_vectors=latent_vectors,
-            num_clusters=6,
-            max_iters=50,
+            num_clusters=10,
+            max_iters=200,
         )
         print(f"cluster_count: {clustering['num_clusters']}")
 
@@ -163,7 +163,7 @@ def main():
             target_label=(1.0, 1.0),
             # Poison only bad-containing samples that fall inside the selected latent cluster.
             source_filter='bad',
-            epochs=5,
+            epochs=50,
             learning_rate=1e-4,
             epsilon=None,
             epsilon_quantile=0.9,

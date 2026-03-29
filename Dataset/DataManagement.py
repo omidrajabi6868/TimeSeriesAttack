@@ -98,30 +98,28 @@ class ImageDataSet(TorchDataset):
             raise ValueError('Expected torch.utils.data.Subset for statistics generation.')
 
         label_names = {
-            (1, 1): '[good, good]',
-            (1, 0): '[good, bad]',
-            (0, 1): '[bad, good]',
-            (0, 0): '[bad, bad]',
+            1: 'good',
+            0: 'bad',
         }
         counts = {name: 0 for name in label_names.values()}
         total = len(subset.indices)
 
         for idx in subset.indices:
-            label_pair = tuple(self.labels[idx])
-            label_name = label_names[label_pair]
+            label = self.labels[idx]
+            label_name = label_names[label]
             counts[label_name] += 1
 
         ratios = {
             key: (value / total if total else 0.0)
             for key, value in counts.items()
         }
-        bad_ratio = 1.0 - ratios['[good, good]']
+        bad_ratio = 1.0 - ratios['good']
 
         return {
             'size': total,
             'counts': counts,
             'ratios': ratios,
-            'contains_bad_ratio': bad_ratio,
+            'bad_ratio': bad_ratio,
         }
 
     def _random_indices(self, train_ratio, val_ratio, seed):
@@ -139,7 +137,7 @@ class ImageDataSet(TorchDataset):
 
     def _stratified_indices(self, train_ratio, val_ratio, seed):
         labels_np = np.array(self.labels)
-        has_bad = (labels_np == 0).any(axis=1).astype(int)
+        has_bad = (labels_np == 0)
 
         rng = np.random.default_rng(seed)
         train_indices = []
@@ -344,14 +342,11 @@ class ImageDataSet(TorchDataset):
         with open(label_path, 'r') as f:
             for line in f:
                 splited_line = line.strip().split(',')
-                if len(splited_line) < 3:
-                    continue
                 if splited_line[1].lower() not in ['good', 'bad'] or splited_line[2].lower() not in ['good', 'bad']:
                     pass
                 else:
                     first_label = 1 if splited_line[1].lower()=='good' else 0
-                    second_label = 1 if splited_line[2].lower()=='good' else 0
-                    labels.append([first_label, second_label])
+                    labels.append(first_label)
                     image_path = splited_line[0]
                     if not os.path.isabs(image_path):
                         image_path = os.path.join(os.path.dirname(label_path), image_path)

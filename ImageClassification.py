@@ -30,13 +30,13 @@ class ClassificationBase:
 
     def _build_model(self):
         if self.model_name == 'ResNet18':
-            self.model = ClassificationModels.ResNet('18', 2).model
+            self.model = ClassificationModels.ResNet('18', 1).model
         elif self.model_name == 'ResNet34':
-            self.model = ClassificationModels.ResNet('34', 2).model
+            self.model = ClassificationModels.ResNet('34', 1).model
         elif self.model_name == 'ResNet50':
-            self.model = ClassificationModels.ResNet('50', 2).model
+            self.model = ClassificationModels.ResNet('50', 1).model
         elif self.model_name == 'ResNet101':
-            self.model = ClassificationModels.ResNet('101', 2).model
+            self.model = ClassificationModels.ResNet('101', 1).model
         else:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 
@@ -162,10 +162,11 @@ class ClassificationBase:
             train_loss = []
             self.model.train()
             total_num = 0
-            correct_pairs = 0
+            correct = 0
             for inputs, targets in train_loader:
                 inputs = inputs.to(self.device)
-                targets = targets.float().to(self.device)
+                targets = targets.float().unsqueeze(-1).to(self.device)
+                
 
                 outputs = self.model(inputs)
                 loss = self.cost_function(outputs, targets)
@@ -177,11 +178,11 @@ class ClassificationBase:
                 train_loss.append(loss.item())
                 preds = (outputs > 0).float()
 
-                correct_pairs += (preds == targets).all(dim=1).sum().item()
+                correct += (preds == targets).sum().item()
                 total_num += int(inputs.shape[0])
             
             avg_train_loss = mean(train_loss) if train_loss else 0.0
-            train_acc = (correct_pairs / total_num) * 100 if total_num else 0.0
+            train_acc = (correct / total_num) * 100 if total_num else 0.0
             print(f'Epoch {epoch + 1}: train_loss={avg_train_loss:.5f}, train_accuracy={train_acc:.2f}')
 
 
@@ -214,14 +215,14 @@ class ClassificationBase:
         self.model.eval()
         losses = []
         total_num = 0
-        correct_pairs = 0
-        gg_total = 0
-        gg_correct = 0
-        others_total = 0
-        others_correct = 0
+        correct = 0
+        g_total = 0
+        g_correct = 0
+        bad_total = 0
+        bad_correct = 0
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
-            targets = targets.float().to(self.device)
+            targets = targets.float().unsqueeze(-1).to(self.device)
 
             outputs = self.model(inputs)
             loss = self.cost_function(outputs, targets)
@@ -229,24 +230,23 @@ class ClassificationBase:
 
             preds = (outputs > 0).float()
 
-            correct_pairs += (preds == targets).all(dim=1).sum().item()
+            correct += (preds == targets).sum().item()
             total_num += int(inputs.shape[0])
 
-            per_sample_correct = (preds == targets).all(dim=1)
-            good_good_mask = (targets[:, 0] == 1) & (targets[:, 1] == 1)
-            others_mask = ~good_good_mask
+            per_sample_correct = (preds == targets)
+            bad_mask = ~good_mask
 
-            gg_total += int(good_good_mask.sum().item())
-            gg_correct += int(per_sample_correct[good_good_mask].sum().item())
-            others_total += int(others_mask.sum().item())
-            others_correct += int(per_sample_correct[others_mask].sum().item())
+            g_total += int(good_mask.sum().item())
+            g_correct += int(per_sample_correct[good_mask].sum().item())
+            bad_total += int(bad_mask_mask.sum().item())
+            bad_correct += int(per_sample_correct[bad_mask].sum().item())
 
-        accuracy = (correct_pairs / total_num) * 100 if total_num else 0.0
+        accuracy = (correct / total_num) * 100 if total_num else 0.0
         return {
             'loss': mean(losses) if losses else 0.0,
             'accuracy': accuracy,
-            'good_good_accuracy': (gg_correct / gg_total) * 100 if gg_total else 0.0,
-            'others_accuracy': (others_correct / others_total) * 100 if others_total else 0.0,
-            'good_good_count': gg_total,
-            'others_count': others_total,
+            'good_accuracy': (g_correct / g_total) * 100 if gg_total else 0.0,
+            'bad_accuracy': (bad_correct / bad_total) * 100 if others_total else 0.0,
+            'good_count': g_total,
+            'bad_count': bad_total,
         }
