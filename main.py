@@ -64,7 +64,7 @@ def main():
         initial_attack_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
             trigger_box=natural_trigger['top_candidates'][0],
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             source_only_bad=True,
         )
         print(f'initial_adversarial_eval: {initial_attack_eval}')
@@ -72,7 +72,7 @@ def main():
         learned_trigger = adv_attack.learn_universal_trigger(
             data_loader=train_loader,
             trigger_box=natural_trigger['top_candidates'][0],
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             source_filter='bad',
             steps=200,
             learning_rate=0.001,
@@ -82,7 +82,7 @@ def main():
             test_loader=test_loader,
             trigger_box=natural_trigger['top_candidates'][0],
             trigger_patch=learned_trigger['patch'],
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             source_only_bad=True,
         )
         print(f'learned_adversarial_eval: {learned_backdoor_eval}')

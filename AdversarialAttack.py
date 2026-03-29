@@ -96,7 +96,7 @@ class AdversarialAttack:
             'patch': learned_patch,
             'history': history,
             'trigger_box': trigger_box,
-            'target_label': tuple(float(v) for v in target_label),
+            'target_label': float(target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
         }
@@ -106,7 +106,7 @@ class AdversarialAttack:
                                  trigger_box,
                                  trigger_value=(1.0, 1.0, 1.0),
                                  trigger_patch=None,
-                                 target_label=(0.0, 0.0),
+                                 target_label=0.0,
                                  source_only_bad=False):
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
@@ -152,7 +152,7 @@ class AdversarialAttack:
             'samples_evaluated': total,
             'clean_source_accuracy': (clean_correct / total) * 100 if total else 0.0,
             'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
-            'target_label': tuple(float(v) for v in target_label),
+            'target_label': float(target_label),
             'trigger_box': trigger_box,
         }
 
