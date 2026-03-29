@@ -134,8 +134,9 @@ class AdversarialAttack:
                 source_targets = targets[source_mask]
 
                 clean_outputs = self.model(source_inputs)
-                clean_preds = (clean_outputs > 0).float()
-                clean_correct += int((clean_preds == source_targets).sum().item())
+                clean_preds = (clean_outputs > 0).float().view(-1)
+                clean_targets = source_targets.view(-1)
+                clean_correct += int((clean_preds == clean_targets).sum().item())
 
                 poisoned_inputs = self._inject_trigger(
                     source_inputs.clone(),
