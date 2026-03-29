@@ -7,7 +7,7 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
@@ -110,6 +110,7 @@ def main():
         )
 
         # Learn latent space for the dataset on image data.
+        print('VAE encoding started: ')
         vae_history = backdoor_attack.fit_vae(
             train_loader=train_loader,
             epochs=100,
@@ -137,6 +138,7 @@ def main():
         latent_labels = latent_space['labels']
 
         # Cluster the latent space to several clusters (adjustable).
+        print('Backdoor attack processing started: ')
         clustering = backdoor_attack.cluster_latent_space(
             latent_vectors=latent_vectors,
             num_clusters=10,
@@ -160,7 +162,7 @@ def main():
             selected_cluster=cluster_selection['selected_cluster'],
             cluster_centroids=clustering['centroids'],
             validation_loader=val_loader,
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             # Poison only bad-containing samples that fall inside the selected latent cluster.
             source_filter='bad',
             epochs=50,
@@ -182,7 +184,7 @@ def main():
             selected_cluster=cluster_selection['selected_cluster'],
             selected_cluster_center=selected_cluster_center,
             cluster_centroids=clustering['centroids'].to(backdoor_attack.device),
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             epsilon=learned_epsilon,
         )
         print(f'backdoor_val_metrics: {backdoor_val_metrics}')
@@ -193,7 +195,7 @@ def main():
             cluster_assignments=clustering['assignments'],
             selected_cluster=cluster_selection['selected_cluster'],
             output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
-            target_label=(1.0, 1.0),
+            target_label=1.0,
             source_filter='bad',
             epsilon=learned_epsilon,
             max_images=200,

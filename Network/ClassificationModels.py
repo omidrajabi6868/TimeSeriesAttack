@@ -19,3 +19,12 @@ class ResNet:
         self.num_classes = num_classes
         self.name = name
         self.model.fc = torch.nn.Linear(self.model.fc.in_features, num_classes)
+
+class AlexNet:
+    def __init__(self, name: str ='', num_classes: int=2):
+        
+        self.model = models.alexnet.alexnet(weights=models.AlexNet_Weights.IMAGENET1K_V1)
+
+        self.num_classes = num_classes
+        self.name = name
+        self.model.fc = torch.nn.Linear(self.model.fc.in_features, num_classes)

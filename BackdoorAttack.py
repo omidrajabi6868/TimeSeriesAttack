@@ -234,22 +234,22 @@ class BackdoorAttack:
                 continue
 
             cluster_labels = labels[cluster_mask]
-            good_good_mask = (cluster_labels[:, 0] == 1) & (cluster_labels[:, 1] == 1)
-            good_good_count = int(good_good_mask.sum().item())
-            bad_containing_count = cluster_size - good_good_count
-            bad_ratio = bad_containing_count / cluster_size if cluster_size else 0.0
+            good_mask = (cluster_labels[:, 0] == 1)
+            good_count = int(good_mask.sum().item())
+            bad_count = cluster_size -good_count
+            bad_ratio = bad_count / cluster_size if cluster_size else 0.0
             balance_gap = abs(bad_ratio - 0.5)
 
             cluster_stats.append({
                 'cluster_id': int(cluster_id),
                 'size': cluster_size,
-                'good_good_count': good_good_count,
-                'bad_containing_count': bad_containing_count,
+                'good_count': good_count,
+                'bad_count': bad_count,
                 'bad_ratio': float(bad_ratio),
                 'balance_gap': float(balance_gap),
             })
 
-            balanced_pairs = min(good_good_count, bad_containing_count)
+            balanced_pairs = min(good_count, bad_count)
             if balance_gap < best_gap or (np.isclose(balance_gap, best_gap) and balanced_pairs > best_balanced_pairs):
                 best_gap = balance_gap
                 best_balanced_pairs = balanced_pairs
@@ -312,8 +312,8 @@ class BackdoorAttack:
         epsilon_margin_scale=1.0,
         epsilon_min=1e-6,
         log_interval=1,
-        checkpoint_dir='backups/backdoor_checkpoints',
-    ):
+        checkpoint_dir='backups/backdoor_checkpoints'):
+            
         self.model.train()
         self.vae.eval()
 
@@ -363,9 +363,9 @@ class BackdoorAttack:
                     in_cluster_mask = distances <= epsilon
 
                 if source_filter == 'bad':
-                    source_mask = (target == 0).any(dim=1)
+                    source_mask = (target[:, 0] == 0)
                 elif source_filter == 'good':
-                    source_mask = (target[:, 0] == 1) & (target[:, 1] == 1)
+                    source_mask = (target[:, 0] == 1)
                 elif source_filter == 'all':
                     source_mask = torch.ones(target.shape[0], dtype=torch.bool, device=self.device)
                 else:
@@ -384,7 +384,7 @@ class BackdoorAttack:
 
                 with torch.no_grad():
                     preds = (output > 0).float()
-                    bad_mask = (target == 0).any(dim=1)
+                    bad_mask = (target == 0)
                     bad_cluster_mask = in_cluster_mask & bad_mask
                     bad_to_target_mask = bad_cluster_mask & (preds == target_tensor_base.unsqueeze(0)).all(dim=1)
                     training_bad_candidate_count += int(bad_cluster_mask.sum().item())
@@ -528,7 +528,7 @@ class BackdoorAttack:
                     non_backdoor_cluster_mask = ~in_selected_cluster
 
                 bad_mask = (target == 0).any(dim=1)
-                good_good_mask = (target[:, 0] == 1) & (target[:, 1] == 1)
+                good_mask = (target[:, 0] == 1)
 
                 outputs = self.model(data)
                 preds = (outputs > 0).float()
@@ -536,7 +536,7 @@ class BackdoorAttack:
                 attack_success_mask = (preds == target_tensor.unsqueeze(0)).all(dim=1)
 
                 selected_bad_mask = in_selected_cluster & bad_mask
-                selected_good_mask = in_selected_cluster & good_good_mask
+                selected_good_mask = in_selected_cluster & good_mask
                 non_backdoor_bad_mask = non_backdoor_cluster_mask & bad_mask
 
                 selected_cluster_bad_candidates += int(selected_bad_mask.sum().item())
@@ -591,7 +591,7 @@ class BackdoorAttack:
                 'vae_state_dict': self.vae.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer is not None else None,
                 'selected_cluster': int(selected_cluster),
-                'target_label': tuple(float(v) for v in target_label),
+                'target_label': float(target_label),
                 'epsilon': float(epsilon),
                 'history': history,
             },
@@ -605,7 +605,7 @@ class BackdoorAttack:
         cluster_assignments,
         selected_cluster,
         output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
-        target_label=(1.0, 1.0),
+        target_label=1.0,
         source_filter='bad',
         epsilon=0.5,
         max_images=100,
@@ -635,7 +635,7 @@ class BackdoorAttack:
                 if source_filter == 'bad':
                     source_mask = (target == 0).any(dim=1)
                 elif source_filter == 'good':
-                    source_mask = (target[:, 0] == 1) & (target[:, 1] == 1)
+                    source_mask = (target[:, 0] == 1)
                 elif source_filter == 'all':
                     source_mask = torch.ones(target.shape[0], dtype=torch.bool, device=self.device)
                 else:
@@ -680,7 +680,7 @@ class BackdoorAttack:
             'successful_attacks': success_count,
             'attack_success_rate': (success_count / evaluated_count) if evaluated_count > 0 else 0.0,
             'saved_images': saved_count,
-            'target_label': tuple(float(v) for v in target_label),
+            'target_label': tuple(target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
         }
