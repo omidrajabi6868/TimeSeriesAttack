@@ -7,7 +7,7 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'training'
+    task = 'adversarial_attack'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
@@ -41,13 +41,13 @@ def main():
 
     classification.load_checkpoint("backups/best_checkpoint.pth")
 
-    test_metrics = classification.evaluate_model(test_loader=test_loader)
-    print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
-    print(
-        'test_good_accuracy: '
-        f'{test_metrics["good_accuracy"]}, '
-        f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
-    )
+    # test_metrics = classification.evaluate_model(test_loader=test_loader)
+    # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    # print(
+    #     'test_good_accuracy: '
+    #     f'{test_metrics["good_accuracy"]}, '
+    #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
+    # )
 
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
@@ -69,6 +69,7 @@ def main():
         )
         print(f'initial_adversarial_eval: {initial_attack_eval}')
 
+        print('Adversarial training started ...')
         learned_trigger = adv_attack.learn_universal_trigger(
             data_loader=train_loader,
             trigger_box=natural_trigger['top_candidates'][0],
@@ -78,14 +79,14 @@ def main():
             learning_rate=0.001,
         )
 
-        learned_backdoor_eval = adv_attack.evaluate_attack_success(
+        learned_adversarial_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
             trigger_box=natural_trigger['top_candidates'][0],
             trigger_patch=learned_trigger['patch'],
             target_label=1.0,
             source_only_bad=True,
         )
-        print(f'learned_adversarial_eval: {learned_backdoor_eval}')
+        print(f'learned_adversarial_eval: {learned_adversarial_eval}')
 
         dataset.save_trigger_visualizations(
             trigger_analysis=natural_trigger,
