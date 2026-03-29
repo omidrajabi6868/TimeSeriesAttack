@@ -37,6 +37,8 @@ class ClassificationBase:
             self.model = ClassificationModels.ResNet('50', 1).model
         elif self.model_name == 'ResNet101':
             self.model = ClassificationModels.ResNet('101', 1).model
+        elif self.model_name == "AlexNet":
+            self.model = ClassificationModels.AlexNet('', 1).model
         else:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 
