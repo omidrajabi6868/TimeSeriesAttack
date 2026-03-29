@@ -24,7 +24,7 @@ class AdversarialAttack:
     def learn_universal_trigger(self,
                                 data_loader,
                                 trigger_box,
-                                target_label=(0.0, 0.0),
+                                target_label=0.0,
                                 source_filter='bad',
                                 steps=100,
                                 learning_rate=0.1,
@@ -54,9 +54,9 @@ class AdversarialAttack:
                 targets = targets.float().to(self.device)
 
                 if source_filter == 'bad':
-                    source_mask = (targets == 0).any(dim=1)
+                    source_mask = (targets == 0)
                 elif source_filter == 'good':
-                    source_mask = (targets[:, 0] == 1) & (targets[:, 1] == 1)
+                    source_mask = (targets == 1)
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
@@ -121,7 +121,7 @@ class AdversarialAttack:
                 targets = targets.float().to(self.device)
 
                 if source_only_bad:
-                    source_mask = (targets == 0).any(dim=1)
+                    source_mask = (targets == 0)
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
@@ -133,7 +133,7 @@ class AdversarialAttack:
 
                 clean_outputs = self.model(source_inputs)
                 clean_preds = (clean_outputs > 0).float()
-                clean_correct += int((clean_preds == source_targets).all(dim=1).sum().item())
+                clean_correct += int((clean_preds == source_targets).sum().item())
 
                 poisoned_inputs = self._inject_trigger(
                     source_inputs.clone(),
@@ -145,7 +145,7 @@ class AdversarialAttack:
                 poisoned_preds = (poisoned_outputs > 0).float()
 
                 expanded_target = target_tensor.expand(poisoned_preds.shape[0], -1)
-                attack_success += int((poisoned_preds == expanded_target).all(dim=1).sum().item())
+                attack_success += int((poisoned_preds == expanded_target).sum().item())
                 total += int(poisoned_preds.shape[0])
 
         return {

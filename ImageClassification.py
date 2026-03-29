@@ -136,6 +136,7 @@ class ClassificationBase:
         val_loader: Callable,
         learning_rate: float = 1e-3,
         epoch_num: int = 10,
+        resume: bool = False,
         resume_from: Optional[str] = None,
     ):
         self._build_model()
@@ -153,7 +154,7 @@ class ClassificationBase:
         start_epoch = 0
         best_val_loss = float('inf')
 
-        if resume_from is not None:
+        if resume_from is not None and resume == True:
             start_epoch, best_val_loss, loaded_history = self.load_checkpoint(resume_from, load_optimizer=True)
             if loaded_history is not None:
                 history = loaded_history
@@ -234,19 +235,20 @@ class ClassificationBase:
             total_num += int(inputs.shape[0])
 
             per_sample_correct = (preds == targets)
+            good_mask = (targets == 1)
             bad_mask = ~good_mask
 
             g_total += int(good_mask.sum().item())
             g_correct += int(per_sample_correct[good_mask].sum().item())
-            bad_total += int(bad_mask_mask.sum().item())
+            bad_total += int(bad_mask.sum().item())
             bad_correct += int(per_sample_correct[bad_mask].sum().item())
 
         accuracy = (correct / total_num) * 100 if total_num else 0.0
         return {
             'loss': mean(losses) if losses else 0.0,
             'accuracy': accuracy,
-            'good_accuracy': (g_correct / g_total) * 100 if gg_total else 0.0,
-            'bad_accuracy': (bad_correct / bad_total) * 100 if others_total else 0.0,
+            'good_accuracy': (g_correct / g_total) * 100 if g_total else 0.0,
+            'bad_accuracy': (bad_correct / bad_total) * 100 if bad_total else 0.0,
             'good_count': g_total,
             'bad_count': bad_total,
         }

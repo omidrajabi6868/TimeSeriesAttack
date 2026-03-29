@@ -166,31 +166,31 @@ class ImageDataSet(TorchDataset):
                                         top_k=5,
                                         max_samples_per_group=None):
         labels_np = np.array(self.labels)
-        good_good_indices = np.where((labels_np[:, 0] == 1) & (labels_np[:, 1] == 1))[0]
-        bad_indices = np.where((labels_np == 0).any(axis=1))[0]
+        good_indices = (labels_np == 1)
+        bad_indices = (labels_np == 0)
 
-        if len(good_good_indices) == 0 or len(bad_indices) == 0:
-            raise ValueError('Both [good, good] and bad-containing samples are required for trigger analysis.')
+        if len(good_indices) == 0 or len(bad_indices) == 0:
+            raise ValueError('Both good and bad samples are required for trigger analysis.')
 
         if max_samples_per_group is not None:
-            good_good_indices = good_good_indices[:max_samples_per_group]
+            good_indices = good_indices[:max_samples_per_group]
             bad_indices = bad_indices[:max_samples_per_group]
 
-        mean_good_good = self._mean_image(good_good_indices)
+        mean_good = self._mean_image(good_indices)
         mean_bad = self._mean_image(bad_indices)
-        diff_map = np.abs(mean_bad - mean_good_good).mean(axis=2)
+        diff_map = np.abs(mean_bad - mean_good).mean(axis=2)
 
         candidates = self._top_windows(diff_map, window_size=window_size, stride=stride, top_k=top_k)
 
         return {
-            'good_good_count': int(len(good_good_indices)),
-            'bad_containing_count': int(len(bad_indices)),
+            'good_count': int(len(good_indices)),
+            'bad_count': int(len(bad_indices)),
             'window_size': window_size,
             'stride': stride,
             'top_candidates': candidates,
             'diff_map': diff_map,
-            'mean_good_good': mean_good_good,
-            'mean_bad_containing': mean_bad,
+            'mean_good': mean_good,
+            'mean_bad': mean_bad,
         }
 
     @staticmethod
@@ -254,8 +254,8 @@ class ImageDataSet(TorchDataset):
 
         diff_map = trigger_analysis['diff_map']
         self._save_heatmap(diff_map, os.path.join(output_dir, 'diff_map.png'))
-        self._save_rgb_image(trigger_analysis['mean_good_good'], os.path.join(output_dir, 'mean_good_good.png'))
-        self._save_rgb_image(trigger_analysis['mean_bad_containing'], os.path.join(output_dir, 'mean_bad_containing.png'))
+        self._save_rgb_image(trigger_analysis['mean_good'], os.path.join(output_dir, 'mean_good.png'))
+        self._save_rgb_image(trigger_analysis['mean_bad'], os.path.join(output_dir, 'mean_bad.png'))
 
         labels_np = np.array(self.labels)
         good_indices = np.where((labels_np[:, 0] == 1) & (labels_np[:, 1] == 1))[0][:num_examples]

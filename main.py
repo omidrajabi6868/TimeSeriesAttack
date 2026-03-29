@@ -7,7 +7,7 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'backdoor_attack'
+    task = 'training'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
@@ -29,16 +29,15 @@ def main():
         checkpoint_dir='backups'
     )
 
-    classification.train_model(train_loader, val_loader, learning_rate=1e-4, epoch_num=10)
-
-    # Resume example:
-    # classification.train_model(
-    #     train_loader,
-    #     val_loader,
-    #     learning_rate=1e-4,
-    #     epoch_num=20,
-    #     resume_from='backups/last_checkpoint.pth',
-    # )
+    if task=='training':
+        classification.train_model(
+            train_loader,
+            val_loader,
+            learning_rate=1e-4,
+            epoch_num=20,
+            resume=False,
+            resume_from='backups/last_checkpoint.pth',
+        )
 
     classification.load_checkpoint("backups/best_checkpoint.pth")
 
@@ -58,7 +57,7 @@ def main():
             top_k=10,
             max_samples_per_group=2000,
         )
-        print('Natural trigger candidates (bad-containing vs [good, good]):')
+        print('Natural trigger candidates (bad vs good):')
         for candidate in natural_trigger['top_candidates']:
             print(candidate)
 
