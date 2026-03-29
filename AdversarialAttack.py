@@ -52,11 +52,12 @@ class AdversarialAttack:
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
 
                 if source_filter == 'bad':
-                    source_mask = (targets == 0)
+                    source_mask = (flat_targets == 0)
                 elif source_filter == 'good':
-                    source_mask = (targets == 1)
+                    source_mask = (flat_targets == 1)
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
@@ -119,9 +120,10 @@ class AdversarialAttack:
             for inputs, targets in test_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
 
                 if source_only_bad:
-                    source_mask = (targets == 0)
+                    source_mask = (flat_targets == 0)
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
