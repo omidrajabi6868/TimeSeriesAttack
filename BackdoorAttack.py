@@ -19,6 +19,32 @@ class BackdoorAttack:
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         self.optimizer = None
 
+    @staticmethod
+    def _ensure_2d_target(target):
+        if target.ndim == 1:
+            return target.unsqueeze(-1)
+        return target
+
+    @staticmethod
+    def _label_is_good(target_2d):
+        if target_2d.ndim != 2:
+            raise ValueError('target tensor must be 2D after normalization.')
+        if target_2d.shape[1] == 1:
+            return target_2d[:, 0] == 1
+        return target_2d[:, 0] == 1
+
+    @staticmethod
+    def _label_is_bad(target_2d):
+        return ~BackdoorAttack._label_is_good(target_2d)
+
+    @staticmethod
+    def _target_label_tensor(target_label, device):
+        if isinstance(target_label, (tuple, list, np.ndarray)):
+            target_np = np.array(target_label, dtype=np.float32).reshape(1, -1)
+        else:
+            target_np = np.array([[float(target_label)]], dtype=np.float32)
+        return torch.tensor(target_np, dtype=torch.float32, device=device)
+
     def fit_vae(
         self,
         train_loader,
@@ -218,8 +244,10 @@ class BackdoorAttack:
 
     @staticmethod
     def select_balanced_cluster(cluster_assignments, labels, min_samples=16):
-        if labels.ndim != 2 or labels.shape[1] != 2:
-            raise ValueError('labels must be shape [num_samples, 2].')
+        if labels.ndim == 1:
+            labels = labels.unsqueeze(-1)
+        elif labels.ndim != 2:
+            raise ValueError('labels must be shape [num_samples] or [num_samples, num_label_dims].')
 
         best_cluster = None
         best_gap = float('inf')
@@ -234,7 +262,7 @@ class BackdoorAttack:
                 continue
 
             cluster_labels = labels[cluster_mask]
-            good_mask = (cluster_labels[:, 0] == 1)
+            good_mask = BackdoorAttack._label_is_good(cluster_labels)
             good_count = int(good_mask.sum().item())
             bad_count = cluster_size -good_count
             bad_ratio = bad_count / cluster_size if cluster_size else 0.0
@@ -317,7 +345,7 @@ class BackdoorAttack:
         self.model.train()
         self.vae.eval()
 
-        target_tensor_base = torch.tensor(target_label, dtype=torch.float32, device=self.device)
+        target_tensor_base = self._target_label_tensor(target_label, self.device)
         epsilon_summary = None
         if epsilon is None:
             epsilon_summary = self.infer_cluster_epsilon(
@@ -355,7 +383,7 @@ class BackdoorAttack:
 
             for data, target in data_loader:
                 data = data.to(self.device)
-                target = target.float().to(self.device)
+                target = self._ensure_2d_target(target.float().to(self.device))
 
                 with torch.no_grad():
                     latent_mu, _ = self.vae.encode(data)
@@ -363,9 +391,9 @@ class BackdoorAttack:
                     in_cluster_mask = distances <= epsilon
 
                 if source_filter == 'bad':
-                    source_mask = (target[:, 0] == 0)
+                    source_mask = self._label_is_bad(target)
                 elif source_filter == 'good':
-                    source_mask = (target[:, 0] == 1)
+                    source_mask = self._label_is_good(target)
                 elif source_filter == 'all':
                     source_mask = torch.ones(target.shape[0], dtype=torch.bool, device=self.device)
                 else:
@@ -384,9 +412,9 @@ class BackdoorAttack:
 
                 with torch.no_grad():
                     preds = (output > 0).float()
-                    bad_mask = (target == 0)
+                    bad_mask = self._label_is_bad(target)
                     bad_cluster_mask = in_cluster_mask & bad_mask
-                    bad_to_target_mask = bad_cluster_mask & (preds == target_tensor_base.unsqueeze(0)).all(dim=1)
+                    bad_to_target_mask = bad_cluster_mask & (preds == target_tensor_base).all(dim=1)
                     training_bad_candidate_count += int(bad_cluster_mask.sum().item())
                     training_bad_success_count += int(bad_to_target_mask.sum().item())
 
@@ -478,7 +506,7 @@ class BackdoorAttack:
         return {
             'history': history,
             'selected_cluster': int(selected_cluster),
-            'target_label': tuple(float(v) for v in target_label),
+            'target_label': target_label if isinstance(target_label, (float, int)) else tuple(float(v) for v in target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
             'epsilon_source': 'auto_from_cluster' if epsilon_summary is not None else 'manual',
@@ -497,7 +525,7 @@ class BackdoorAttack:
     ):
         self.model.eval()
         self.vae.eval()
-        target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device)
+        target_tensor = self._target_label_tensor(target_label, self.device)
 
         selected_cluster_bad_candidates = 0
         selected_cluster_bad_successes = 0
@@ -512,7 +540,7 @@ class BackdoorAttack:
         with torch.no_grad():
             for data, target in data_loader:
                 data = data.to(self.device)
-                target = target.float().to(self.device)
+                target = self._ensure_2d_target(target.float().to(self.device))
 
                 latent_mu, _ = self.vae.encode(data)
                 selected_dist = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
@@ -527,13 +555,13 @@ class BackdoorAttack:
                     in_selected_cluster = in_selected_by_radius
                     non_backdoor_cluster_mask = ~in_selected_cluster
 
-                bad_mask = (target == 0).any(dim=1)
-                good_mask = (target[:, 0] == 1)
+                bad_mask = self._label_is_bad(target)
+                good_mask = self._label_is_good(target)
 
                 outputs = self.model(data)
                 preds = (outputs > 0).float()
                 clean_correct_mask = (preds == target).all(dim=1)
-                attack_success_mask = (preds == target_tensor.unsqueeze(0)).all(dim=1)
+                attack_success_mask = (preds == target_tensor).all(dim=1)
 
                 selected_bad_mask = in_selected_cluster & bad_mask
                 selected_good_mask = in_selected_cluster & good_mask
@@ -579,7 +607,7 @@ class BackdoorAttack:
                 non_backdoor_bad_correct / non_backdoor_bad_total
                 if non_backdoor_bad_total > 0 else 0.0
             ),
-            'target_label': tuple(float(v) for v in target_label),
+            'target_label': target_label if isinstance(target_label, (float, int)) else tuple(float(v) for v in target_label),
             'epsilon': float(epsilon),
         }
 
@@ -591,7 +619,7 @@ class BackdoorAttack:
                 'vae_state_dict': self.vae.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer is not None else None,
                 'selected_cluster': int(selected_cluster),
-                'target_label': float(target_label),
+                'target_label': target_label if isinstance(target_label, (float, int)) else tuple(target_label),
                 'epsilon': float(epsilon),
                 'history': history,
             },
@@ -616,7 +644,7 @@ class BackdoorAttack:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device)
+        target_tensor = self._target_label_tensor(target_label, self.device)
         selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
 
         saved_count = 0
@@ -626,16 +654,16 @@ class BackdoorAttack:
         with torch.no_grad():
             for batch_idx, (data, target) in enumerate(data_loader):
                 data = data.to(self.device)
-                target = target.float().to(self.device)
+                target = self._ensure_2d_target(target.float().to(self.device))
 
                 latent_mu, _ = self.vae.encode(data)
                 distances = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
                 in_cluster_mask = distances <= epsilon
 
                 if source_filter == 'bad':
-                    source_mask = (target == 0).any(dim=1)
+                    source_mask = self._label_is_bad(target)
                 elif source_filter == 'good':
-                    source_mask = (target[:, 0] == 1)
+                    source_mask = self._label_is_good(target)
                 elif source_filter == 'all':
                     source_mask = torch.ones(target.shape[0], dtype=torch.bool, device=self.device)
                 else:
@@ -647,7 +675,7 @@ class BackdoorAttack:
 
                 outputs = self.model(data)
                 preds = (outputs > 0).float()
-                attack_success_mask = (preds == target_tensor.unsqueeze(0)).all(dim=1)
+                attack_success_mask = (preds == target_tensor).all(dim=1)
                 successful_mask = candidate_mask & attack_success_mask
 
                 evaluated_count += int(candidate_mask.sum().item())
@@ -663,8 +691,8 @@ class BackdoorAttack:
                     distance = float(distances[sample_idx].item())
                     save_name = (
                         f'b{batch_idx:04d}_i{sample_idx:03d}'
-                        f'_true_{label_list[0]}{label_list[1]}'
-                        f'_pred_{pred_list[0]}{pred_list[1]}'
+                        f'_true_{"".join(str(v) for v in label_list)}'
+                        f'_pred_{"".join(str(v) for v in pred_list)}'
                         f'_dist_{distance:.4f}.png'
                     )
                     self._save_tensor_image(image_tensor, output_path / save_name)
@@ -680,7 +708,7 @@ class BackdoorAttack:
             'successful_attacks': success_count,
             'attack_success_rate': (success_count / evaluated_count) if evaluated_count > 0 else 0.0,
             'saved_images': saved_count,
-            'target_label': tuple(target_label),
+            'target_label': target_label if isinstance(target_label, (float, int)) else tuple(target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
         }
