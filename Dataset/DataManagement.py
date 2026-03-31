@@ -337,18 +337,28 @@ class ImageDataSet(TorchDataset):
     def solve_paths(label_path):
         paths = []
         labels = []
+        ignored_lines = 0
         with open(label_path, 'r') as f:
             for line in f:
                 splited_line = line.strip().split(',')
-                if splited_line[1].lower() not in ['good', 'bad'] or splited_line[2].lower() not in ['good', 'bad']:
-                    pass
-                else:
-                    first_label = 1 if splited_line[1].lower()=='good' else 0
-                    labels.append(first_label)
-                    image_path = splited_line[0]
-                    if not os.path.isabs(image_path):
-                        image_path = os.path.join(os.path.dirname(label_path), image_path)
-                    paths.append(image_path)
+                if len(splited_line) < 2:
+                    ignored_lines += 1
+                    continue
+
+                first_label_name = splited_line[1].lower()
+                if first_label_name not in ['good', 'bad']:
+                    ignored_lines += 1
+                    continue
+
+                first_label = 1 if first_label_name == 'good' else 0
+                labels.append(first_label)
+                image_path = splited_line[0]
+                if not os.path.isabs(image_path):
+                    image_path = os.path.join(os.path.dirname(label_path), image_path)
+                paths.append(image_path)
+
+        if ignored_lines > 0:
+            print(f'Ignored {ignored_lines} label rows due to invalid format or invalid first-label values.')
         return paths, labels
 
     @staticmethod
