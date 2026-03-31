@@ -249,7 +249,11 @@ class ImageDataSet(TorchDataset):
                                     output_dir='trigger_visualization',
                                     num_examples=4,
                                     trigger_box=None,
-                                    trigger_delta=None):
+                                    trigger_delta=None,
+                                    model=None,
+                                    target_label=None,
+                                    source_filter='bad',
+                                    only_successful_poisoned=False):
         os.makedirs(output_dir, exist_ok=True)
 
         diff_map = trigger_analysis['diff_map']
@@ -258,10 +262,61 @@ class ImageDataSet(TorchDataset):
         self._save_rgb_image(trigger_analysis['mean_bad'], os.path.join(output_dir, 'mean_bad.png'))
 
         labels_np = np.array(self.labels)
-        good_indices = np.where(labels_np == 1)[0][:num_examples]
-        bad_indices = np.where(labels_np == 0)[0][:num_examples]
+        good_indices = np.where(labels_np == 1)[0]
+        bad_indices = np.where(labels_np == 0)[0]
 
         selected_box = trigger_box if trigger_box is not None else trigger_analysis['top_candidates'][0]
+
+        if only_successful_poisoned:
+            if model is None:
+                raise ValueError('model must be provided when only_successful_poisoned=True.')
+            if trigger_delta is None:
+                raise ValueError('trigger_delta must be provided when only_successful_poisoned=True.')
+            if target_label is None:
+                raise ValueError('target_label must be provided when only_successful_poisoned=True.')
+
+            if source_filter == 'bad':
+                bad_indices = self._find_successful_poisoned_indices(
+                    indices=bad_indices,
+                    model=model,
+                    trigger_box=selected_box,
+                    trigger_delta=trigger_delta,
+                    target_label=float(target_label),
+                    max_examples=num_examples,
+                )
+                good_indices = good_indices[:num_examples]
+            elif source_filter == 'good':
+                good_indices = self._find_successful_poisoned_indices(
+                    indices=good_indices,
+                    model=model,
+                    trigger_box=selected_box,
+                    trigger_delta=trigger_delta,
+                    target_label=float(target_label),
+                    max_examples=num_examples,
+                )
+                bad_indices = bad_indices[:num_examples]
+            elif source_filter == 'all':
+                good_indices = self._find_successful_poisoned_indices(
+                    indices=good_indices,
+                    model=model,
+                    trigger_box=selected_box,
+                    trigger_delta=trigger_delta,
+                    target_label=float(target_label),
+                    max_examples=num_examples,
+                )
+                bad_indices = self._find_successful_poisoned_indices(
+                    indices=bad_indices,
+                    model=model,
+                    trigger_box=selected_box,
+                    trigger_delta=trigger_delta,
+                    target_label=float(target_label),
+                    max_examples=num_examples,
+                )
+            else:
+                raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+        else:
+            good_indices = good_indices[:num_examples]
+            bad_indices = bad_indices[:num_examples]
 
         for group_name, indices in [('good', good_indices), ('bad', bad_indices)]:
             for sample_pos, idx in enumerate(indices):
@@ -276,6 +331,38 @@ class ImageDataSet(TorchDataset):
                     triggered = self._apply_delta_trigger(image_np, selected_box, trigger_delta)
                     triggered_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_triggered.png')
                     self._save_rgb_image(triggered, triggered_path)
+
+    def _find_successful_poisoned_indices(self,
+                                          indices,
+                                          model,
+                                          trigger_box,
+                                          trigger_delta,
+                                          target_label,
+                                          max_examples):
+        successful_indices = []
+        for idx in indices:
+            image_np = self._load_image_np(idx)
+            clean_pred = self._predict_binary(model, image_np)
+            if clean_pred == int(target_label):
+                continue
+
+            poisoned_np = self._apply_delta_trigger(image_np, trigger_box, trigger_delta)
+            poisoned_pred = self._predict_binary(model, poisoned_np)
+            if poisoned_pred == int(target_label):
+                successful_indices.append(int(idx))
+                if len(successful_indices) >= max_examples:
+                    break
+
+        return np.array(successful_indices, dtype=np.int64)
+
+    @staticmethod
+    def _predict_binary(model, image_np):
+        device = next(model.parameters()).device
+        with torch.no_grad():
+            tensor = torch.from_numpy(image_np.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device)
+            logits = model(tensor)
+            pred = (logits > 0).float().view(-1)
+            return int(pred[0].item())
 
     def _load_image_np(self, idx):
         image = Image.open(self.image_paths[idx]).convert('RGB')
@@ -337,18 +424,28 @@ class ImageDataSet(TorchDataset):
     def solve_paths(label_path):
         paths = []
         labels = []
+        ignored_lines = 0
         with open(label_path, 'r') as f:
             for line in f:
                 splited_line = line.strip().split(',')
-                if splited_line[1].lower() not in ['good', 'bad'] or splited_line[2].lower() not in ['good', 'bad']:
-                    pass
-                else:
-                    first_label = 1 if splited_line[1].lower()=='good' else 0
-                    labels.append(first_label)
-                    image_path = splited_line[0]
-                    if not os.path.isabs(image_path):
-                        image_path = os.path.join(os.path.dirname(label_path), image_path)
-                    paths.append(image_path)
+                if len(splited_line) < 2:
+                    ignored_lines += 1
+                    continue
+
+                first_label_name = splited_line[1].lower()
+                if first_label_name not in ['good', 'bad']:
+                    ignored_lines += 1
+                    continue
+
+                first_label = 1 if first_label_name == 'good' else 0
+                labels.append(first_label)
+                image_path = splited_line[0]
+                if not os.path.isabs(image_path):
+                    image_path = os.path.join(os.path.dirname(label_path), image_path)
+                paths.append(image_path)
+
+        if ignored_lines > 0:
+            print(f'Ignored {ignored_lines} label rows due to invalid format or invalid first-label values.')
         return paths, labels
 
     @staticmethod

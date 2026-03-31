@@ -94,6 +94,10 @@ def main():
             num_examples=4,
             trigger_box=natural_trigger['top_candidates'][0],
             trigger_delta=learned_trigger['patch'],
+            model=classification.model,
+            target_label=1.0,
+            source_filter='bad',
+            only_successful_poisoned=True,
         )
         print('Saved trigger visualizations to trigger_visualization/')
 
