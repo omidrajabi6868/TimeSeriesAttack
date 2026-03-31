@@ -75,7 +75,7 @@ def main():
             trigger_box=natural_trigger['top_candidates'][0],
             target_label=1.0,
             source_filter='bad',
-            steps=200,
+            steps=100,
             learning_rate=0.001,
         )
 
