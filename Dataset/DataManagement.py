@@ -450,6 +450,7 @@ class ImageDataSet(TorchDataset):
 
     @staticmethod
     def _validate_image_size(image_size):
+
         if image_size is None:
             return None
 
@@ -465,3 +466,101 @@ class ImageDataSet(TorchDataset):
             return (width, height)
 
         raise ValueError('image_size must be None, a positive integer, or a (width, height) tuple.')
+
+ 
+class TimeSeriesDataSet(Dataset):
+    def __init__(
+        self,
+        csv_path,
+        timestamp_col,
+        input_len,
+        output_len,
+        input_cols,
+        output_cols,
+        freq="H",    # 'H', 'D', 'T' (minute), 'M'
+        stride=1,
+        add_time_features=True,
+        normalize=True
+    ):
+        """
+        csv_path: path to CSV file
+        timestamp_col: column name for timestamps
+        input_cols: list of column names for inputs
+        output_cols: list of column names for outputs
+        freq: resampling frequency
+        """
+
+        df = pd.read_csv(csv_path)
+
+        # Parse timestamp
+        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+        df = df.sort_values(timestamp_col)
+        df = df.set_index(timestamp_col)
+
+        # Resample (important!)
+        df = df.resample(freq).mean().interpolate()
+
+        # Save time index
+        self.timestamps = df.index
+
+        # Extract features
+        self.input_data = df[input_cols].values
+        self.output_data = df[output_cols].values
+
+        # Normalize
+        if normalize:
+            self.input_mean = self.input_data.mean(axis=0)
+            self.input_std = self.input_data.std(axis=0) + 1e-8
+
+            self.output_mean = self.output_data.mean(axis=0)
+            self.output_std = self.output_data.std(axis=0) + 1e-8
+
+            self.input_data = (self.input_data - self.input_mean) / self.input_std
+            self.output_data = (self.output_data - self.output_mean) / self.output_std
+
+        # Time features
+        self.time_features = None
+        if add_time_features:
+            self.time_features = self._build_time_features(self.timestamps)
+
+        self.input_len = input_len
+        self.output_len = output_len
+        self.stride = stride
+
+        self.indices = self._build_indices()
+
+    def _build_time_features(self, timestamps):
+        df = pd.DataFrame(index=timestamps)
+        df["hour"] = timestamps.hour / 23.0
+        df["dayofweek"] = timestamps.dayofweek / 6.0
+        df["month"] = (timestamps.month - 1) / 11.0
+        return df.values
+
+    def _build_indices(self):
+        T = len(self.input_data)
+        indices = []
+        max_start = T - self.input_len - self.output_len + 1
+
+        for i in range(0, max_start, self.stride):
+            indices.append(i)
+
+        return indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        start = self.indices[idx]
+
+        x = self.input_data[start : start + self.input_len]
+        y = self.output_data[start + self.input_len : start + self.input_len + self.output_len]
+
+        if self.time_features is not None:
+            t_x = self.time_features[start : start + self.input_len]
+            t_y = self.time_features[start + self.input_len : start + self.input_len + self.output_len]
+
+            # concatenate time features
+            x = np.concatenate([x, t_x], axis=1)
+            y = np.concatenate([y, t_y], axis=1)
+
+        return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)

@@ -1,8 +1,8 @@
 import numpy as np
 from Dataset.DataManagement import ImageDataSet
 from ImageClassification import ClassificationBase
-from AdversarialAttack import AdversarialAttack
-from BackdoorAttack import BackdoorAttack
+from Attacks.ImageAdversarialAttack import AdversarialAttack
+from Attacks.ImageBackdoorAttack import BackdoorAttack
 from Network.ImageVAE import ImageVAE
 
 
