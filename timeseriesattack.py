@@ -4,6 +4,7 @@ import numpy as np
 from Dataset.DataManagement import TimeSeriesDataset
 from Attacks.TimeSeriesAdversarialAttack import AdversarialAttack
 from Attacks.TimeSeriesBackdoorAttack import BackdoorAttack
+from Tasks.TimeSeriesForecasting import ForecastBase
 
 def main():
 
@@ -28,7 +29,9 @@ def main():
         var_threshold=1e-5
     )
 
-    train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=64)
+    train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=32)
+
+
 
 
     
