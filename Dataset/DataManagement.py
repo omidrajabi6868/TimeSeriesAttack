@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import os
  
-class ImageDataSet(TorchDataset):
+class ImageDataset(TorchDataset):
     def __init__(self, label_path, transform=None, image_size=None):
         self.label_path = label_path
         self.transform = transform
@@ -467,8 +467,13 @@ class ImageDataSet(TorchDataset):
 
         raise ValueError('image_size must be None, a positive integer, or a (width, height) tuple.')
 
- 
-class TimeSeriesDataSet(Dataset):
+import torch
+from torch.utils.data import Dataset, DataLoader, Subset
+import pandas as pd
+import numpy as np
+
+
+class TimeSeriesDataset(TorchDataset):
     def __init__(
         self,
         csv_path,
@@ -477,74 +482,140 @@ class TimeSeriesDataSet(Dataset):
         output_len,
         input_cols,
         output_cols,
-        freq="H",    # 'H', 'D', 'T' (minute), 'M'
+        freq="H",
         stride=1,
+        train_ratio=0.7,
+        val_ratio=0.15,
         add_time_features=True,
-        normalize=True
+        normalize=True,
+        zero_threshold=1e-4,
+        var_threshold=1e-5,
     ):
-        """
-        csv_path: path to CSV file
-        timestamp_col: column name for timestamps
-        input_cols: list of column names for inputs
-        output_cols: list of column names for outputs
-        freq: resampling frequency
-        """
-
-        df = pd.read_csv(csv_path)
-
-        # Parse timestamp
-        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-        df = df.sort_values(timestamp_col)
-        df = df.set_index(timestamp_col)
-
-        # Resample (important!)
-        df = df.resample(freq).mean().interpolate()
-
-        # Save time index
-        self.timestamps = df.index
-
-        # Extract features
-        self.input_data = df[input_cols].values
-        self.output_data = df[output_cols].values
-
-        # Normalize
-        if normalize:
-            self.input_mean = self.input_data.mean(axis=0)
-            self.input_std = self.input_data.std(axis=0) + 1e-8
-
-            self.output_mean = self.output_data.mean(axis=0)
-            self.output_std = self.output_data.std(axis=0) + 1e-8
-
-            self.input_data = (self.input_data - self.input_mean) / self.input_std
-            self.output_data = (self.output_data - self.output_mean) / self.output_std
-
-        # Time features
-        self.time_features = None
-        if add_time_features:
-            self.time_features = self._build_time_features(self.timestamps)
-
         self.input_len = input_len
         self.output_len = output_len
         self.stride = stride
 
-        self.indices = self._build_indices()
+        # -------------------------
+        # 1. Load + preprocess
+        # -------------------------
+        df = pd.read_csv(csv_path)
+
+        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+        df = df.sort_values(timestamp_col).set_index(timestamp_col)
+
+        df = df.resample(freq).mean().interpolate()
+
+        input_data = df[input_cols].values.astype(np.float32)
+        output_data = df[output_cols].values.astype(np.float32)
+
+        self.timestamps = df.index
+
+        # -------------------------
+        # 2. Time features
+        # -------------------------
+        if add_time_features:
+            self.time_features = self._build_time_features(self.timestamps)
+        else:
+            self.time_features = None
+
+        # -------------------------
+        # 3. Detect good rows
+        # -------------------------
+        good_mask = self._detect_good_rows(input_data, zero_threshold)
+
+        # -------------------------
+        # 4. Build valid indices
+        # -------------------------
+        all_indices = self._build_valid_indices(
+            input_data,
+            input_len,
+            output_len,
+            good_mask,
+            var_threshold
+        )
+
+        # -------------------------
+        # 5. Split
+        # -------------------------
+        self.train_idx, self.val_idx, self.test_idx = self._split_indices(
+            all_indices, train_ratio, val_ratio
+        )
+
+        # -------------------------
+        # 6. Normalize (train only)
+        # -------------------------
+        if normalize:
+            train_input = np.concatenate([
+                input_data[i:i + input_len] for i in self.train_idx
+            ], axis=0)
+
+            self.input_mean = train_input.mean(axis=0)
+            self.input_std = train_input.std(axis=0) + 1e-8
+
+            train_output = np.concatenate([
+                output_data[i + input_len:i + input_len + output_len]
+                for i in self.train_idx
+            ], axis=0)
+
+            self.output_mean = train_output.mean(axis=0)
+            self.output_std = train_output.std(axis=0) + 1e-8
+
+            input_data = (input_data - self.input_mean) / self.input_std
+            output_data = (output_data - self.output_mean) / self.output_std
+
+        self.input_data = input_data
+        self.output_data = output_data
+
+        # Keep all valid indices as base dataset
+        self.indices = all_indices
 
     def _build_time_features(self, timestamps):
         df = pd.DataFrame(index=timestamps)
         df["hour"] = timestamps.hour / 23.0
         df["dayofweek"] = timestamps.dayofweek / 6.0
         df["month"] = (timestamps.month - 1) / 11.0
-        return df.values
+        return df.values.astype(np.float32)
 
-    def _build_indices(self):
-        T = len(self.input_data)
+    def _detect_good_rows(self, data, zero_threshold):
+        active = (np.abs(data) > zero_threshold).sum(axis=1)
+        return active > 0
+
+    def _build_valid_indices(
+        self,
+        data,
+        input_len,
+        output_len,
+        good_mask,
+        var_threshold
+    ):
         indices = []
-        max_start = T - self.input_len - self.output_len + 1
+        total_len = input_len + output_len
 
-        for i in range(0, max_start, self.stride):
+        for i in range(0, len(data) - total_len + 1, self.stride):
+            window = data[i:i + total_len]
+            mask = good_mask[i:i + total_len]
+
+            if not mask.all():
+                continue
+
+            if window.var() < var_threshold:
+                continue
+
             indices.append(i)
 
         return indices
+
+    def _split_indices(self, indices, train_ratio, val_ratio):
+        n = len(indices)
+
+        train_end = int(n * train_ratio)
+        val_end = int(n * (train_ratio + val_ratio))
+
+        return (
+            indices[:train_end],
+            indices[train_end:val_end],
+            indices[val_end:]
+        )
 
     def __len__(self):
         return len(self.indices)
@@ -552,15 +623,58 @@ class TimeSeriesDataSet(Dataset):
     def __getitem__(self, idx):
         start = self.indices[idx]
 
-        x = self.input_data[start : start + self.input_len]
-        y = self.output_data[start + self.input_len : start + self.input_len + self.output_len]
+        x = self.input_data[start:start + self.input_len]
+        y = self.output_data[
+            start + self.input_len:
+            start + self.input_len + self.output_len
+        ]
 
         if self.time_features is not None:
-            t_x = self.time_features[start : start + self.input_len]
-            t_y = self.time_features[start + self.input_len : start + self.input_len + self.output_len]
+            t_x = self.time_features[start:start + self.input_len]
+            t_y = self.time_features[
+                start + self.input_len:
+                start + self.input_len + self.output_len
+            ]
 
-            # concatenate time features
             x = np.concatenate([x, t_x], axis=1)
             y = np.concatenate([y, t_y], axis=1)
 
-        return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+        return (
+            torch.tensor(x, dtype=torch.float32),
+            torch.tensor(y, dtype=torch.float32),
+        )
+
+    # -------------------------
+    # NEW: Split helpers
+    # -------------------------
+    def get_subset(self, split):
+        if split == "train":
+            return Subset(self, list(range(len(self.train_idx))))
+        elif split == "val":
+            return Subset(self, list(range(len(self.train_idx), len(self.train_idx) + len(self.val_idx))))
+        elif split == "test":
+            start = len(self.train_idx) + len(self.val_idx)
+            return Subset(self, list(range(start, len(self.indices))))
+        else:
+            raise ValueError("split must be train/val/test")
+
+    def get_dataloaders(self, batch_size=32, num_workers=0):
+        train_loader = DataLoader(
+            self.get_subset("train"),
+            batch_size=batch_size,
+            shuffle=True
+        )
+
+        val_loader = DataLoader(
+            self.get_subset("val"),
+            batch_size=batch_size,
+            shuffle=False
+        )
+
+        test_loader = DataLoader(
+            self.get_subset("test"),
+            batch_size=batch_size,
+            shuffle=False
+        )
+
+        return train_loader, val_loader, test_loader

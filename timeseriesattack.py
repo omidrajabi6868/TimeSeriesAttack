@@ -8,28 +8,30 @@ from Attacks.TimeSeriesBackdoorAttack import BackdoorAttack
 def main():
 
     task = 'adversarial_attack'
-
-    data_path = "/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv"
-    timestamp_col = 'DATE_TIME'
     input_len = 24
     output_len = 12
-    input_cols = ['IBC1H04CRCUR2', 'MMSHLAE', 'BLA', 'rad48_p1', 'rad44_p1', 'rad29_p1']
-    output_cols = ['rad48_p1', 'rad44_p1', 'rad29_p1']
-    freq="H"
-    stride=1
-    add_time_features=True
-    normalize=True
     
-    dataset = TimeSeriesDataSet(cvs_path=data_path,
-                                timestamp_col=timestamp_col,
-                                input_len=input_len,
-                                output_len=output_len,
-                                input_cols=input_cols,
-                                output_cols=output_cols,
-                                freq=freq,
-                                stride=stride,
-                                add_time_features=add_time_features,
-                                normalize=normalize)
+    dataset = TimeSeriesDataset(
+        cvs_path="/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv",
+        timestamp_col='DATE_TIME',
+        input_len=input_len,
+        output_len=output_len,
+        input_cols=['IBC1H04CRCUR2', 'MMSHLAE', 'BLA', 'rad48_p1', 'rad44_p1', 'rad29_p1'],
+        output_cols=['rad48_p1', 'rad44_p1', 'rad29_p1'],
+        freq="H",
+        stride=1,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        add_time_features=True,
+        normalize=True,
+        zero_threshold=1e-4,
+        var_threshold=1e-5
+    )
+
+    train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=64)
+
+
+    
     
     
     

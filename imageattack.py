@@ -1,5 +1,5 @@
 import numpy as np
-from Dataset.DataManagement import ImageDataSet
+from Dataset.DataManagement import ImageDataset
 from ImageClassification import ClassificationBase
 from Attacks.ImageAdversarialAttack import AdversarialAttack
 from Attacks.ImageBackdoorAttack import BackdoorAttack
@@ -11,7 +11,7 @@ def main():
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
-    dataset = ImageDataSet(label_path=label_path, transform=None, image_size=image_size)
+    dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
         batch_size=32,
         stratify_by_bad_sample=True,
