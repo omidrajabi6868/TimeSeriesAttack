@@ -27,4 +27,5 @@ class AlexNet:
 
         self.num_classes = num_classes
         self.name = name
-        self.model.fc = torch.nn.Linear(self.model.fc.in_features, num_classes)
+        in_features = self.model.classifier[6].in_features
+        self.model.classifier[6] = torch.nn.Linear(in_features, num_classes)
