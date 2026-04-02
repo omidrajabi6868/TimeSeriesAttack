@@ -23,7 +23,7 @@ class ResNet:
 class AlexNet:
     def __init__(self, name: str ='', num_classes: int=2):
         
-        self.model = models.alexnet.alexnet(weights=models.AlexNet_Weights.IMAGENET1K_V1)
+        self.model = models.alexnet(weights=models.AlexNet_Weights.IMAGENET1K_V1)
 
         self.num_classes = num_classes
         self.name = name

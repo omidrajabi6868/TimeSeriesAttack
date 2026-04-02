@@ -8,23 +8,23 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'backdoor_attack'
+    task = 'adversarial_attack'
     train_original_model = True
 
     train_adversarial_patch = True
 
     train_backdoor_model = True
-    train_vae_model = False
+    train_vae_model = True
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
-    image_size = (640, 288)
+    image_size = (224, 224)
     
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=32,
+        batch_size=64,
         stratify_by_bad_sample=True,
     )
 
@@ -35,7 +35,7 @@ def main():
         print(f'{split_name} bad_ratio: {split_info["bad_ratio"]:.4f}')
 
     classification = ClassificationBase(
-        model_name='ResNet18', 
+        model_name='AlexNet', 
         optimizer_name='Adam', 
         checkpoint_dir='backups'
     )
@@ -45,7 +45,7 @@ def main():
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=20,
+            epoch_num=10,
             resume=False,
             resume_from='backups/last_checkpoint.pth',
         )
@@ -63,7 +63,7 @@ def main():
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(64, 16),
+            window_size=(32, 16),
             stride=8,
             top_k=10,
             max_samples_per_group=2000,
@@ -134,7 +134,7 @@ def main():
             image_channels=3,
             image_size=(image_size[1], image_size[0]),
             latent_dim=128,
-            hidden_dims=[64, 128, 256, 512],
+            hidden_dims=[64, 128, 256],
         )
         backdoor_attack = BackdoorAttack(
             model=classification.model,
@@ -235,6 +235,7 @@ def main():
         selected_cluster_center = latent_vectors[
             clustering['assignments'] == selected_cluster_for_eval
         ].mean(dim=0).to(backdoor_attack.device)
+
         backdoor_val_metrics = backdoor_attack.evaluate_cluster_backdoor(
             data_loader=test_loader,
             selected_cluster=selected_cluster_for_eval,
@@ -254,7 +255,7 @@ def main():
             target_label=1.0,
             source_filter='bad',
             epsilon=learned_epsilon,
-            max_images=200,
+            max_images=50,
         )
         print(f'backdoor_val_visualization: {val_cluster_visualization}')
 
