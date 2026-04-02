@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from typing import Callable, Optional
+from pathlib import Path
 from Network import ClassificationModels
 
 
@@ -21,11 +22,48 @@ class AdversarialAttack:
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         return self.cost_function
 
+    @staticmethod
+    def save_trigger(trigger, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        patch = trigger['patch']
+        if not torch.is_tensor(patch):
+            patch = torch.tensor(patch, dtype=torch.float32)
+        torch.save(
+            {
+                'patch': patch.detach().cpu(),
+                'trigger_box': trigger.get('trigger_box'),
+                'target_label': float(trigger.get('target_label', 0.0)),
+                'source_filter': trigger.get('source_filter', 'bad'),
+                'epsilon': float(trigger.get('epsilon', 0.0)),
+                'history': trigger.get('history', []),
+            },
+            output_path,
+        )
+        return str(output_path)
+
+    @staticmethod
+    def load_trigger(trigger_path, map_location='cpu'):
+        trigger_path = Path(trigger_path)
+        if not trigger_path.exists():
+            raise FileNotFoundError(f'Trigger file not found: {trigger_path}')
+        trigger_payload = torch.load(trigger_path, map_location=map_location)
+        return {
+            'patch': trigger_payload['patch'],
+            'trigger_box': trigger_payload.get('trigger_box'),
+            'target_label': float(trigger_payload.get('target_label', 0.0)),
+            'source_filter': trigger_payload.get('source_filter', 'bad'),
+            'epsilon': float(trigger_payload.get('epsilon', 0.0)),
+            'history': trigger_payload.get('history', []),
+            'path': str(trigger_path),
+        }
+
     def learn_universal_trigger(self,
                                 data_loader,
                                 trigger_box,
                                 target_label=0.0,
                                 source_filter='bad',
+                                validation_loader=None,
                                 steps=100,
                                 learning_rate=0.1,
                                 epsilon=0.08,
@@ -43,6 +81,9 @@ class AdversarialAttack:
         target_tensor_base = torch.tensor(target_label, dtype=torch.float32, device=self.device)
 
         history = []
+        best_patch = None
+        best_step = 0
+        best_val_asr = float('-inf')
 
         for step_idx in range(steps):
             step_losses = []
@@ -80,19 +121,46 @@ class AdversarialAttack:
                 batch_counter += 1
 
             step_loss = float(np.mean(step_losses)) if step_losses else 0.0
-            history.append({
+            step_history = {
                 'step': step_idx + 1,
                 'loss': step_loss,
                 'samples': step_samples,
-            })
+            }
+
+            if validation_loader is not None:
+                val_metrics = self.evaluate_attack_success(
+                    test_loader=validation_loader,
+                    trigger_box=trigger_box,
+                    trigger_patch=trigger_delta.detach(),
+                    target_label=target_label,
+                    source_only_bad=(source_filter == 'bad'),
+                )
+                val_asr = float(val_metrics['attack_success_rate'])
+                step_history['validation_asr'] = val_asr
+                if val_asr > best_val_asr:
+                    best_val_asr = val_asr
+                    best_patch = trigger_delta.detach().squeeze(0).cpu().clone()
+                    best_step = step_idx + 1
+
+            history.append(step_history)
 
             if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
+                val_log = ''
+                if validation_loader is not None:
+                    val_log = f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
                 print(
                     f'[Trigger Learning] step={step_idx + 1}/{steps}, '
                     f'loss={step_loss:.6f}, samples={step_samples}'
+                    f'{val_log}'
                 )
 
-        learned_patch = trigger_delta.detach().squeeze(0).cpu()
+        if best_patch is not None:
+            learned_patch = best_patch
+            selected_step = best_step
+        else:
+            learned_patch = trigger_delta.detach().squeeze(0).cpu()
+            selected_step = steps
+
         return {
             'patch': learned_patch,
             'history': history,
@@ -100,6 +168,9 @@ class AdversarialAttack:
             'target_label': float(target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
+            'selection': 'best_validation_asr' if validation_loader is not None else 'last_step',
+            'selected_step': int(selected_step),
+            'best_validation_asr': None if validation_loader is None else float(best_val_asr),
         }
 
     def evaluate_attack_success(self,

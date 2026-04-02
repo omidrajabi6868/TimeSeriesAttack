@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 from Dataset.DataManagement import ImageDataset
 from Tasks.ImageClassification import ClassificationBase
 from Attacks.ImageAdversarialAttack import AdversarialAttack
@@ -8,6 +9,12 @@ from Network.ImageVAE import ImageVAE
 
 def main():
     task = 'backdoor_attack'
+    train_adversarial_patch = True
+    train_backdoor_model = True
+
+    adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
+    backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
+
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
@@ -69,30 +76,47 @@ def main():
         )
         print(f'initial_adversarial_eval: {initial_attack_eval}')
 
-        print('Adversarial training started ...')
-        learned_trigger = adv_attack.learn_universal_trigger(
-            data_loader=train_loader,
-            trigger_box=natural_trigger['top_candidates'][0],
-            target_label=1.0,
-            source_filter='bad',
-            steps=100,
-            learning_rate=0.001,
-        )
+        if train_adversarial_patch:
+            print('Adversarial training started ...')
+            learned_trigger = adv_attack.learn_universal_trigger(
+                data_loader=train_loader,
+                trigger_box=natural_trigger['top_candidates'][0],
+                target_label=1.0,
+                source_filter='bad',
+                validation_loader=val_loader,
+                steps=100,
+                learning_rate=0.001,
+            )
+            print(
+                'adversarial_patch_selection: '
+                f'{learned_trigger["selection"]}, '
+                f'step={learned_trigger["selected_step"]}, '
+                f'best_val_asr={learned_trigger["best_validation_asr"]}'
+            )
+            saved_trigger_path = adv_attack.save_trigger(
+                trigger=learned_trigger,
+                output_path=adversarial_patch_path,
+            )
+            print(f'saved_adversarial_trigger: {saved_trigger_path}')
+        else:
+            learned_trigger = adv_attack.load_trigger(adversarial_patch_path)
+            print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
+        eval_trigger_box = learned_trigger.get('trigger_box') or natural_trigger['top_candidates'][0]
 
         learned_adversarial_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
-            trigger_box=natural_trigger['top_candidates'][0],
+            trigger_box=eval_trigger_box,
             trigger_patch=learned_trigger['patch'],
             target_label=1.0,
             source_only_bad=True,
         )
-        print(f'learned_adversarial_eval: {learned_adversarial_eval}')
+        print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
 
         dataset.save_trigger_visualizations(
             trigger_analysis=natural_trigger,
             output_dir='backups/trigger_visualization',
             num_examples=20,
-            trigger_box=natural_trigger['top_candidates'][0],
+            trigger_box=eval_trigger_box,
             trigger_delta=learned_trigger['patch'],
             model=classification.model,
             target_label=1.0,
@@ -170,33 +194,43 @@ def main():
         print(f"selected_cluster: {cluster_selection['selected_cluster']}")
         print(f"cluster_stats: {cluster_selection['cluster_stats']}")
 
-        backdoor_result = backdoor_attack.learned_backdoor(
-            data_loader=train_loader,
-            cluster_latents=latent_vectors,
-            cluster_assignments=clustering['assignments'],
-            selected_cluster=cluster_selection['selected_cluster'],
-            cluster_centroids=clustering['centroids'],
-            validation_loader=val_loader,
-            target_label=1.0,
-            # Poison only bad samples that fall inside the selected latent cluster.
-            source_filter='bad',
-            epochs=50,
-            learning_rate=1e-4,
-            epsilon=None,
-            epsilon_quantile=0.9,
-            epsilon_margin_scale=1.0,
-            log_interval=1,
-            checkpoint_dir='backups/backdoor_checkpoints',
-        )
-        print(f'backdoor_training_result: {backdoor_result}')
-        learned_epsilon = float(backdoor_result['epsilon'])
+        if train_backdoor_model:
+            backdoor_result = backdoor_attack.learned_backdoor(
+                data_loader=train_loader,
+                cluster_latents=latent_vectors,
+                cluster_assignments=clustering['assignments'],
+                selected_cluster=cluster_selection['selected_cluster'],
+                cluster_centroids=clustering['centroids'],
+                validation_loader=val_loader,
+                target_label=1.0,
+                # Poison only bad samples that fall inside the selected latent cluster.
+                source_filter='bad',
+                epochs=50,
+                learning_rate=1e-4,
+                epsilon=None,
+                epsilon_quantile=0.9,
+                epsilon_margin_scale=1.0,
+                log_interval=1,
+                checkpoint_dir='backups/backdoor_checkpoints',
+            )
+            print(f'backdoor_training_result: {backdoor_result}')
+            learned_epsilon = float(backdoor_result['epsilon'])
+            selected_cluster_for_eval = cluster_selection['selected_cluster']
+        else:
+            backdoor_result = backdoor_attack.load_backdoor_checkpoint(
+                checkpoint_file=backdoor_checkpoint_path,
+                load_optimizer=False,
+            )
+            print(f'loaded_backdoor_checkpoint: {backdoor_result["path"]}')
+            learned_epsilon = float(backdoor_result['epsilon'])
+            selected_cluster_for_eval = int(backdoor_result['selected_cluster'])
 
         selected_cluster_center = latent_vectors[
-            clustering['assignments'] == cluster_selection['selected_cluster']
+            clustering['assignments'] == selected_cluster_for_eval
         ].mean(dim=0).to(backdoor_attack.device)
         backdoor_val_metrics = backdoor_attack.evaluate_cluster_backdoor(
             data_loader=val_loader,
-            selected_cluster=cluster_selection['selected_cluster'],
+            selected_cluster=selected_cluster_for_eval,
             selected_cluster_center=selected_cluster_center,
             cluster_centroids=clustering['centroids'].to(backdoor_attack.device),
             target_label=1.0,
@@ -208,7 +242,7 @@ def main():
             data_loader=val_loader,
             cluster_latents=latent_vectors,
             cluster_assignments=clustering['assignments'],
-            selected_cluster=cluster_selection['selected_cluster'],
+            selected_cluster=selected_cluster_for_eval,
             output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
             target_label=1.0,
             source_filter='bad',
