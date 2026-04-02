@@ -87,8 +87,15 @@ def main():
                 trigger_box=natural_trigger['top_candidates'][0],
                 target_label=1.0,
                 source_filter='bad',
+                validation_loader=val_loader,
                 steps=100,
                 learning_rate=0.001,
+            )
+            print(
+                'adversarial_patch_selection: '
+                f'{learned_trigger["selection"]}, '
+                f'step={learned_trigger["selected_step"]}, '
+                f'best_val_asr={learned_trigger["best_validation_asr"]}'
             )
             saved_trigger_path = adv_attack.save_trigger(
                 trigger=learned_trigger,
@@ -107,7 +114,7 @@ def main():
             target_label=1.0,
             source_only_bad=True,
         )
-        print(f'learned_adversarial_eval: {learned_adversarial_eval}')
+        print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
 
         dataset.save_trigger_visualizations(
             trigger_analysis=natural_trigger,
