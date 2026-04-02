@@ -19,4 +19,4 @@ module load container_env pytorch-gpu/2.2.0
 export PYTHONUNBUFFERED=1
 
 # Execute
-crun python main.py
+crun python imageattack.py

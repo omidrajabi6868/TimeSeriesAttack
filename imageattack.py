@@ -7,7 +7,7 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (640, 288)
     
