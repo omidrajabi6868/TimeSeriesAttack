@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from typing import Callable, Optional
+from pathlib import Path
 from Network import ClassificationModels
 
 
@@ -20,6 +21,42 @@ class AdversarialAttack:
     def _build_cost_function(self):
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         return self.cost_function
+
+    @staticmethod
+    def save_trigger(trigger, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        patch = trigger['patch']
+        if not torch.is_tensor(patch):
+            patch = torch.tensor(patch, dtype=torch.float32)
+        torch.save(
+            {
+                'patch': patch.detach().cpu(),
+                'trigger_box': trigger.get('trigger_box'),
+                'target_label': float(trigger.get('target_label', 0.0)),
+                'source_filter': trigger.get('source_filter', 'bad'),
+                'epsilon': float(trigger.get('epsilon', 0.0)),
+                'history': trigger.get('history', []),
+            },
+            output_path,
+        )
+        return str(output_path)
+
+    @staticmethod
+    def load_trigger(trigger_path, map_location='cpu'):
+        trigger_path = Path(trigger_path)
+        if not trigger_path.exists():
+            raise FileNotFoundError(f'Trigger file not found: {trigger_path}')
+        trigger_payload = torch.load(trigger_path, map_location=map_location)
+        return {
+            'patch': trigger_payload['patch'],
+            'trigger_box': trigger_payload.get('trigger_box'),
+            'target_label': float(trigger_payload.get('target_label', 0.0)),
+            'source_filter': trigger_payload.get('source_filter', 'bad'),
+            'epsilon': float(trigger_payload.get('epsilon', 0.0)),
+            'history': trigger_payload.get('history', []),
+            'path': str(trigger_path),
+        }
 
     def learn_universal_trigger(self,
                                 data_loader,

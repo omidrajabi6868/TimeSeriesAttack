@@ -816,6 +816,31 @@ class BackdoorAttack:
             checkpoint_file,
         )
 
+    def load_backdoor_checkpoint(self, checkpoint_file, load_optimizer=True):
+        checkpoint_file = Path(checkpoint_file)
+        if not checkpoint_file.exists():
+            raise FileNotFoundError(f'Backdoor checkpoint not found: {checkpoint_file}')
+
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        if checkpoint.get('vae_state_dict') is not None:
+            self.vae.load_state_dict(checkpoint['vae_state_dict'])
+        if (
+            load_optimizer
+            and self.optimizer is not None
+            and checkpoint.get('optimizer_state_dict') is not None
+        ):
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        return {
+            'epoch': int(checkpoint.get('epoch', 0)),
+            'selected_cluster': int(checkpoint.get('selected_cluster', -1)),
+            'target_label': checkpoint.get('target_label', 1.0),
+            'epsilon': float(checkpoint.get('epsilon', 0.5)),
+            'history': checkpoint.get('history', []),
+            'path': str(checkpoint_file),
+        }
+
     def save_successful_cluster_attacks(
         self,
         data_loader,
