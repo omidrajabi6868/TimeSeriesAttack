@@ -91,7 +91,7 @@ def main():
         dataset.save_trigger_visualizations(
             trigger_analysis=natural_trigger,
             output_dir='backups/trigger_visualization',
-            num_examples=4,
+            num_examples=20,
             trigger_box=natural_trigger['top_candidates'][0],
             trigger_delta=learned_trigger['patch'],
             model=classification.model,
@@ -119,7 +119,7 @@ def main():
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=300,
-            learning_rate=1e-5,
+            learning_rate=1e-4,
             beta=0.1,
             log_interval=1,
             kl_warmup_epochs=30,
@@ -136,6 +136,10 @@ def main():
             preview_max_images=1,
             preview_interval=1,
         )
+
+        if Path('backups/vae_checkpoints/best_vae_checkpoint.pth').exist():
+            backdoor_attack.load_vae_checkpoint('backups/vae_checkpoints/best_vae_checkpoint.pth', load_optimizer=False)
+
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
         vae_preview = backdoor_attack.save_vae_reconstructions(
             data_loader=val_loader,
