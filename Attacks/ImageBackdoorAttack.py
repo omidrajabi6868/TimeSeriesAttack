@@ -45,9 +45,112 @@ class BackdoorAttack:
             target_np = np.array([[float(target_label)]], dtype=np.float32)
         return torch.tensor(target_np, dtype=torch.float32, device=device)
 
+    @staticmethod
+    def _compute_reconstruction_loss(x_hat, data, recon_loss_type='l1'):
+        recon_loss_type = str(recon_loss_type).lower()
+        if recon_loss_type == 'mse':
+            return torch.nn.functional.mse_loss(x_hat, data)
+        if recon_loss_type == 'smooth_l1':
+            return torch.nn.functional.smooth_l1_loss(x_hat, data)
+        if recon_loss_type == 'l1':
+            return torch.nn.functional.l1_loss(x_hat, data)
+        if recon_loss_type == 'l1_mse':
+            l1 = torch.nn.functional.l1_loss(x_hat, data)
+            mse = torch.nn.functional.mse_loss(x_hat, data)
+            return 0.8 * l1 + 0.2 * mse
+        raise ValueError(
+            f'Unsupported recon_loss_type={recon_loss_type}. '
+            f'Use one of: mse, smooth_l1, l1, l1_mse.'
+        )
+
+    @staticmethod
+    def _vae_kl_loss(mu, logvar):
+        return -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+    def _save_vae_checkpoint(
+        self,
+        checkpoint_path,
+        epoch,
+        best_val_loss,
+        optimizer,
+        history,
+        config,
+    ):
+        checkpoint_path = Path(checkpoint_path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                'epoch': int(epoch),
+                'best_val_loss': float(best_val_loss),
+                'vae_state_dict': self.vae.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
+                'history': history,
+                'config': config,
+            },
+            checkpoint_path,
+        )
+        return str(checkpoint_path)
+
+    def load_vae_checkpoint(self, checkpoint_path, load_optimizer=True, optimizer=None):
+        checkpoint_path = Path(checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f'VAE checkpoint not found: {checkpoint_path}')
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.vae.load_state_dict(checkpoint['vae_state_dict'])
+        if load_optimizer and optimizer is not None and checkpoint.get('optimizer_state_dict') is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        return {
+            'epoch': int(checkpoint.get('epoch', 0)),
+            'best_val_loss': float(checkpoint.get('best_val_loss', float('inf'))),
+            'history': checkpoint.get('history', []),
+            'config': checkpoint.get('config', {}),
+            'path': str(checkpoint_path),
+        }
+
+    def _evaluate_vae(
+        self,
+        data_loader,
+        beta,
+        logvar_clamp,
+        recon_loss_type='l1',
+    ):
+        if data_loader is None:
+            return None
+
+        self.vae.eval()
+        losses = []
+        recon_losses = []
+        kl_losses = []
+
+        with torch.no_grad():
+            for data, _ in data_loader:
+                data = data.to(self.device)
+                mu, logvar = self.vae.encode(data)
+                if logvar_clamp is not None:
+                    logvar = torch.clamp(logvar, min=logvar_clamp[0], max=logvar_clamp[1])
+
+                x_hat = self.vae.decode(mu)
+                recon_loss = self._compute_reconstruction_loss(x_hat, data, recon_loss_type=recon_loss_type)
+                kl = self._vae_kl_loss(mu, logvar)
+                loss = recon_loss + beta * kl
+
+                losses.append(float(loss.item()))
+                recon_losses.append(float(recon_loss.item()))
+                kl_losses.append(float(kl.item()))
+
+        self.vae.train()
+        return {
+            'loss': float(np.mean(losses)) if losses else 0.0,
+            'reconstruction_loss': float(np.mean(recon_losses)) if recon_losses else 0.0,
+            'kl_loss': float(np.mean(kl_losses)) if kl_losses else 0.0,
+        }
+
     def fit_vae(
         self,
         train_loader,
+        val_loader=None,
         epochs=5,
         learning_rate=1e-3,
         beta=1.0,
@@ -55,6 +158,12 @@ class BackdoorAttack:
         kl_warmup_epochs=0,
         logvar_clamp=(-10.0, 10.0),
         grad_clip_norm=1.0,
+        recon_loss_type='l1',
+        deterministic_train_recon=True,
+        checkpoint_dir='backups/vae_checkpoints',
+        resume_from=None,
+        save_best=True,
+        save_last=True,
         preview_loader=None,
         preview_output_dir='backups/vae_reconstruction_preview/train',
         preview_max_images=16,
@@ -63,23 +172,62 @@ class BackdoorAttack:
         self.vae.train()
         optimizer = torch.optim.Adam(self.vae.parameters(), lr=learning_rate)
         history = []
+        checkpoint_path = Path(checkpoint_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        best_ckpt_path = checkpoint_path / 'best_vae_checkpoint.pth'
+        last_ckpt_path = checkpoint_path / 'last_vae_checkpoint.pth'
+        start_epoch = 0
+        best_val_loss = float('inf')
         preview_path = Path(preview_output_dir) if preview_loader is not None else None
         if preview_path is not None:
             preview_path.mkdir(parents=True, exist_ok=True)
 
-        for epoch_idx in range(epochs):
+        if resume_from is not None:
+            resume_path = Path(resume_from)
+            if resume_path.exists():
+                resume_info = self.load_vae_checkpoint(
+                    checkpoint_path=resume_path,
+                    load_optimizer=True,
+                    optimizer=optimizer,
+                )
+                start_epoch = int(resume_info['epoch'])
+                best_val_loss = float(resume_info['best_val_loss'])
+                if isinstance(resume_info['history'], list):
+                    history = resume_info['history']
+                print(f"[VAE] resumed from {resume_info['path']} at epoch={start_epoch}")
+            else:
+                print(f'[VAE] resume checkpoint not found ({resume_path}), starting from scratch.')
+
+        fit_config = {
+            'epochs': int(epochs),
+            'learning_rate': float(learning_rate),
+            'beta': float(beta),
+            'kl_warmup_epochs': int(kl_warmup_epochs),
+            'logvar_clamp': tuple(logvar_clamp) if logvar_clamp is not None else None,
+            'grad_clip_norm': None if grad_clip_norm is None else float(grad_clip_norm),
+            'recon_loss_type': str(recon_loss_type),
+            'deterministic_train_recon': bool(deterministic_train_recon),
+        }
+
+        for epoch_idx in range(start_epoch, epochs):
             epoch_losses = []
             epoch_recon_losses = []
             epoch_kl_losses = []
 
             for data, _ in train_loader:
                 data = data.to(self.device)
-                x_hat, mu, logvar = self.vae(data)
+                mu, logvar = self.vae.encode(data)
                 if logvar_clamp is not None:
                     logvar = torch.clamp(logvar, min=logvar_clamp[0], max=logvar_clamp[1])
 
-                recon_loss = torch.nn.functional.mse_loss(x_hat, data)
-                kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                if deterministic_train_recon:
+                    z = mu
+                else:
+                    z = self.vae.reparameterize(mu, logvar)
+                x_hat = self.vae.decode(z)
+
+                recon_loss = self._compute_reconstruction_loss(x_hat, data, recon_loss_type=recon_loss_type)
+                kl = self._vae_kl_loss(mu, logvar)
                 beta_t = beta
                 if kl_warmup_epochs and kl_warmup_epochs > 0:
                     beta_t = beta * min(1.0, (epoch_idx + 1) / float(kl_warmup_epochs))
@@ -109,9 +257,26 @@ class BackdoorAttack:
                 'reconstruction_loss': float(np.mean(epoch_recon_losses)) if epoch_recon_losses else 0.0,
                 'kl_loss': float(np.mean(epoch_kl_losses)) if epoch_kl_losses else 0.0,
             }
+            val_metrics = self._evaluate_vae(
+                data_loader=val_loader,
+                beta=beta_t,
+                logvar_clamp=logvar_clamp,
+                recon_loss_type=recon_loss_type,
+            )
+            if val_metrics is not None:
+                metrics['val_loss'] = float(val_metrics['loss'])
+                metrics['val_reconstruction_loss'] = float(val_metrics['reconstruction_loss'])
+                metrics['val_kl_loss'] = float(val_metrics['kl_loss'])
             history.append(metrics)
 
             if log_interval is not None and log_interval > 0 and (epoch_idx + 1) % log_interval == 0:
+                val_text = ''
+                if val_metrics is not None:
+                    val_text = (
+                        f", val_loss={metrics['val_loss']:.6f}, "
+                        f"val_recon={metrics['val_reconstruction_loss']:.6f}, "
+                        f"val_kl={metrics['val_kl_loss']:.6f}"
+                    )
                 print(
                     f"[VAE] epoch={epoch_idx + 1}/{epochs}, "
                     f"loss={metrics['loss']:.6f}, "
@@ -122,7 +287,32 @@ class BackdoorAttack:
                     f"logvar_mean={float(logvar.mean().item()):.6f}, "
                     f"logvar_std={float(logvar.std().item()):.6f}, "
                     f"beta={float(beta_t):.4f}"
+                    f"{val_text}"
                 )
+
+            if save_last:
+                self._save_vae_checkpoint(
+                    checkpoint_path=last_ckpt_path,
+                    epoch=epoch_idx + 1,
+                    best_val_loss=best_val_loss,
+                    optimizer=optimizer,
+                    history=history,
+                    config=fit_config,
+                )
+
+            if save_best:
+                monitor_loss = metrics['val_loss'] if 'val_loss' in metrics else metrics['loss']
+                if monitor_loss < best_val_loss:
+                    best_val_loss = float(monitor_loss)
+                    saved_path = self._save_vae_checkpoint(
+                        checkpoint_path=best_ckpt_path,
+                        epoch=epoch_idx + 1,
+                        best_val_loss=best_val_loss,
+                        optimizer=optimizer,
+                        history=history,
+                        config=fit_config,
+                    )
+                    print(f'[VAE] saved new best checkpoint: {saved_path} (monitor_loss={best_val_loss:.6f})')
 
             if (
                 preview_loader is not None
