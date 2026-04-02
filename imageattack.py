@@ -9,8 +9,12 @@ from Network.ImageVAE import ImageVAE
 
 def main():
     task = 'backdoor_attack'
+    train_original_model = True
+
     train_adversarial_patch = True
+
     train_backdoor_model = True
+    train_vae_model = False
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
@@ -36,7 +40,7 @@ def main():
         checkpoint_dir='backups'
     )
 
-    if task=='training':
+    if train_original_model:
         classification.train_model(
             train_loader,
             val_loader,
@@ -45,16 +49,16 @@ def main():
             resume=False,
             resume_from='backups/last_checkpoint.pth',
         )
+    else:
+        classification.load_checkpoint("backups/best_checkpoint.pth")
 
-    classification.load_checkpoint("backups/best_checkpoint.pth")
-
-    # test_metrics = classification.evaluate_model(test_loader=test_loader)
-    # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
-    # print(
-    #     'test_good_accuracy: '
-    #     f'{test_metrics["good_accuracy"]}, '
-    #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
-    # )
+    test_metrics = classification.evaluate_model(test_loader=test_loader)
+    print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    print(
+        'test_good_accuracy: '
+        f'{test_metrics["good_accuracy"]}, '
+        f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
+    )
 
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
@@ -139,31 +143,34 @@ def main():
 
         # Learn latent space for the dataset on image data.
         print('VAE encoding started: ')
-        vae_history = backdoor_attack.fit_vae(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=300,
-            learning_rate=1e-4,
-            beta=0.1,
-            log_interval=1,
-            kl_warmup_epochs=30,
-            logvar_clamp=(-50.0, 50.0),
-            grad_clip_norm=1.0,
-            recon_loss_type='l1_mse',
-            deterministic_train_recon=True,
-            checkpoint_dir='backups/vae_checkpoints',
-            resume_from='backups/vae_checkpoints/last_vae_checkpoint.pth',
-            save_best=True,
-            save_last=True,
-            preview_loader=val_loader,
-            preview_output_dir='backups/vae_reconstruction_preview/train_epochs',
-            preview_max_images=1,
-            preview_interval=1,
-        )
-
-        if Path('backups/vae_checkpoints/best_vae_checkpoint.pth').exist():
+        if train_vae_model:
+            vae_history = backdoor_attack.fit_vae(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=300,
+                learning_rate=1e-4,
+                beta=0.1,
+                log_interval=1,
+                kl_warmup_epochs=30,
+                logvar_clamp=(-50.0, 50.0),
+                grad_clip_norm=1.0,
+                recon_loss_type='l1_mse',
+                deterministic_train_recon=True,
+                checkpoint_dir='backups/vae_checkpoints',
+                resume_from='backups/vae_checkpoints/last_vae_checkpoint.pth',
+                save_best=True,
+                save_last=True,
+                preview_loader=val_loader,
+                preview_output_dir='backups/vae_reconstruction_preview/train_epochs',
+                preview_max_images=1,
+                preview_interval=1,
+            )
+        elif Path('backups/vae_checkpoints/best_vae_checkpoint.pth').exist():
             backdoor_attack.load_vae_checkpoint('backups/vae_checkpoints/best_vae_checkpoint.pth', load_optimizer=False)
+        else:
+            raise FileNotFoundError('VAE checkpoint not found. Please train it first.')
 
+            
         print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
         vae_preview = backdoor_attack.save_vae_reconstructions(
             data_loader=val_loader,
@@ -229,7 +236,7 @@ def main():
             clustering['assignments'] == selected_cluster_for_eval
         ].mean(dim=0).to(backdoor_attack.device)
         backdoor_val_metrics = backdoor_attack.evaluate_cluster_backdoor(
-            data_loader=val_loader,
+            data_loader=test_loader,
             selected_cluster=selected_cluster_for_eval,
             selected_cluster_center=selected_cluster_center,
             cluster_centroids=clustering['centroids'].to(backdoor_attack.device),
@@ -239,7 +246,7 @@ def main():
         print(f'backdoor_val_metrics: {backdoor_val_metrics}')
 
         val_cluster_visualization = backdoor_attack.save_successful_cluster_attacks(
-            data_loader=val_loader,
+            data_loader=test_loader,
             cluster_latents=latent_vectors,
             cluster_assignments=clustering['assignments'],
             selected_cluster=selected_cluster_for_eval,
