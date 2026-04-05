@@ -64,7 +64,7 @@ def main():
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(32, 16),
+            window_size=(25, 10),
             stride=8,
             top_k=10,
             max_samples_per_group=2000,
@@ -90,7 +90,7 @@ def main():
                 target_label=1.0,
                 source_filter='bad',
                 validation_loader=val_loader,
-                steps=100,
+                steps=300,
                 learning_rate=0.001,
             )
             print(
