@@ -33,6 +33,7 @@ class AdversarialAttack:
             {
                 'patch': patch.detach().cpu(),
                 'trigger_box': trigger.get('trigger_box'),
+                'trigger_boxes': trigger.get('trigger_boxes'),
                 'target_label': float(trigger.get('target_label', 0.0)),
                 'source_filter': trigger.get('source_filter', 'bad'),
                 'epsilon': float(trigger.get('epsilon', 0.0)),
@@ -51,6 +52,7 @@ class AdversarialAttack:
         return {
             'patch': trigger_payload['patch'],
             'trigger_box': trigger_payload.get('trigger_box'),
+            'trigger_boxes': trigger_payload.get('trigger_boxes'),
             'target_label': float(trigger_payload.get('target_label', 0.0)),
             'source_filter': trigger_payload.get('source_filter', 'bad'),
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
@@ -70,13 +72,16 @@ class AdversarialAttack:
                                 log_interval=1):
         self.model.eval()
 
-        x = int(trigger_box['x'])
-        y = int(trigger_box['y'])
-        width = int(trigger_box['width'])
-        height = int(trigger_box['height'])
+        trigger_boxes = self._normalize_trigger_boxes(trigger_box)
+        base_box = trigger_boxes[0]
+        width = int(base_box['width'])
+        height = int(base_box['height'])
+        for candidate_box in trigger_boxes[1:]:
+            if int(candidate_box['width']) != width or int(candidate_box['height']) != height:
+                raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
 
         channels = 3
-        trigger_delta = torch.zeros((1, channels, height, width), device=self.device, requires_grad=True)
+        trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device, requires_grad=True)
         optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
         target_tensor_base = torch.tensor(target_label, dtype=torch.float32, device=self.device)
 
@@ -106,7 +111,7 @@ class AdversarialAttack:
                     continue
 
                 selected_inputs = inputs[source_mask].clone()
-                poisoned_inputs = self._inject_trigger(selected_inputs, trigger_box, trigger_patch=trigger_delta)
+                poisoned_inputs = self._inject_trigger(selected_inputs, trigger_boxes, trigger_patch=trigger_delta)
 
                 outputs = self.model(poisoned_inputs)
                 target_tensor = target_tensor_base.unsqueeze(0).expand(outputs.shape[0], -1)
@@ -130,7 +135,7 @@ class AdversarialAttack:
             if validation_loader is not None:
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
-                    trigger_box=trigger_box,
+                    trigger_box=trigger_boxes,
                     trigger_patch=trigger_delta.detach(),
                     target_label=target_label,
                     source_only_bad=(source_filter == 'bad'),
@@ -139,7 +144,7 @@ class AdversarialAttack:
                 step_history['validation_asr'] = val_asr
                 if val_asr > best_val_asr:
                     best_val_asr = val_asr
-                    best_patch = trigger_delta.detach().squeeze(0).cpu().clone()
+                    best_patch = trigger_delta.detach().cpu().clone()
                     best_step = step_idx + 1
 
             history.append(step_history)
@@ -158,13 +163,14 @@ class AdversarialAttack:
             learned_patch = best_patch
             selected_step = best_step
         else:
-            learned_patch = trigger_delta.detach().squeeze(0).cpu()
+            learned_patch = trigger_delta.detach().cpu()
             selected_step = steps
 
         return {
             'patch': learned_patch,
             'history': history,
-            'trigger_box': trigger_box,
+            'trigger_box': base_box,
+            'trigger_boxes': trigger_boxes,
             'target_label': float(target_label),
             'source_filter': source_filter,
             'epsilon': float(epsilon),
@@ -231,15 +237,35 @@ class AdversarialAttack:
         }
 
     @staticmethod
+    def _normalize_trigger_boxes(trigger_box):
+        if isinstance(trigger_box, list):
+            if len(trigger_box) == 0:
+                raise ValueError('trigger_box list cannot be empty.')
+            return trigger_box
+        return [trigger_box]
+
+    @staticmethod
+    def _build_blend_mask(height, width, channels, device, dtype, edge_softness=0.2):
+        softness = float(max(0.0, min(edge_softness, 0.49)))
+        if softness <= 0.0:
+            return torch.ones((1, channels, height, width), device=device, dtype=dtype)
+
+        y_coords = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=dtype)
+        x_coords = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=dtype)
+        y_dist = torch.minimum(y_coords, 1.0 - y_coords)
+        x_dist = torch.minimum(x_coords, 1.0 - x_coords)
+        y_weights = torch.clamp(y_dist / softness, 0.0, 1.0)
+        x_weights = torch.clamp(x_dist / softness, 0.0, 1.0)
+        y_weights = 0.5 - 0.5 * torch.cos(np.pi * y_weights)
+        x_weights = 0.5 - 0.5 * torch.cos(np.pi * x_weights)
+        mask_2d = torch.outer(y_weights, x_weights)
+        return mask_2d.view(1, 1, height, width).expand(1, channels, height, width)
+
+    @staticmethod
     def _inject_trigger(inputs, trigger_box, trigger_value=(1.0, 1.0, 1.0), trigger_patch=None):
-        x = int(trigger_box['x'])
-        y = int(trigger_box['y'])
-        width = int(trigger_box['width'])
-        height = int(trigger_box['height'])
+        trigger_boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
 
         _, channels, input_h, input_w = inputs.shape
-        if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
-            raise ValueError('trigger_box is out of image bounds.')
 
         if trigger_patch is not None:
             if not torch.is_tensor(trigger_patch):
@@ -247,27 +273,56 @@ class AdversarialAttack:
             trigger_patch = trigger_patch.to(device=inputs.device, dtype=inputs.dtype)
 
             if trigger_patch.dim() == 3:
-                patch = trigger_patch.unsqueeze(0)
+                patch_bank = trigger_patch.unsqueeze(0)
             elif trigger_patch.dim() == 4:
-                patch = trigger_patch
+                patch_bank = trigger_patch
             else:
                 raise ValueError('trigger_patch must be CHW or NCHW tensor-like.')
+        else:
+            patch_bank = None
 
-            if patch.shape[1] != channels or patch.shape[2] != height or patch.shape[3] != width:
-                raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
+        for idx, box in enumerate(trigger_boxes):
+            x = int(box['x'])
+            y = int(box['y'])
+            width = int(box['width'])
+            height = int(box['height'])
 
-            if patch.shape[0] == 1:
-                patch = patch.expand(inputs.shape[0], -1, -1, -1)
-            elif patch.shape[0] != inputs.shape[0]:
-                raise ValueError('trigger_patch batch dimension must be 1 or equal to input batch size.')
+            if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
+                raise ValueError('trigger_box is out of image bounds.')
 
-            patched_region = torch.clamp(inputs[:, :, y:y + height, x:x + width] + patch, 0.0, 1.0)
-            inputs[:, :, y:y + height, x:x + width] = patched_region
-            return inputs
+            region = inputs[:, :, y:y + height, x:x + width]
+            blend_mask = AdversarialAttack._build_blend_mask(
+                height=height,
+                width=width,
+                channels=channels,
+                device=inputs.device,
+                dtype=inputs.dtype,
+            )
 
-        trigger_tensor = torch.tensor(trigger_value, dtype=inputs.dtype, device=inputs.device).view(channels, 1, 1)
-        if trigger_tensor.shape[0] != channels:
-            raise ValueError('trigger_value channel count must match input channels.')
+            if patch_bank is not None:
+                if patch_bank.shape[1] != channels or patch_bank.shape[2] != height or patch_bank.shape[3] != width:
+                    raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
 
-        inputs[:, :, y:y + height, x:x + width] = trigger_tensor
+                if patch_bank.shape[0] == len(trigger_boxes):
+                    patch = patch_bank[idx].unsqueeze(0).expand(inputs.shape[0], -1, -1, -1)
+                elif patch_bank.shape[0] == 1:
+                    patch = patch_bank.expand(inputs.shape[0], -1, -1, -1)
+                elif patch_bank.shape[0] == inputs.shape[0]:
+                    patch = patch_bank
+                else:
+                    raise ValueError(
+                        'trigger_patch batch dimension must be 1, match input batch size, '
+                        'or match number of trigger boxes.'
+                    )
+
+                patched_region = torch.clamp(region + patch, 0.0, 1.0)
+                blended_region = region * (1.0 - blend_mask) + patched_region * blend_mask
+            else:
+                trigger_tensor = torch.tensor(trigger_value, dtype=inputs.dtype, device=inputs.device).view(channels, 1, 1)
+                if trigger_tensor.shape[0] != channels:
+                    raise ValueError('trigger_value channel count must match input channels.')
+                target_region = trigger_tensor.unsqueeze(0).expand(inputs.shape[0], -1, height, width)
+                blended_region = region * (1.0 - blend_mask) + target_region * blend_mask
+
+            inputs[:, :, y:y + height, x:x + width] = blended_region
         return inputs

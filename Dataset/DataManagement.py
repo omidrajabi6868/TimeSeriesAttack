@@ -394,39 +394,52 @@ class ImageDataset(TorchDataset):
 
     @staticmethod
     def _draw_box(image_np, trigger_box, color=(1.0, 0.0, 0.0)):
-        x = int(trigger_box['x'])
-        y = int(trigger_box['y'])
-        width = int(trigger_box['width'])
-        height = int(trigger_box['height'])
-
+        boxes = trigger_box if isinstance(trigger_box, list) else [trigger_box]
         boxed = image_np.copy()
         line_thickness = 2
-        boxed[y:y + line_thickness, x:x + width, :] = color
-        boxed[y + height - line_thickness:y + height, x:x + width, :] = color
-        boxed[y:y + height, x:x + line_thickness, :] = color
-        boxed[y:y + height, x + width - line_thickness:x + width, :] = color
+        for box in boxes:
+            x = int(box['x'])
+            y = int(box['y'])
+            width = int(box['width'])
+            height = int(box['height'])
+            boxed[y:y + line_thickness, x:x + width, :] = color
+            boxed[y + height - line_thickness:y + height, x:x + width, :] = color
+            boxed[y:y + height, x:x + line_thickness, :] = color
+            boxed[y:y + height, x + width - line_thickness:x + width, :] = color
         return boxed
 
     @staticmethod
     def _apply_delta_trigger(image_np, trigger_box, trigger_delta):
-        x = int(trigger_box['x'])
-        y = int(trigger_box['y'])
-        width = int(trigger_box['width'])
-        height = int(trigger_box['height'])
+        boxes = trigger_box if isinstance(trigger_box, list) else [trigger_box]
 
         if hasattr(trigger_delta, 'detach'):
             trigger_delta = trigger_delta.detach().cpu().numpy()
         if trigger_delta.ndim == 3:
-            delta_hwc = np.transpose(trigger_delta, (1, 2, 0))
+            delta_bank = np.expand_dims(trigger_delta, axis=0)
+        elif trigger_delta.ndim == 4:
+            delta_bank = trigger_delta
         else:
-            raise ValueError('trigger_delta must have shape (C, H, W).')
+            raise ValueError('trigger_delta must have shape (C, H, W) or (N, C, H, W).')
 
         patched = image_np.copy()
-        patched[y:y + height, x:x + width, :] = np.clip(
-            patched[y:y + height, x:x + width, :] + delta_hwc,
-            0.0,
-            1.0,
-        )
+        for idx, box in enumerate(boxes):
+            x = int(box['x'])
+            y = int(box['y'])
+            width = int(box['width'])
+            height = int(box['height'])
+
+            if delta_bank.shape[0] == len(boxes):
+                delta_hwc = np.transpose(delta_bank[idx], (1, 2, 0))
+            elif delta_bank.shape[0] == 1:
+                delta_hwc = np.transpose(delta_bank[0], (1, 2, 0))
+            else:
+                raise ValueError('trigger_delta first dimension must be 1 or match number of trigger boxes.')
+
+            patched[y:y + height, x:x + width, :] = np.clip(
+                patched[y:y + height, x:x + width, :] + delta_hwc,
+                0.0,
+                1.0,
+            )
         return patched
     
     @staticmethod

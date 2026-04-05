@@ -12,6 +12,7 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
+    adversarial_patch_count = 3
 
     train_backdoor_model = True
     train_vae_model = True
@@ -71,10 +72,11 @@ def main():
         print('Natural trigger candidates (bad vs good):')
         for candidate in natural_trigger['top_candidates']:
             print(candidate)
+        selected_trigger_boxes = natural_trigger['top_candidates'][:max(1, adversarial_patch_count)]
 
         initial_attack_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
-            trigger_box=natural_trigger['top_candidates'][0],
+            trigger_box=selected_trigger_boxes,
             target_label=1.0,
             source_only_bad=True,
         )
@@ -84,7 +86,7 @@ def main():
             print('Adversarial training started ...')
             learned_trigger = adv_attack.learn_universal_trigger(
                 data_loader=train_loader,
-                trigger_box=natural_trigger['top_candidates'][0],
+                trigger_box=selected_trigger_boxes,
                 target_label=1.0,
                 source_filter='bad',
                 validation_loader=val_loader,
@@ -105,7 +107,11 @@ def main():
         else:
             learned_trigger = adv_attack.load_trigger(adversarial_patch_path)
             print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
-        eval_trigger_box = learned_trigger.get('trigger_box') or natural_trigger['top_candidates'][0]
+        eval_trigger_box = (
+            learned_trigger.get('trigger_boxes')
+            or learned_trigger.get('trigger_box')
+            or selected_trigger_boxes
+        )
 
         learned_adversarial_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
