@@ -32,7 +32,7 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 5
+    adversarial_patch_count = 3
 
     train_backdoor_model = True
     train_vae_model = True
@@ -85,7 +85,7 @@ def main():
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=(25, 10),
-            stride=8,
+            stride=16,
             top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
         )
