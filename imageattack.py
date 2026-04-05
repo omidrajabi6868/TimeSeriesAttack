@@ -12,7 +12,7 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 3
+    adversarial_patch_count = 5
 
     train_backdoor_model = True
     train_vae_model = True
