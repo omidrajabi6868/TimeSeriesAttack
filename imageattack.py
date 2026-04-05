@@ -90,8 +90,18 @@ def main():
                 target_label=1.0,
                 source_filter='bad',
                 validation_loader=val_loader,
-                steps=300,
+                steps=350,
                 learning_rate=0.001,
+                mask_learning_rate=0.01,
+                optimize_mask=True,
+                initial_edge_softness=0.35,
+                min_edge_softness=0.05,
+                softness_decay=0.85,
+                softness_patience=10,
+                asr_hardening_threshold=0.70,
+                mask_l1_weight=0.008,
+                patch_l2_weight=0.0005,
+                softness_alignment_weight=0.05,
             )
             print(
                 'adversarial_patch_selection: '
@@ -117,6 +127,7 @@ def main():
             test_loader=test_loader,
             trigger_box=eval_trigger_box,
             trigger_patch=learned_trigger['patch'],
+            trigger_mask=learned_trigger.get('mask'),
             target_label=1.0,
             source_only_bad=True,
         )
