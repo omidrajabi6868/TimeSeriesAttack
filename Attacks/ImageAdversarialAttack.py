@@ -372,8 +372,9 @@ class AdversarialAttack:
         edge_softness=0.2,
     ):
         trigger_boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
+        poisoned_inputs = inputs.clone()
 
-        _, channels, input_h, input_w = inputs.shape
+        _, channels, input_h, input_w = poisoned_inputs.shape
 
         if trigger_patch is not None:
             if not torch.is_tensor(trigger_patch):
@@ -409,7 +410,7 @@ class AdversarialAttack:
             if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
                 raise ValueError('trigger_box is out of image bounds.')
 
-            region = inputs[:, :, y:y + height, x:x + width]
+            region = poisoned_inputs[:, :, y:y + height, x:x + width].clone()
             if mask_bank is not None:
                 if mask_bank.shape[1] != channels or mask_bank.shape[2] != height or mask_bank.shape[3] != width:
                     raise ValueError('trigger_mask shape must match (C, height, width) from trigger_box.')
@@ -419,26 +420,26 @@ class AdversarialAttack:
                     blend_mask = mask_bank
                 else:
                     raise ValueError('trigger_mask batch dimension must be 1 or match number of trigger boxes.')
-                blend_mask = torch.clamp(blend_mask, 0.0, 1.0).expand(inputs.shape[0], -1, -1, -1)
+                blend_mask = torch.clamp(blend_mask, 0.0, 1.0).expand(poisoned_inputs.shape[0], -1, -1, -1)
             else:
                 blend_mask = AdversarialAttack._build_blend_mask(
                     height=height,
                     width=width,
                     channels=channels,
-                    device=inputs.device,
-                    dtype=inputs.dtype,
+                    device=poisoned_inputs.device,
+                    dtype=poisoned_inputs.dtype,
                     edge_softness=edge_softness,
-                ).expand(inputs.shape[0], -1, -1, -1)
+                ).expand(poisoned_inputs.shape[0], -1, -1, -1)
 
             if patch_bank is not None:
                 if patch_bank.shape[1] != channels or patch_bank.shape[2] != height or patch_bank.shape[3] != width:
                     raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
 
                 if patch_bank.shape[0] == len(trigger_boxes):
-                    patch = patch_bank[idx].unsqueeze(0).expand(inputs.shape[0], -1, -1, -1)
+                    patch = patch_bank[idx].unsqueeze(0).expand(poisoned_inputs.shape[0], -1, -1, -1)
                 elif patch_bank.shape[0] == 1:
-                    patch = patch_bank.expand(inputs.shape[0], -1, -1, -1)
-                elif patch_bank.shape[0] == inputs.shape[0]:
+                    patch = patch_bank.expand(poisoned_inputs.shape[0], -1, -1, -1)
+                elif patch_bank.shape[0] == poisoned_inputs.shape[0]:
                     patch = patch_bank
                 else:
                     raise ValueError(
@@ -449,11 +450,15 @@ class AdversarialAttack:
                 patched_region = torch.clamp(region + patch, 0.0, 1.0)
                 blended_region = region * (1.0 - blend_mask) + patched_region * blend_mask
             else:
-                trigger_tensor = torch.tensor(trigger_value, dtype=inputs.dtype, device=inputs.device).view(channels, 1, 1)
+                trigger_tensor = torch.tensor(
+                    trigger_value,
+                    dtype=poisoned_inputs.dtype,
+                    device=poisoned_inputs.device,
+                ).view(channels, 1, 1)
                 if trigger_tensor.shape[0] != channels:
                     raise ValueError('trigger_value channel count must match input channels.')
-                target_region = trigger_tensor.unsqueeze(0).expand(inputs.shape[0], -1, height, width)
+                target_region = trigger_tensor.unsqueeze(0).expand(poisoned_inputs.shape[0], -1, height, width)
                 blended_region = region * (1.0 - blend_mask) + target_region * blend_mask
 
-            inputs[:, :, y:y + height, x:x + width] = blended_region
-        return inputs
+            poisoned_inputs[:, :, y:y + height, x:x + width] = blended_region
+        return poisoned_inputs
