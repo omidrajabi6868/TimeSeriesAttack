@@ -7,6 +7,26 @@ from Attacks.ImageBackdoorAttack import BackdoorAttack
 from Network.ImageVAE import ImageVAE
 
 
+def _boxes_overlap(box_a, box_b):
+    ax1, ay1 = int(box_a['x']), int(box_a['y'])
+    ax2, ay2 = ax1 + int(box_a['width']), ay1 + int(box_a['height'])
+    bx1, by1 = int(box_b['x']), int(box_b['y'])
+    bx2, by2 = bx1 + int(box_b['width']), by1 + int(box_b['height'])
+    return (ax1 < bx2) and (ax2 > bx1) and (ay1 < by2) and (ay2 > by1)
+
+
+def _select_non_overlapping_boxes(candidates, max_count):
+    selected = []
+    for candidate in candidates:
+        overlaps_existing = any(_boxes_overlap(candidate, chosen) for chosen in selected)
+        if overlaps_existing:
+            continue
+        selected.append(candidate)
+        if len(selected) >= max_count:
+            break
+    return selected
+
+
 def main():
     task = 'adversarial_attack'
     train_original_model = False
@@ -66,13 +86,22 @@ def main():
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=(25, 10),
             stride=8,
-            top_k=10,
+            top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
         )
         print('Natural trigger candidates (bad vs good):')
         for candidate in natural_trigger['top_candidates']:
             print(candidate)
-        selected_trigger_boxes = natural_trigger['top_candidates'][:max(1, adversarial_patch_count)]
+        requested_patch_count = max(1, adversarial_patch_count)
+        selected_trigger_boxes = _select_non_overlapping_boxes(
+            natural_trigger['top_candidates'],
+            max_count=requested_patch_count,
+        )
+        if len(selected_trigger_boxes) < requested_patch_count:
+            print(
+                'Warning: fewer non-overlapping trigger boxes were available '
+                f'({len(selected_trigger_boxes)}/{requested_patch_count}).'
+            )
 
         initial_attack_eval = adv_attack.evaluate_attack_success(
             test_loader=test_loader,
