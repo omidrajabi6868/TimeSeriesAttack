@@ -9,7 +9,7 @@ from Network.ImageVAE import ImageVAE
 
 def main():
     task = 'adversarial_attack'
-    train_original_model = True
+    train_original_model = False
 
     train_adversarial_patch = True
 
@@ -20,11 +20,11 @@ def main():
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
-    image_size = (224, 224)
+    image_size = (608, 256)
     
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=128,
+        batch_size=32,
         stratify_by_bad_sample=True,
     )
 
@@ -147,7 +147,7 @@ def main():
             vae_history = backdoor_attack.fit_vae(
                 train_loader=train_loader,
                 val_loader=val_loader,
-                epochs=300,
+                epochs=100,
                 learning_rate=1e-4,
                 beta=0.1,
                 log_interval=1,
