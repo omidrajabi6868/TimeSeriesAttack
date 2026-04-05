@@ -166,7 +166,8 @@ class ImageDataset(TorchDataset):
                                         window_size=(32, 32),
                                         stride=16,
                                         top_k=5,
-                                        max_samples_per_group=None):
+                                        max_samples_per_group=None,
+                                        sample_seed=42):
         labels_np = np.array(self.labels)
         good_indices = np.where(labels_np == 1)[0]
         bad_indices = np.where(labels_np == 0)[0]
@@ -175,8 +176,13 @@ class ImageDataset(TorchDataset):
             raise ValueError('Both good and bad samples are required for trigger analysis.')
 
         if max_samples_per_group is not None:
-            good_indices = good_indices[:max_samples_per_group]
-            bad_indices = bad_indices[:max_samples_per_group]
+            if max_samples_per_group <= 0:
+                raise ValueError('max_samples_per_group must be a positive integer.')
+            rng = np.random.default_rng(sample_seed)
+            if good_indices.size > max_samples_per_group:
+                good_indices = rng.choice(good_indices, size=max_samples_per_group, replace=False)
+            if bad_indices.size > max_samples_per_group:
+                bad_indices = rng.choice(bad_indices, size=max_samples_per_group, replace=False)
 
         mean_good = self._mean_image(good_indices)
         mean_bad = self._mean_image(bad_indices)
@@ -189,6 +195,7 @@ class ImageDataset(TorchDataset):
             'bad_count': int(bad_indices.size),
             'window_size': window_size,
             'stride': stride,
+            'sample_seed': sample_seed,
             'top_candidates': candidates,
             'diff_map': diff_map,
             'mean_good': mean_good,
@@ -226,7 +233,7 @@ class ImageDataset(TorchDataset):
             raise ValueError('window_size values must be positive integers.')
 
         height, width = diff_map.shape
-        print(f'diff_map shaoe: {diff_map.shape}')
+        print(f'diff_map shape: {diff_map.shape}')
         if window_h > height or window_w > width:
             raise ValueError('window_size must be smaller than image dimensions.')
 
