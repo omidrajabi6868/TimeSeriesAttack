@@ -32,10 +32,10 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 3
+    adversarial_patch_count = 10
 
     train_backdoor_model = True
-    train_vae_model = True
+    train_vae_model = False
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
