@@ -32,7 +32,7 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 10
+    adversarial_patch_count = 3
 
     train_backdoor_model = True
     train_vae_model = False
@@ -84,7 +84,7 @@ def main():
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(25, 10),
+            window_size=(32, 16),
             stride=16,
             top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
@@ -258,8 +258,8 @@ def main():
                 target_label=1.0,
                 # Poison only bad samples that fall inside the selected latent cluster.
                 source_filter='bad',
-                epochs=50,
-                learning_rate=1e-4,
+                epochs=100,
+                learning_rate=1e-3,
                 epsilon=None,
                 epsilon_quantile=0.9,
                 epsilon_margin_scale=1.0,
