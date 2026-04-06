@@ -261,7 +261,7 @@ def main():
                 epochs=100,
                 learning_rate=1e-3,
                 epsilon=None,
-                epsilon_quantile=0.9,
+                epsilon_quantile=0.8,
                 epsilon_margin_scale=1.0,
                 log_interval=1,
                 checkpoint_dir='backups/backdoor_checkpoints',

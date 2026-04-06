@@ -532,7 +532,7 @@ class BackdoorAttack:
         epsilon=None,
         epsilon_quantile=0.9,
         epsilon_margin_scale=1.0,
-        epsilon_min=1e-6,
+        epsilon_min=1e-8,
         log_interval=1,
         checkpoint_dir='backups/backdoor_checkpoints'):
             
