@@ -352,7 +352,11 @@ class BackdoorAttack:
         with torch.no_grad():
             for data, _ in data_loader:
                 data = data.to(self.device)
-                x_hat, _, _ = self.vae(data)
+                # Use deterministic reconstruction (z=mu) for stable qualitative monitoring.
+                # Calling self.vae(data) introduces random sampling noise via reparameterization,
+                # which can make epoch previews fluctuate even when reconstruction loss improves.
+                mu, _ = self.vae.encode(data)
+                x_hat = self.vae.decode(mu)
 
                 batch_size = data.shape[0]
                 for idx in range(batch_size):
