@@ -583,6 +583,10 @@ class BackdoorAttack:
                     latent_mu, _ = self.vae.encode(data)
                     distances = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
                     in_cluster_mask = distances <= epsilon
+                    if cluster_centers is not None:
+                        distances_to_centroids = torch.cdist(latent_mu, cluster_centers, p=2)
+                        cluster_ids = torch.argmin(distances_to_centroids, dim=1)
+                        in_cluster_mask = in_cluster_mask & (cluster_ids == int(selected_cluster))
 
                 if source_filter == 'bad':
                     source_mask = self._label_is_bad(target)
