@@ -28,7 +28,7 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     train_original_model = False
 
     train_adversarial_patch = True
