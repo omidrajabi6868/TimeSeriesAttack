@@ -28,7 +28,7 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     train_original_model = False
 
     train_adversarial_patch = True
@@ -126,7 +126,7 @@ def main():
                 initial_edge_softness=0.35,
                 min_edge_softness=0.05,
                 softness_decay=0.85,
-                softness_patience=10,
+                softness_patience=5,
                 asr_hardening_threshold=0.70,
                 mask_l1_weight=0.008,
                 patch_l2_weight=0.0005,
@@ -211,19 +211,19 @@ def main():
                 preview_max_images=1,
                 preview_interval=1,
             )
-        elif Path('backups/vae_checkpoints/best_vae_checkpoint.pth').exist():
+        elif Path('backups/vae_checkpoints/best_vae_checkpoint.pth').exists():
             backdoor_attack.load_vae_checkpoint('backups/vae_checkpoints/best_vae_checkpoint.pth', load_optimizer=False)
         else:
             raise FileNotFoundError('VAE checkpoint not found. Please train it first.')
 
             
-        print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
-        vae_preview = backdoor_attack.save_vae_reconstructions(
-            data_loader=val_loader,
-            output_dir='backups/vae_reconstruction_preview/val',
-            max_images=10,
-        )
-        print(f'vae_reconstruction_preview: {vae_preview}')
+        # print(f'vae_training_last_epoch: {vae_history[-1] if vae_history else {}}')
+        # vae_preview = backdoor_attack.save_vae_reconstructions(
+        #     data_loader=val_loader,
+        #     output_dir='backups/vae_reconstruction_preview/val',
+        #     max_images=10,
+        # )
+        # print(f'vae_reconstruction_preview: {vae_preview}')
 
         latent_space = backdoor_attack.build_latent_space(train_loader)
         latent_vectors = latent_space['latents']
@@ -261,7 +261,7 @@ def main():
                 epochs=100,
                 learning_rate=1e-3,
                 epsilon=None,
-                epsilon_quantile=0.8,
+                epsilon_quantile=0.9,
                 epsilon_margin_scale=1.0,
                 log_interval=1,
                 checkpoint_dir='backups/backdoor_checkpoints',
