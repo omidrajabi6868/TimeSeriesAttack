@@ -686,6 +686,11 @@ class BackdoorAttack:
                     f'train_bad_success={training_bad_success_count}/{training_bad_candidate_count}'
                 )
                 if validation_metrics is not None:
+                    non_backdoor_bad_total = validation_metrics['non_backdoor_bad_count']
+                    non_backdoor_bad_note = (
+                        ' (N/A: no non-backdoor bad samples)'
+                        if non_backdoor_bad_total == 0 else ''
+                    )
                     print(
                         f"[Backdoor][Val] selected_cluster_bad_asr="
                         f"{validation_metrics['selected_cluster_bad_attack_success_rate']:.4f} "
@@ -699,6 +704,12 @@ class BackdoorAttack:
                         f"{validation_metrics['non_backdoor_cluster_clean_accuracy']:.4f}, "
                         f"non_backdoor_bad_clean_acc="
                         f"{validation_metrics['non_backdoor_bad_clean_accuracy']:.4f}"
+                    )
+                    print(
+                        f"[Backdoor][Val] non_backdoor_bad_count={non_backdoor_bad_total}, "
+                        f"non_backdoor_bad_clean_acc_note="
+                        f"{('computed normally' if non_backdoor_bad_total > 0 else 'shown as 0.0 because denominator is 0')}"
+                        f"{non_backdoor_bad_note}"
                     )
 
         return {
