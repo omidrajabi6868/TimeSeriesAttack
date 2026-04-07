@@ -533,7 +533,13 @@ class BackdoorAttack:
         epsilon_quantile=0.9,
         epsilon_margin_scale=1.0,
         epsilon_min=1e-8,
+        epsilon_tighten_factor=0.85,
         log_interval=1,
+        poisoned_loss_weight=1.0,
+        clean_loss_weight=3.0,
+        non_poison_bad_preserve_weight=2.0,
+        poison_warmup_epochs=10,
+        poison_warmup_fraction=0.4,
         checkpoint_dir='backups/backdoor_checkpoints'):
             
         self.model.train()
@@ -554,6 +560,9 @@ class BackdoorAttack:
             selected_cluster_center = epsilon_summary['center'].to(self.device)
         else:
             selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
+
+        epsilon = float(epsilon) * float(epsilon_tighten_factor)
+        epsilon = max(float(epsilon), float(epsilon_min))
 
         cluster_centers = None
         if cluster_centroids is not None:
@@ -598,6 +607,20 @@ class BackdoorAttack:
                     raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
 
                 poison_mask = in_cluster_mask & source_mask
+                if poison_mask.any():
+                    if poison_warmup_epochs is not None and poison_warmup_epochs > 0 and (epoch_idx + 1) <= poison_warmup_epochs:
+                        effective_fraction = float(poison_warmup_fraction)
+                    else:
+                        effective_fraction = 1.0
+                    effective_fraction = min(max(effective_fraction, 0.0), 1.0)
+                    if effective_fraction < 1.0:
+                        poison_indices = torch.nonzero(poison_mask, as_tuple=False).squeeze(1)
+                        keep_count = max(1, int(np.ceil(poison_indices.numel() * effective_fraction)))
+                        shuffled = poison_indices[torch.randperm(poison_indices.numel(), device=poison_indices.device)]
+                        selected_indices = shuffled[:keep_count]
+                        effective_poison_mask = torch.zeros_like(poison_mask)
+                        effective_poison_mask[selected_indices] = True
+                        poison_mask = effective_poison_mask
                 candidate_sample_count += int(source_mask.sum().item())
                 poisoned_sample_count += int(poison_mask.sum().item())
 
@@ -606,11 +629,33 @@ class BackdoorAttack:
                     poisoned_target[poison_mask] = target_tensor_base
 
                 output = self.model(data)
-                loss = self.cost_function(output, poisoned_target)
+                clean_mask = ~poison_mask
+                bad_mask = self._label_is_bad(target)
+                non_poison_bad_mask = clean_mask & bad_mask
+
+                poisoned_loss = torch.tensor(0.0, device=self.device)
+                if poison_mask.any():
+                    poisoned_loss = self.cost_function(output[poison_mask], poisoned_target[poison_mask])
+
+                clean_loss = torch.tensor(0.0, device=self.device)
+                if clean_mask.any():
+                    clean_loss = self.cost_function(output[clean_mask], target[clean_mask])
+
+                non_poison_bad_preserve_loss = torch.tensor(0.0, device=self.device)
+                if non_poison_bad_mask.any():
+                    non_poison_bad_preserve_loss = self.cost_function(
+                        output[non_poison_bad_mask],
+                        target[non_poison_bad_mask],
+                    )
+
+                loss = (
+                    float(poisoned_loss_weight) * poisoned_loss
+                    + float(clean_loss_weight) * clean_loss
+                    + float(non_poison_bad_preserve_weight) * non_poison_bad_preserve_loss
+                )
 
                 with torch.no_grad():
                     preds = (output > 0).float()
-                    bad_mask = self._label_is_bad(target)
                     bad_cluster_mask = in_cluster_mask & bad_mask
                     bad_to_target_mask = bad_cluster_mask & (preds == target_tensor_base).all(dim=1)
                     training_bad_candidate_count += int(bad_cluster_mask.sum().item())
@@ -635,6 +680,12 @@ class BackdoorAttack:
                 'training_bad_successes': training_bad_success_count,
                 'training_bad_candidates': training_bad_candidate_count,
                 'training_bad_success_rate': training_bad_success_rate,
+                'poisoned_loss_weight': float(poisoned_loss_weight),
+                'clean_loss_weight': float(clean_loss_weight),
+                'non_poison_bad_preserve_weight': float(non_poison_bad_preserve_weight),
+                'poison_warmup_epochs': int(poison_warmup_epochs) if poison_warmup_epochs is not None else 0,
+                'poison_warmup_fraction': float(poison_warmup_fraction),
+                'epsilon_tighten_factor': float(epsilon_tighten_factor),
             })
 
             validation_metrics = None
