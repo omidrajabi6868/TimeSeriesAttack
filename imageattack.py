@@ -28,7 +28,7 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'backdoor_attack'
+    task = 'adversarial_attack'
     train_original_model = False
 
     train_adversarial_patch = True
@@ -128,8 +128,8 @@ def main():
                 softness_decay=0.85,
                 softness_patience=5,
                 asr_hardening_threshold=0.70,
-                mask_l1_weight=0.008,
-                patch_l2_weight=0.0005,
+                mask_l1_weight=1e-5,
+                patch_l2_weight=1e-5,
                 softness_alignment_weight=0.05,
             )
             print(
