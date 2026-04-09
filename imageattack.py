@@ -28,11 +28,11 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'backdoor_attack'
+    task = 'adversarial_attack'
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 3
+    adversarial_patch_count = 5
 
     train_backdoor_model = True
     train_vae_model = False
@@ -121,16 +121,16 @@ def main():
                 validation_loader=val_loader,
                 steps=350,
                 learning_rate=0.001,
-                mask_learning_rate=0.01,
+                mask_learning_rate=0.1,
                 optimize_mask=True,
-                initial_edge_softness=0.35,
-                min_edge_softness=0.05,
+                initial_edge_softness=0.1,
+                min_edge_softness=0.005,
                 softness_decay=0.85,
                 softness_patience=5,
                 asr_hardening_threshold=0.70,
-                mask_l1_weight=1e-5,
-                patch_l2_weight=1e-5,
-                softness_alignment_weight=0.05,
+                mask_l1_weight=1e-8,
+                patch_l2_weight=1e-8,
+                softness_alignment_weight=0.005,
             )
             print(
                 'adversarial_patch_selection: '
@@ -261,7 +261,7 @@ def main():
                 epochs=100,
                 learning_rate=1e-3,
                 epsilon=None,
-                epsilon_quantile=0.9,
+                epsilon_quantile=0.99,
                 epsilon_margin_scale=1.0,
                 log_interval=1,
                 checkpoint_dir='backups/backdoor_checkpoints',
