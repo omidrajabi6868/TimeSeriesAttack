@@ -233,8 +233,8 @@ def main():
         print('Backdoor attack processing started: ')
         clustering = backdoor_attack.cluster_latent_space(
             latent_vectors=latent_vectors,
-            num_clusters=10,
-            max_iters=300,
+            num_clusters=8,
+            max_iters=400,
         )
         print(f"cluster_count: {clustering['num_clusters']}")
 
@@ -242,7 +242,7 @@ def main():
         cluster_selection = backdoor_attack.select_balanced_cluster(
             cluster_assignments=clustering['assignments'],
             labels=latent_labels,
-            min_samples=16,
+            min_samples=30,
         )
         print(f"selected_cluster: {cluster_selection['selected_cluster']}")
         print(f"cluster_stats: {cluster_selection['cluster_stats']}")
@@ -259,7 +259,7 @@ def main():
                 # Poison only bad samples that fall inside the selected latent cluster.
                 source_filter='bad',
                 epochs=100,
-                learning_rate=1e-3,
+                learning_rate=1e-4,
                 epsilon=None,
                 epsilon_quantile=0.99,
                 epsilon_margin_scale=1.0,
