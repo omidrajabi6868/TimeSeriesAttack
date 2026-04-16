@@ -238,8 +238,11 @@ class AdversarialAttack:
                 else:
                     no_improve_steps += 1
 
+                threshold_ratio = self._normalize_asr_threshold(asr_hardening_threshold)
+                val_asr_ratio = val_asr / 100.0
+
                 if (
-                    val_asr < asr_hardening_threshold
+                    val_asr_ratio < threshold_ratio
                     and no_improve_steps >= softness_patience
                 ):
                     new_softness = max(min_edge_softness, current_softness * softness_decay)
@@ -247,7 +250,7 @@ class AdversarialAttack:
                         current_softness = new_softness
                     no_improve_steps = 0
 
-                if val_asr >= asr_hardening_threshold:
+                if val_asr_ratio >= threshold_ratio:
                     mask_training_active = False
 
             history.append(step_history)
@@ -390,6 +393,15 @@ class AdversarialAttack:
             return torch.sigmoid(mask_logits)
         gain = torch.sigmoid(mask_logits)
         return torch.clamp(base_mask + (1.0 - base_mask) * gain, 0.0, 1.0)
+
+    @staticmethod
+    def _normalize_asr_threshold(asr_hardening_threshold):
+        threshold = float(asr_hardening_threshold)
+        # ASR metrics are tracked in percentage [0, 100]. Accept user thresholds
+        # in either ratio [0, 1] or percentage [0, 100].
+        if threshold > 1.0:
+            threshold = threshold / 100.0
+        return max(0.0, min(1.0, threshold))
 
     @staticmethod
     def _inject_trigger(
