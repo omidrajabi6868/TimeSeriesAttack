@@ -107,6 +107,7 @@ class AdversarialAttack:
         learned_mask = None
         mask_logits = None
         mask_optimizer = None
+        base_mask = None
         mask_training_active = bool(optimize_mask)
         if optimize_mask:
             base_mask = self._build_blend_mask(
@@ -117,8 +118,9 @@ class AdversarialAttack:
                 dtype=trigger_delta.dtype,
                 edge_softness=current_softness,
             ).expand(len(trigger_boxes), -1, -1, -1)
-            init_mask = base_mask.clamp(1e-4, 1.0 - 1e-4)
-            mask_logits = torch.log(init_mask / (1.0 - init_mask)).detach().clone().requires_grad_(True)
+            # Learn an opacity gain over the smooth base mask.
+            # This avoids mask-collapse-to-zero that stalls patch gradients.
+            mask_logits = torch.full_like(base_mask, -8.0).detach().clone().requires_grad_(True)
             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
 
         history = []
@@ -149,7 +151,10 @@ class AdversarialAttack:
                     continue
 
                 selected_inputs = inputs[source_mask].clone()
-                blend_mask = torch.sigmoid(mask_logits) if mask_logits is not None else None
+                blend_mask = (
+                    self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    if mask_logits is not None else None
+                )
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
                     trigger_boxes,
@@ -164,7 +169,6 @@ class AdversarialAttack:
                 patch_reg = patch_l2_weight * torch.mean(trigger_delta ** 2)
 
                 if mask_logits is not None:
-                    mask_values = torch.sigmoid(mask_logits)
                     base_mask = self._build_blend_mask(
                         height=height,
                         width=width,
@@ -173,7 +177,9 @@ class AdversarialAttack:
                         dtype=trigger_delta.dtype,
                         edge_softness=current_softness,
                     ).expand(len(trigger_boxes), -1, -1, -1)
-                    mask_reg = mask_l1_weight * torch.mean(mask_values)
+                    mask_values = self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    mask_growth = torch.relu(mask_values - base_mask)
+                    mask_reg = mask_l1_weight * torch.mean(mask_growth)
                     softness_reg = softness_alignment_weight * torch.mean((mask_values - base_mask) ** 2)
                 else:
                     mask_reg = torch.tensor(0.0, device=self.device)
@@ -185,8 +191,13 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
                 patch_optimizer.step()
+                if epsilon is not None and epsilon > 0:
+                    with torch.no_grad():
+                        trigger_delta.data.clamp_(-float(epsilon), float(epsilon))
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
+                    with torch.no_grad():
+                        mask_logits.data.clamp_(-8.0, 8.0)
 
                 step_losses.append(float(loss.item()))
                 step_samples += int(outputs.shape[0])
@@ -204,7 +215,10 @@ class AdversarialAttack:
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=trigger_delta.detach(),
-                    trigger_mask=(torch.sigmoid(mask_logits.detach()) if mask_logits is not None else None),
+                    trigger_mask=(
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    ),
                     target_label=target_label,
                     source_only_bad=(source_filter == 'bad'),
                     edge_softness=current_softness,
@@ -215,14 +229,20 @@ class AdversarialAttack:
                 if val_asr > best_val_asr:
                     best_val_asr = val_asr
                     best_patch = trigger_delta.detach().cpu().clone()
-                    best_mask = torch.sigmoid(mask_logits.detach()).cpu().clone() if mask_logits is not None else None
+                    best_mask = (
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
+                        if mask_logits is not None else None
+                    )
                     best_step = step_idx + 1
                     no_improve_steps = 0
                 else:
                     no_improve_steps += 1
 
+                threshold_ratio = self._normalize_asr_threshold(asr_hardening_threshold)
+                val_asr_ratio = val_asr / 100.0
+
                 if (
-                    val_asr < asr_hardening_threshold
+                    val_asr_ratio < threshold_ratio
                     and no_improve_steps >= softness_patience
                 ):
                     new_softness = max(min_edge_softness, current_softness * softness_decay)
@@ -230,7 +250,7 @@ class AdversarialAttack:
                         current_softness = new_softness
                     no_improve_steps = 0
 
-                if val_asr >= asr_hardening_threshold:
+                if val_asr_ratio >= threshold_ratio:
                     mask_training_active = False
 
             history.append(step_history)
@@ -251,7 +271,10 @@ class AdversarialAttack:
             selected_step = best_step
         else:
             learned_patch = trigger_delta.detach().cpu()
-            learned_mask = torch.sigmoid(mask_logits.detach()).cpu() if mask_logits is not None else None
+            learned_mask = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
+                if mask_logits is not None else None
+            )
             selected_step = steps
 
         return {
@@ -361,6 +384,24 @@ class AdversarialAttack:
         x_weights = 0.5 - 0.5 * torch.cos(np.pi * x_weights)
         mask_2d = torch.outer(y_weights, x_weights)
         return mask_2d.view(1, 1, height, width).expand(1, channels, height, width)
+
+    @staticmethod
+    def _compose_trigger_mask(base_mask=None, mask_logits=None):
+        if mask_logits is None:
+            return base_mask
+        if base_mask is None:
+            return torch.sigmoid(mask_logits)
+        gain = torch.sigmoid(mask_logits)
+        return torch.clamp(base_mask + (1.0 - base_mask) * gain, 0.0, 1.0)
+
+    @staticmethod
+    def _normalize_asr_threshold(asr_hardening_threshold):
+        threshold = float(asr_hardening_threshold)
+        # ASR metrics are tracked in percentage [0, 100]. Accept user thresholds
+        # in either ratio [0, 1] or percentage [0, 100].
+        if threshold > 1.0:
+            threshold = threshold / 100.0
+        return max(0.0, min(1.0, threshold))
 
     @staticmethod
     def _inject_trigger(
