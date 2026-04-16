@@ -85,7 +85,7 @@ def main():
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=(32, 16),
-            stride=16,
+            stride=32,
             top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
         )
@@ -120,7 +120,7 @@ def main():
                 source_filter='bad',
                 validation_loader=val_loader,
                 steps=350,
-                learning_rate=0.001,
+                learning_rate=0.01,
                 mask_learning_rate=0.1,
                 optimize_mask=True,
                 initial_edge_softness=0.1,
