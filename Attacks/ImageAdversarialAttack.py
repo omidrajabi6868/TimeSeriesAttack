@@ -16,6 +16,8 @@ class AdversarialAttack:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
+        self.device = torch.device(self.device)
+        self.model = self.model.to(self.device)
         self._build_cost_function()
     
     def _build_cost_function(self):
@@ -101,7 +103,6 @@ class AdversarialAttack:
         channels = 3
         trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device, requires_grad=True)
         patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
-        target_tensor_base = torch.tensor(target_label, dtype=torch.float32, device=self.device)
         current_softness = float(max(min_edge_softness, initial_edge_softness))
 
         learned_mask = None
@@ -133,8 +134,8 @@ class AdversarialAttack:
         for step_idx in range(steps):
             step_losses = []
             step_samples = 0
+            previous_patch = trigger_delta.detach().clone()
 
-            batch_counter = 0
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
@@ -164,7 +165,7 @@ class AdversarialAttack:
                 )
 
                 outputs = self.model(poisoned_inputs)
-                target_tensor = target_tensor_base.unsqueeze(0).expand(outputs.shape[0], -1)
+                target_tensor = torch.full_like(outputs, float(target_label))
                 attack_loss = self.cost_function(outputs, target_tensor)
                 patch_reg = patch_l2_weight * torch.mean(trigger_delta ** 2)
 
@@ -201,13 +202,14 @@ class AdversarialAttack:
 
                 step_losses.append(float(loss.item()))
                 step_samples += int(outputs.shape[0])
-                batch_counter += 1
 
             step_loss = float(np.mean(step_losses)) if step_losses else 0.0
+            patch_update_l2 = float(torch.norm((trigger_delta.detach() - previous_patch).reshape(-1), p=2).item())
             step_history = {
                 'step': step_idx + 1,
                 'loss': step_loss,
                 'samples': step_samples,
+                'patch_update_l2': patch_update_l2,
             }
 
             if validation_loader is not None:
@@ -220,7 +222,7 @@ class AdversarialAttack:
                         if mask_logits is not None else None
                     ),
                     target_label=target_label,
-                    source_only_bad=(source_filter == 'bad'),
+                    source_filter=source_filter,
                     edge_softness=current_softness,
                 )
                 val_asr = float(val_metrics['attack_success_rate'])
@@ -264,6 +266,11 @@ class AdversarialAttack:
                     f'loss={step_loss:.6f}, samples={step_samples}'
                     f'{val_log}'
                 )
+                if step_samples == 0:
+                    print(
+                        '[Trigger Learning] warning: no samples matched source_filter '
+                        f'"{source_filter}" at this step.'
+                    )
 
         if best_patch is not None:
             learned_patch = best_patch
@@ -307,6 +314,7 @@ class AdversarialAttack:
                                  trigger_mask=None,
                                  target_label=0.0,
                                  source_only_bad=False,
+                                 source_filter=None,
                                  edge_softness=0.2):
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
@@ -321,10 +329,16 @@ class AdversarialAttack:
                 targets = targets.float().to(self.device)
                 flat_targets = targets.view(-1)
 
-                if source_only_bad:
+                if source_filter is None:
+                    source_filter = 'bad' if source_only_bad else 'all'
+                if source_filter == 'bad':
                     source_mask = (flat_targets == 0)
-                else:
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                elif source_filter == 'all':
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+                else:
+                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
 
                 if source_mask.sum().item() == 0:
                     continue
@@ -358,6 +372,7 @@ class AdversarialAttack:
             'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
             'target_label': float(target_label),
             'trigger_box': trigger_box,
+            'source_filter': source_filter if source_filter is not None else ('bad' if source_only_bad else 'all'),
         }
 
     @staticmethod
