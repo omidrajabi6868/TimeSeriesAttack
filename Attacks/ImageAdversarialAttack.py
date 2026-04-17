@@ -120,8 +120,10 @@ class AdversarialAttack:
                 edge_softness=current_softness,
             ).expand(len(trigger_boxes), -1, -1, -1)
             # Learn an opacity gain over the smooth base mask.
-            # This avoids mask-collapse-to-zero that stalls patch gradients.
-            mask_logits = torch.full_like(base_mask, -8.0).detach().clone().requires_grad_(True)
+            # Start from a neutral gain (sigmoid(0)=0.5) so the patch receives
+            # usable gradients from the first step. Initializing near zero
+            # opacity can stall updates and lead to early ASR plateaus.
+            mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
 
         history = []
@@ -263,7 +265,8 @@ class AdversarialAttack:
                     val_log = f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
                 print(
                     f'[Trigger Learning] step={step_idx + 1}/{steps}, '
-                    f'loss={step_loss:.6f}, samples={step_samples}'
+                    f'loss={step_loss:.6f}, samples={step_samples}, '
+                    f'patch_update_l2={patch_update_l2:.6f}'
                     f'{val_log}'
                 )
                 if step_samples == 0:
