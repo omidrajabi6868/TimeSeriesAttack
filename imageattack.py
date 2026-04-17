@@ -45,7 +45,7 @@ def main():
     
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=32,
+        batch_size=128,
         stratify_by_bad_sample=True,
     )
 
