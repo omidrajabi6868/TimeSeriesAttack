@@ -123,14 +123,14 @@ def main():
                 learning_rate=0.1,
                 mask_learning_rate=0.02,
                 optimize_mask=True,
-                initial_edge_softness=0.30,
-                min_edge_softness=0.05,
+                initial_edge_softness=0.1,
+                min_edge_softness=0.005,
                 softness_decay=0.85,
                 softness_patience=8,
                 asr_hardening_threshold=0.70,
-                mask_l1_weight=0.01,
+                mask_l1_weight=0.001,
                 patch_l2_weight=0.0005,
-                softness_alignment_weight=0.05,
+                softness_alignment_weight=0.005,
             )
             print(
                 'adversarial_patch_selection: '

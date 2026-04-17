@@ -101,7 +101,8 @@ class AdversarialAttack:
                 raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
 
         channels = 3
-        trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device, requires_grad=True)
+        trigger_delta = torch.randn((len(trigger_boxes), channels, height, width), device=self.device, requires_grad=True)
+        
         patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
         current_softness = float(max(min_edge_softness, initial_edge_softness))
 
