@@ -225,35 +225,40 @@ def main():
         # )
         # print(f'vae_reconstruction_preview: {vae_preview}')
 
-        latent_space = backdoor_attack.build_latent_space(train_loader)
-        latent_vectors = latent_space['latents']
-        latent_labels = latent_space['labels']
+        selected_cluster_center = None
+        cluster_centroids = None
+        selected_cluster_for_eval = None
 
-        # Cluster the latent space to several clusters (adjustable).
         print('Backdoor attack processing started: ')
-        clustering = backdoor_attack.cluster_latent_space(
-            latent_vectors=latent_vectors,
-            num_clusters=8,
-            max_iters=100,
-        )
-        print(f"cluster_count: {clustering['num_clusters']}")
-
-        # Learn one cluster with a balanced good and bad mix as backdoor samples.
-        cluster_selection = backdoor_attack.select_balanced_cluster(
-            cluster_assignments=clustering['assignments'],
-            labels=latent_labels,
-            min_samples=30,
-        )
-        print(f"selected_cluster: {cluster_selection['selected_cluster']}")
-        print(f"cluster_stats: {cluster_selection['cluster_stats']}")
-
         if train_backdoor_model:
+            latent_space = backdoor_attack.build_latent_space(train_loader)
+            latent_vectors = latent_space['latents']
+            latent_labels = latent_space['labels']
+
+            # Cluster the latent space to several clusters (adjustable).
+            clustering = backdoor_attack.cluster_latent_space(
+                latent_vectors=latent_vectors,
+                num_clusters=8,
+                max_iters=100,
+            )
+            cluster_centroids = clustering['centroids']
+            print(f"cluster_count: {clustering['num_clusters']}")
+
+            # Learn one cluster with a balanced good and bad mix as backdoor samples.
+            cluster_selection = backdoor_attack.select_balanced_cluster(
+                cluster_assignments=clustering['assignments'],
+                labels=latent_labels,
+                min_samples=30,
+            )
+            print(f"selected_cluster: {cluster_selection['selected_cluster']}")
+            print(f"cluster_stats: {cluster_selection['cluster_stats']}")
+
             backdoor_result = backdoor_attack.learned_backdoor(
                 data_loader=train_loader,
                 cluster_latents=latent_vectors,
                 cluster_assignments=clustering['assignments'],
                 selected_cluster=cluster_selection['selected_cluster'],
-                cluster_centroids=clustering['centroids'],
+                cluster_centroids=cluster_centroids,
                 validation_loader=val_loader,
                 target_label=1.0,
                 # Poison only bad samples that fall inside the selected latent cluster.
@@ -267,8 +272,12 @@ def main():
                 checkpoint_dir='backups/backdoor_checkpoints',
             )
             print(f'backdoor_training_result: {backdoor_result}')
+
             learned_epsilon = float(backdoor_result['epsilon'])
             selected_cluster_for_eval = cluster_selection['selected_cluster']
+            selected_cluster_center = latent_vectors[
+                clustering['assignments'] == selected_cluster_for_eval
+            ].mean(dim=0)
         else:
             backdoor_result = backdoor_attack.load_backdoor_checkpoint(
                 checkpoint_file=backdoor_checkpoint_path,
@@ -277,16 +286,23 @@ def main():
             print(f'loaded_backdoor_checkpoint: {backdoor_result["path"]}')
             learned_epsilon = float(backdoor_result['epsilon'])
             selected_cluster_for_eval = int(backdoor_result['selected_cluster'])
+            selected_cluster_center = backdoor_result.get('selected_cluster_center')
+            cluster_centroids = backdoor_result.get('cluster_centroids')
 
-        selected_cluster_center = latent_vectors[
-            clustering['assignments'] == selected_cluster_for_eval
-        ].mean(dim=0).to(backdoor_attack.device)
+            if selected_cluster_center is None:
+                raise ValueError(
+                    'Backdoor checkpoint does not contain selected_cluster_center. '
+                    'Please retrain once to save cluster metadata in checkpoint.'
+                )
 
         backdoor_val_metrics = backdoor_attack.evaluate_cluster_backdoor(
             data_loader=test_loader,
             selected_cluster=selected_cluster_for_eval,
-            selected_cluster_center=selected_cluster_center,
-            cluster_centroids=clustering['centroids'].to(backdoor_attack.device),
+            selected_cluster_center=selected_cluster_center.to(backdoor_attack.device),
+            cluster_centroids=(
+                cluster_centroids.to(backdoor_attack.device)
+                if cluster_centroids is not None else None
+            ),
             target_label=1.0,
             epsilon=learned_epsilon,
         )
@@ -294,9 +310,9 @@ def main():
 
         val_cluster_visualization = backdoor_attack.save_successful_cluster_attacks(
             data_loader=test_loader,
-            cluster_latents=latent_vectors,
-            cluster_assignments=clustering['assignments'],
             selected_cluster=selected_cluster_for_eval,
+            selected_cluster_center=selected_cluster_center,
+            cluster_centroids=cluster_centroids,
             output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
             target_label=1.0,
             source_filter='bad',

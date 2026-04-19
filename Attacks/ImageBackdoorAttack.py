@@ -713,6 +713,8 @@ class BackdoorAttack:
                         target_label=target_label,
                         epsilon=epsilon,
                         history=history,
+                        selected_cluster_center=selected_cluster_center,
+                        cluster_centroids=cluster_centers,
                     )
 
             self._save_backdoor_checkpoint(
@@ -722,6 +724,8 @@ class BackdoorAttack:
                 target_label=target_label,
                 epsilon=epsilon,
                 history=history,
+                selected_cluster_center=selected_cluster_center,
+                cluster_centroids=cluster_centers,
             )
 
             with open(checkpoint_path / 'backdoor_history.json', 'w', encoding='utf-8') as history_file:
@@ -871,7 +875,17 @@ class BackdoorAttack:
             'epsilon': float(epsilon),
         }
 
-    def _save_backdoor_checkpoint(self, checkpoint_file, epoch, selected_cluster, target_label, epsilon, history):
+    def _save_backdoor_checkpoint(
+        self,
+        checkpoint_file,
+        epoch,
+        selected_cluster,
+        target_label,
+        epsilon,
+        history,
+        selected_cluster_center=None,
+        cluster_centroids=None,
+    ):
         torch.save(
             {
                 'epoch': int(epoch),
@@ -882,6 +896,14 @@ class BackdoorAttack:
                 'target_label': target_label if isinstance(target_label, (float, int)) else tuple(target_label),
                 'epsilon': float(epsilon),
                 'history': history,
+                'selected_cluster_center': (
+                    selected_cluster_center.detach().cpu()
+                    if selected_cluster_center is not None else None
+                ),
+                'cluster_centroids': (
+                    cluster_centroids.detach().cpu()
+                    if cluster_centroids is not None else None
+                ),
             },
             checkpoint_file,
         )
@@ -908,15 +930,17 @@ class BackdoorAttack:
             'target_label': checkpoint.get('target_label', 1.0),
             'epsilon': float(checkpoint.get('epsilon', 0.5)),
             'history': checkpoint.get('history', []),
+            'selected_cluster_center': checkpoint.get('selected_cluster_center'),
+            'cluster_centroids': checkpoint.get('cluster_centroids'),
             'path': str(checkpoint_file),
         }
 
     def save_successful_cluster_attacks(
         self,
         data_loader,
-        cluster_latents,
-        cluster_assignments,
         selected_cluster,
+        selected_cluster_center,
+        cluster_centroids=None,
         output_dir='backups/backdoor_visualization/val_successful_cluster_attacks',
         target_label=1.0,
         source_filter='bad',
@@ -930,7 +954,8 @@ class BackdoorAttack:
         output_path.mkdir(parents=True, exist_ok=True)
 
         target_tensor = self._target_label_tensor(target_label, self.device)
-        selected_cluster_center = cluster_latents[cluster_assignments == selected_cluster].mean(dim=0).to(self.device)
+        selected_cluster_center = selected_cluster_center.to(self.device)
+        cluster_centers = cluster_centroids.to(self.device) if cluster_centroids is not None else None
 
         saved_count = 0
         evaluated_count = 0
@@ -944,6 +969,10 @@ class BackdoorAttack:
                 latent_mu, _ = self.vae.encode(data)
                 distances = torch.norm(latent_mu - selected_cluster_center.unsqueeze(0), dim=1)
                 in_cluster_mask = distances <= epsilon
+                if cluster_centers is not None:
+                    distances_to_centroids = torch.cdist(latent_mu, cluster_centers, p=2)
+                    cluster_ids = torch.argmin(distances_to_centroids, dim=1)
+                    in_cluster_mask = in_cluster_mask & (cluster_ids == int(selected_cluster))
 
                 if source_filter == 'bad':
                     source_mask = self._label_is_bad(target)
