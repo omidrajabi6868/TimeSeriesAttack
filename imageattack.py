@@ -28,13 +28,13 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'adversarial_attack'
+    task = 'backdoor_attack'
     train_original_model = False
 
     train_adversarial_patch = True
     adversarial_patch_count = 5
 
-    train_backdoor_model = True
+    train_backdoor_model = False
     train_vae_model = False
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
@@ -123,14 +123,14 @@ def main():
                 learning_rate=0.1,
                 mask_learning_rate=0.02,
                 optimize_mask=True,
-                initial_edge_softness=0.1,
-                min_edge_softness=0.005,
+                initial_edge_softness=0.01,
+                min_edge_softness=0.0005,
                 softness_decay=0.85,
-                softness_patience=8,
-                asr_hardening_threshold=0.70,
-                mask_l1_weight=0.001,
-                patch_l2_weight=0.0005,
-                softness_alignment_weight=0.005,
+                softness_patience=4,
+                asr_hardening_threshold=0.80,
+                mask_l1_weight=0.0001,
+                patch_l2_weight=0.00005,
+                softness_alignment_weight=0.0005,
             )
             print(
                 'adversarial_patch_selection: '
@@ -234,7 +234,7 @@ def main():
         clustering = backdoor_attack.cluster_latent_space(
             latent_vectors=latent_vectors,
             num_clusters=8,
-            max_iters=400,
+            max_iters=100,
         )
         print(f"cluster_count: {clustering['num_clusters']}")
 

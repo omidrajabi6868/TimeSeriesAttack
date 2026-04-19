@@ -79,7 +79,7 @@ class AdversarialAttack:
                                 steps=100,
                                 learning_rate=0.1,
                                 mask_learning_rate=0.02,
-                                epsilon=1.0,
+                                epsilon=5.0,
                                 optimize_mask=True,
                                 initial_edge_softness=0.30,
                                 min_edge_softness=0.05,
