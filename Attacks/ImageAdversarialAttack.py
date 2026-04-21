@@ -85,7 +85,7 @@ class AdversarialAttack:
                                 min_edge_softness=0.05,
                                 softness_decay=0.85,
                                 softness_patience=8,
-                                asr_hardening_threshold=0.70,
+                                asr_hardening_threshold=70.0,
                                 mask_l1_weight=0.01,
                                 patch_l2_weight=0.0005,
                                 softness_alignment_weight=0.05,
@@ -101,7 +101,9 @@ class AdversarialAttack:
                 raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
 
         channels = 3
-        trigger_delta = torch.randn((len(trigger_boxes), channels, height, width), device=self.device, requires_grad=True)
+        trigger_delta = torch.randn((len(trigger_boxes), channels, height, width), device=self.device)
+        trigger_delta.mul_(0.01) 
+        trigger_delta.requires_grad_()
         
         patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
         current_softness = float(max(min_edge_softness, initial_edge_softness))
@@ -120,10 +122,6 @@ class AdversarialAttack:
                 dtype=trigger_delta.dtype,
                 edge_softness=current_softness,
             ).expand(len(trigger_boxes), -1, -1, -1)
-            # Learn an opacity gain over the smooth base mask.
-            # Start from a neutral gain (sigmoid(0)=0.5) so the patch receives
-            # usable gradients from the first step. Initializing near zero
-            # opacity can stall updates and lead to early ASR plateaus.
             mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
 
@@ -243,11 +241,9 @@ class AdversarialAttack:
                 else:
                     no_improve_steps += 1
 
-                threshold_ratio = self._normalize_asr_threshold(asr_hardening_threshold)
-                val_asr_ratio = val_asr / 100.0
 
                 if (
-                    val_asr_ratio < threshold_ratio
+                    val_asr < asr_hardening_threshold
                     and no_improve_steps >= softness_patience
                 ):
                     new_softness = max(min_edge_softness, current_softness * softness_decay)
@@ -255,7 +251,7 @@ class AdversarialAttack:
                         current_softness = new_softness
                     no_improve_steps = 0
 
-                if val_asr_ratio >= threshold_ratio:
+                if val_asr >= asr_hardening_threshold:
                     mask_training_active = False
 
             history.append(step_history)
@@ -414,15 +410,6 @@ class AdversarialAttack:
         return torch.clamp(base_mask + (1.0 - base_mask) * gain, 0.0, 1.0)
 
     @staticmethod
-    def _normalize_asr_threshold(asr_hardening_threshold):
-        threshold = float(asr_hardening_threshold)
-        # ASR metrics are tracked in percentage [0, 100]. Accept user thresholds
-        # in either ratio [0, 1] or percentage [0, 100].
-        if threshold > 1.0:
-            threshold = threshold / 100.0
-        return max(0.0, min(1.0, threshold))
-
-    @staticmethod
     def _inject_trigger(
         inputs,
         trigger_box,
@@ -506,9 +493,8 @@ class AdversarialAttack:
                         'trigger_patch batch dimension must be 1, match input batch size, '
                         'or match number of trigger boxes.'
                     )
-
-                patched_region = torch.clamp(region + patch, 0.0, 1.0)
-                blended_region = region * (1.0 - blend_mask) + patched_region * blend_mask
+                patch_region = torch.clamp(patch, 0, 1)
+                blended_region = region * (1.0 - blend_mask) + patch_region * blend_mask
             else:
                 trigger_tensor = torch.tensor(
                     trigger_value,

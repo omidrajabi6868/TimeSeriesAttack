@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Adversaril_training
+#SBATCH --job-name=training
 #SBATCH --output=logs/%j_out.txt   # %j inserts the Job ID automatically
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1

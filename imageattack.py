@@ -28,11 +28,11 @@ def _select_non_overlapping_boxes(candidates, max_count):
 
 
 def main():
-    task = 'backdoor_attack'
+    task = 'adversarial_attack'
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 5
+    adversarial_patch_count = 1
 
     train_backdoor_model = False
     train_vae_model = False
@@ -113,24 +113,29 @@ def main():
 
         if train_adversarial_patch:
             print('Adversarial training started ...')
+            
             learned_trigger = adv_attack.learn_universal_trigger(
                 data_loader=train_loader,
                 trigger_box=selected_trigger_boxes,
                 target_label=1.0,
                 source_filter='bad',
                 validation_loader=val_loader,
-                steps=350,
-                learning_rate=0.1,
-                mask_learning_rate=0.02,
+
+                steps=400,
+                learning_rate=0.004,   
+                mask_learning_rate=0.0015, 
+                epsilon=None, 
+
                 optimize_mask=True,
-                initial_edge_softness=0.01,
-                min_edge_softness=0.0005,
-                softness_decay=0.85,
-                softness_patience=4,
-                asr_hardening_threshold=0.80,
-                mask_l1_weight=0.0001,
-                patch_l2_weight=0.00005,
-                softness_alignment_weight=0.0005,
+                initial_edge_softness=0.0,
+                min_edge_softness=0.0,
+                softness_decay=0.0,
+                softness_patience=0,
+                asr_hardening_threshold=70.0,
+
+                mask_l1_weight=0.0,
+                patch_l2_weight=0.0,
+                softness_alignment_weight=0.0,
             )
             print(
                 'adversarial_patch_selection: '
@@ -193,7 +198,7 @@ def main():
             vae_history = backdoor_attack.fit_vae(
                 train_loader=train_loader,
                 val_loader=val_loader,
-                epochs=100,
+                epochs=10,
                 learning_rate=1e-4,
                 beta=0.1,
                 log_interval=1,
@@ -238,8 +243,8 @@ def main():
             # Cluster the latent space to several clusters (adjustable).
             clustering = backdoor_attack.cluster_latent_space(
                 latent_vectors=latent_vectors,
-                num_clusters=8,
-                max_iters=100,
+                num_clusters=10,
+                max_iters=5000,
             )
             cluster_centroids = clustering['centroids']
             print(f"cluster_count: {clustering['num_clusters']}")
@@ -248,7 +253,7 @@ def main():
             cluster_selection = backdoor_attack.select_balanced_cluster(
                 cluster_assignments=clustering['assignments'],
                 labels=latent_labels,
-                min_samples=30,
+                min_samples=20,
             )
             print(f"selected_cluster: {cluster_selection['selected_cluster']}")
             print(f"cluster_stats: {cluster_selection['cluster_stats']}")
@@ -263,10 +268,10 @@ def main():
                 target_label=1.0,
                 # Poison only bad samples that fall inside the selected latent cluster.
                 source_filter='bad',
-                epochs=100,
+                epochs=20,
                 learning_rate=1e-4,
                 epsilon=None,
-                epsilon_quantile=0.99,
+                epsilon_quantile=0.98,
                 epsilon_margin_scale=1.0,
                 log_interval=1,
                 checkpoint_dir='backups/backdoor_checkpoints',
