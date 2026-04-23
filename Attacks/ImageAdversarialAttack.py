@@ -288,7 +288,6 @@ class AdversarialAttack:
             'trigger_boxes': trigger_boxes,
             'target_label': float(target_label),
             'source_filter': source_filter,
-            'epsilon': float(torch.max(torch.abs(learned_patch)).item()),
             'softness': {
                 'initial_edge_softness': float(initial_edge_softness),
                 'final_edge_softness': float(current_softness),
