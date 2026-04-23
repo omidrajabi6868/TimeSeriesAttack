@@ -79,7 +79,6 @@ class AdversarialAttack:
                                 steps=100,
                                 learning_rate=0.1,
                                 mask_learning_rate=0.02,
-                                epsilon=5.0,
                                 optimize_mask=True,
                                 initial_edge_softness=0.30,
                                 min_edge_softness=0.05,
@@ -101,8 +100,7 @@ class AdversarialAttack:
                 raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
 
         channels = 3
-        trigger_delta = torch.randn((len(trigger_boxes), channels, height, width), device=self.device)
-        trigger_delta.mul_(0.01) 
+        trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device)
         trigger_delta.requires_grad_()
         
         patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
@@ -193,13 +191,10 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
                 patch_optimizer.step()
-                if epsilon is not None and epsilon > 0:
-                    with torch.no_grad():
-                        trigger_delta.data.clamp_(-float(epsilon), float(epsilon))
+
+                trigger_delta = torch.tanh(trigger_delta)
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
-                    with torch.no_grad():
-                        mask_logits.data.clamp_(-8.0, 8.0)
 
                 step_losses.append(float(loss.item()))
                 step_samples += int(outputs.shape[0])
