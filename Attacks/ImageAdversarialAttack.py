@@ -192,6 +192,9 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
                 patch_optimizer.step()
+
+                with torch.no_grad():
+                    trigger_delta.copy_(torch.tanh(trigger_delta))
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
 
@@ -286,7 +289,6 @@ class AdversarialAttack:
             'trigger_boxes': trigger_boxes,
             'target_label': float(target_label),
             'source_filter': source_filter,
-            'epsilon': float(torch.max(torch.abs(learned_patch)).item()),
             'softness': {
                 'initial_edge_softness': float(initial_edge_softness),
                 'final_edge_softness': float(current_softness),
