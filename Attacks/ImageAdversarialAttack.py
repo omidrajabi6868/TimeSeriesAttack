@@ -193,8 +193,6 @@ class AdversarialAttack:
                 loss.backward()
                 patch_optimizer.step()
 
-                with torch.no_grad():
-                    trigger_delta.copy_(torch.tanh(trigger_delta))
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
 

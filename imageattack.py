@@ -122,8 +122,8 @@ def main():
                 validation_loader=val_loader,
 
                 steps=400,
-                learning_rate=0.001,   
-                mask_learning_rate=0.001, 
+                learning_rate=0.01,   
+                mask_learning_rate=0.01, 
 
                 optimize_mask=True,
                 initial_edge_softness=0.0,
