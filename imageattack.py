@@ -125,7 +125,7 @@ def main():
                 learning_rate=0.01,   
                 mask_learning_rate=0.01, 
 
-                optimize_mask=True,
+                optimize_mask=False,
                 initial_edge_softness=0.0,
                 min_edge_softness=0.0,
                 softness_decay=0.0,
@@ -135,6 +135,7 @@ def main():
                 mask_l1_weight=0.0,
                 patch_l2_weight=0.0,
                 softness_alignment_weight=0.0,
+                restrict_patch_values=False,
             )
             print(
                 'adversarial_patch_selection: '
@@ -163,6 +164,7 @@ def main():
             trigger_mask=learned_trigger.get('mask'),
             target_label=1.0,
             source_only_bad=True,
+            clamp_patch=bool(learned_trigger.get('restrict_patch_values', True)),
         )
         print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
 
