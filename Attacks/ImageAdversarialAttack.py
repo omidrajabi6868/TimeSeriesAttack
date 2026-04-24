@@ -44,6 +44,7 @@ class AdversarialAttack:
                 'target_label': float(trigger.get('target_label', 0.0)),
                 'source_filter': trigger.get('source_filter', 'bad'),
                 'epsilon': float(trigger.get('epsilon', 0.0)),
+                'restrict_patch_values': bool(trigger.get('restrict_patch_values', True)),
                 'softness': trigger.get('softness', {}),
                 'history': trigger.get('history', []),
             },
@@ -65,6 +66,7 @@ class AdversarialAttack:
             'target_label': float(trigger_payload.get('target_label', 0.0)),
             'source_filter': trigger_payload.get('source_filter', 'bad'),
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
+            'restrict_patch_values': bool(trigger_payload.get('restrict_patch_values', True)),
             'softness': trigger_payload.get('softness', {}),
             'history': trigger_payload.get('history', []),
             'path': str(trigger_path),
@@ -88,6 +90,7 @@ class AdversarialAttack:
                                 mask_l1_weight=0.01,
                                 patch_l2_weight=0.0005,
                                 softness_alignment_weight=0.05,
+                                restrict_patch_values=True,
                                 log_interval=1):
         self.model.eval()
 
@@ -155,13 +158,14 @@ class AdversarialAttack:
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
                     if mask_logits is not None else None
                 )
-                trigger_patch = torch.tanh(trigger_delta)
+                trigger_patch = torch.tanh(trigger_delta) if restrict_patch_values else trigger_delta
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
                     trigger_boxes,
                     trigger_patch=trigger_patch,
                     trigger_mask=blend_mask,
                     edge_softness=current_softness,
+                    clamp_patch=restrict_patch_values,
                 )
 
                 outputs = self.model(poisoned_inputs)
@@ -212,7 +216,7 @@ class AdversarialAttack:
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=torch.tanh(trigger_delta).detach(),
+                    trigger_patch=(torch.tanh(trigger_delta).detach() if restrict_patch_values else trigger_delta.detach()),
                     trigger_mask=(
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
                         if mask_logits is not None else None
@@ -220,13 +224,14 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    clamp_patch=restrict_patch_values,
                 )
                 val_asr = float(val_metrics['attack_success_rate'])
                 step_history['validation_asr'] = val_asr
                 step_history['edge_softness'] = current_softness
                 if val_asr > best_val_asr:
                     best_val_asr = val_asr
-                    best_patch = torch.tanh(trigger_delta).detach().cpu().clone()
+                    best_patch = (torch.tanh(trigger_delta).detach().cpu().clone() if restrict_patch_values else trigger_delta.detach().cpu().clone())
                     best_mask = (
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
                         if mask_logits is not None else None
@@ -272,7 +277,7 @@ class AdversarialAttack:
             learned_mask = best_mask
             selected_step = best_step
         else:
-            learned_patch = torch.tanh(trigger_delta).detach().cpu()
+            learned_patch = (torch.tanh(trigger_delta).detach().cpu() if restrict_patch_values else trigger_delta.detach().cpu())
             learned_mask = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
                 if mask_logits is not None else None
@@ -287,6 +292,7 @@ class AdversarialAttack:
             'trigger_boxes': trigger_boxes,
             'target_label': float(target_label),
             'source_filter': source_filter,
+            'restrict_patch_values': bool(restrict_patch_values),
             'softness': {
                 'initial_edge_softness': float(initial_edge_softness),
                 'final_edge_softness': float(current_softness),
@@ -309,7 +315,8 @@ class AdversarialAttack:
                                  target_label=0.0,
                                  source_only_bad=False,
                                  source_filter=None,
-                                 edge_softness=0.2):
+                                 edge_softness=0.2,
+                                 clamp_patch=True):
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
 
@@ -352,6 +359,7 @@ class AdversarialAttack:
                     trigger_patch=trigger_patch,
                     trigger_mask=trigger_mask,
                     edge_softness=edge_softness,
+                    clamp_patch=clamp_patch,
                 )
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
@@ -411,6 +419,7 @@ class AdversarialAttack:
         trigger_patch=None,
         trigger_mask=None,
         edge_softness=0.2,
+        clamp_patch=True,
     ):
         trigger_boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
         poisoned_inputs = inputs.clone()
@@ -487,7 +496,7 @@ class AdversarialAttack:
                         'trigger_patch batch dimension must be 1, match input batch size, '
                         'or match number of trigger boxes.'
                     )
-                patch_region = torch.clamp(patch, 0, 1)
+                patch_region = torch.clamp(patch, 0, 1) if clamp_patch else patch
                 blended_region = region * (1.0 - blend_mask) + patch_region * blend_mask
             else:
                 trigger_tensor = torch.tensor(
