@@ -155,7 +155,7 @@ class AdversarialAttack:
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
                     if mask_logits is not None else None
                 )
-                trigger_patch = torch.sigmoid(trigger_delta)
+                trigger_patch = 0.5 * (torch.tanh(trigger_delta) + 1.0)
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
                     trigger_boxes,
@@ -212,7 +212,7 @@ class AdversarialAttack:
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=(torch.sigmoid(trigger_delta).detach()),
+                    trigger_patch=(0.5 * (torch.tanh(trigger_delta) + 1.0).detach()),
                     trigger_mask=(
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
                         if mask_logits is not None else None
@@ -226,7 +226,7 @@ class AdversarialAttack:
                 step_history['edge_softness'] = current_softness
                 if val_asr > best_val_asr:
                     best_val_asr = val_asr
-                    best_patch = (torch.sigmoid(trigger_delta).detach().cpu().clone())
+                    best_patch = (0.5 * (torch.tanh(trigger_delta) + 1.0).detach().cpu().clone())
                     best_mask = (
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
                         if mask_logits is not None else None
@@ -272,7 +272,7 @@ class AdversarialAttack:
             learned_mask = best_mask
             selected_step = best_step
         else:
-            learned_patch = (torch.sigmoid(trigger_delta).detach().cpu())
+            learned_patch = (0.5 * (torch.tanh(trigger_delta) + 1.0).detach().cpu())
             learned_mask = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
                 if mask_logits is not None else None
