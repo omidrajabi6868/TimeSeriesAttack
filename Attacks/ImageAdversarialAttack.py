@@ -76,6 +76,7 @@ class AdversarialAttack:
                                 target_label=0.0,
                                 source_filter='bad',
                                 validation_loader=None,
+                                report_training_asr=True,
                                 steps=100,
                                 learning_rate=0.1,
                                 mask_learning_rate=0.02,
@@ -208,7 +209,23 @@ class AdversarialAttack:
                 'patch_update_l2': patch_update_l2,
             }
 
+            if report_training_asr:
+                train_metrics = self.evaluate_attack_success(
+                    test_loader=data_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=(0.5 * (torch.tanh(trigger_delta) + 1.0).detach()),
+                    trigger_mask=(
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    ),
+                    target_label=target_label,
+                    source_filter=source_filter,
+                    edge_softness=current_softness,
+                )
+                step_history['training_asr'] = float(train_metrics['attack_success_rate'])
+
             if validation_loader is not None:
+
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
@@ -253,13 +270,16 @@ class AdversarialAttack:
 
             if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
                 val_log = ''
+                train_log = ''
+                if report_training_asr:
+                    train_log = f', train_asr={step_history.get("training_asr", 0.0):.4f}'
                 if validation_loader is not None:
                     val_log = f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
                 print(
                     f'[Trigger Learning] step={step_idx + 1}/{steps}, '
                     f'loss={step_loss:.6f}, samples={step_samples}, '
                     f'patch_update_l2={patch_update_l2:.6f}'
-                    f'{val_log}'
+                    f'{train_log}{val_log}'
                 )
                 if step_samples == 0:
                     print(
