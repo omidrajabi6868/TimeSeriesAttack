@@ -3,21 +3,47 @@ import torch
 from pathlib import Path
 from PIL import Image
 import json
+from typing import Optional, Sequence
+
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    if not any(key.startswith('module.') for key in state_dict.keys()):
+        return state_dict
+    return {key.replace('module.', '', 1): value for key, value in state_dict.items()}
 
 
 class BackdoorAttack:
-    def __init__(self, model, vae_model, device=None):
+    def __init__(
+        self,
+        model,
+        vae_model,
+        device=None,
+        use_multi_gpu: bool = True,
+        gpu_ids: Optional[Sequence[int]] = None,
+    ):
         self.model = model
         self.vae = vae_model
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device)
+        self.use_multi_gpu = use_multi_gpu
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
 
         self.model = self.model.to(self.device)
         self.vae = self.vae.to(self.device)
+        if self._should_use_multi_gpu() and not isinstance(self.model, torch.nn.DataParallel):
+            self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
+            print(f'Using DataParallel for backdoor attack classifier on GPUs: {self.gpu_ids}')
 
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         self.optimizer = None
+
+    def _should_use_multi_gpu(self):
+        if not self.use_multi_gpu or self.device.type != 'cuda' or torch.cuda.device_count() <= 1:
+            return False
+        if self.gpu_ids is None:
+            self.gpu_ids = list(range(torch.cuda.device_count()))
+        return len(self.gpu_ids) > 1
 
     @staticmethod
     def _ensure_2d_target(target):
@@ -97,7 +123,7 @@ class BackdoorAttack:
             raise FileNotFoundError(f'VAE checkpoint not found: {checkpoint_path}')
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.vae.load_state_dict(checkpoint['vae_state_dict'])
+        self.vae.load_state_dict(_strip_module_prefix(checkpoint['vae_state_dict']))
         if load_optimizer and optimizer is not None and checkpoint.get('optimizer_state_dict') is not None:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 

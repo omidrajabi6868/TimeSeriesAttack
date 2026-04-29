@@ -1,12 +1,18 @@
 import json
 from pathlib import Path
 from statistics import mean
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import torch
 import numpy as np
 
 from Network import ClassificationModels
+
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    if not any(key.startswith('module.') for key in state_dict.keys()):
+        return state_dict
+    return {key.replace('module.', '', 1): value for key, value in state_dict.items()}
 
 
 class ClassificationBase:
@@ -16,6 +22,8 @@ class ClassificationBase:
         optimizer_name: str = 'Adam',
         checkpoint_dir: str = 'checkpoints',
         device: Optional[str] = None,
+        use_multi_gpu: bool = True,
+        gpu_ids: Optional[Sequence[int]] = None,
     ):
         self.model_name = model_name
         self.optimizer_name = optimizer_name
@@ -27,6 +35,8 @@ class ClassificationBase:
         self.model = None
         self.cost_function = None
         self.optimizer = None
+        self.use_multi_gpu = use_multi_gpu
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
 
     def _build_model(self):
         if self.model_name == 'ResNet18':
@@ -43,6 +53,16 @@ class ClassificationBase:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 
         self.model = self.model.to(self.device)
+        if (
+            self.use_multi_gpu
+            and self.device.type == "cuda"
+            and torch.cuda.device_count() > 1
+        ):
+            if self.gpu_ids is None:
+                self.gpu_ids = list(range(torch.cuda.device_count()))
+            if len(self.gpu_ids) > 1:
+                print(f"Using DataParallel on GPUs: {self.gpu_ids}")
+                self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
         return self.model
 
     def _build_cost_function(self):
@@ -63,7 +83,7 @@ class ClassificationBase:
         torch.save(
             {
                 'epoch': epoch,
-                'model_state_dict': self.model.state_dict(),
+                'model_state_dict': self._stateful_model().state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
                 'model_name': self.model_name,
@@ -112,6 +132,9 @@ class ClassificationBase:
         fig.savefig(plot_path, dpi=150)
         plt.close(fig)
 
+    def _stateful_model(self):
+        return self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
+
     def load_checkpoint(self, checkpoint_path: str, load_optimizer: bool = True):
         if self.model is None:
             self._build_model()
@@ -121,7 +144,8 @@ class ClassificationBase:
             self._build_optimization_algorithm(self.model.parameters(), learning_rate=1e-3)
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint_state = _strip_module_prefix(checkpoint['model_state_dict'])
+        self._stateful_model().load_state_dict(checkpoint_state)
 
         if load_optimizer and 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
