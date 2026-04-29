@@ -4,7 +4,7 @@
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpu
+#SBATCH --partition=high-gpu-mem
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 

@@ -32,7 +32,7 @@ def main():
     train_original_model = False
 
     train_adversarial_patch = True
-    adversarial_patch_count = 3
+    adversarial_patch_count = 1
 
     train_backdoor_model = False
     train_vae_model = False
@@ -45,7 +45,7 @@ def main():
     
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=32,
+        batch_size=128,
         stratify_by_bad_sample=True,
     )
 
@@ -71,7 +71,7 @@ def main():
             resume_from='backups/last_checkpoint.pth',
         )
     else:
-        classification.load_checkpoint("backups/best_checkpoint.pth")
+        classification.load_checkpoint("backups/alex_net.pth")
 
     # test_metrics = classification.evaluate_model(test_loader=test_loader)
     # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
@@ -84,8 +84,8 @@ def main():
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(32, 16),
-            stride=16,
+            window_size=(608, 256),
+            stride=8,
             top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
         )
@@ -121,20 +121,20 @@ def main():
                 source_filter='bad',
                 validation_loader=val_loader,
 
-                steps=400,
-                learning_rate=0.1,   
-                mask_learning_rate=0.001, 
+                steps=500,
+                learning_rate=0.01,   
+                mask_learning_rate=0.003, 
 
-                optimize_mask=False,
-                initial_edge_softness=0.0,
-                min_edge_softness=0.0,
-                softness_decay=0.0,
-                softness_patience=0,
-                asr_hardening_threshold=70.0,
+                optimize_mask=True,
+                initial_edge_softness=0.2,
+                min_edge_softness=0.04,
+                softness_decay=0.9,
+                softness_patience=6,
+                asr_hardening_threshold=85.0,
 
-                mask_l1_weight=0.0,
-                patch_l2_weight=0.0,
-                softness_alignment_weight=0.0,
+                mask_l1_weight=1e-3,
+                patch_l2_weight=1e-4,
+                softness_alignment_weight=1e-2,
             )
             print(
                 'adversarial_patch_selection: '
