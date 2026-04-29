@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 from pathlib import Path
 from Network import ClassificationModels
 
@@ -8,7 +8,9 @@ from Network import ClassificationModels
 class AdversarialAttack:
     def __init__(self, 
                 model: Callable,
-                device: Optional[str] = None
+                device: Optional[str] = None,
+                use_multi_gpu: bool = True,
+                gpu_ids: Optional[Sequence[int]] = None,
                 ):
                     
         self.model = model
@@ -18,6 +20,19 @@ class AdversarialAttack:
             self.device = device
         self.device = torch.device(self.device)
         self.model = self.model.to(self.device)
+        self.use_multi_gpu = use_multi_gpu
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+        if (
+            self.use_multi_gpu
+            and self.device.type == 'cuda'
+            and torch.cuda.device_count() > 1
+            and not isinstance(self.model, torch.nn.DataParallel)
+        ):
+            if self.gpu_ids is None:
+                self.gpu_ids = list(range(torch.cuda.device_count()))
+            if len(self.gpu_ids) > 1:
+                print(f'Using DataParallel for adversarial attack on GPUs: {self.gpu_ids}')
+                self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
         self._build_cost_function()
     
     def _build_cost_function(self):
