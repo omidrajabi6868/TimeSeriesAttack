@@ -1,9 +1,17 @@
+import json
 from pathlib import Path
+from statistics import mean
 import torch.nn as nn
 import torch
 
 from typing import Callable, Optional, Sequence
 from .TimeSeriesModels.PatchTSTModel import PatchTST
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    return {
+        (k[7:] if isinstance(k, str) and k.startswith('module.') else k): v
+        for k, v in state_dict.items()
+    }
 
 class ForecastBase:
     def __init__(
@@ -217,6 +225,8 @@ class ForecastBase:
     def evaluate_model(self, test_loader):
         self.model.eval()
         losses = []
+        all_outputs = []
+        all_targets = []
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
             targets = targets.float().to(self.device)
@@ -224,12 +234,54 @@ class ForecastBase:
             outputs = self.model(inputs)
             loss = self.cost_function(outputs, targets)
             losses.append(loss.item())
+            all_outputs.append(outputs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+
+        if all_outputs and all_targets:
+            self._plot_test_predictions(
+                predictions=torch.cat(all_outputs, dim=0),
+                targets=torch.cat(all_targets, dim=0),
+            )
 
         return {
             'loss': mean(losses) if losses else 0.0,
-            'accuracy': accuracy,
         }
 
+    def _plot_test_predictions(self, predictions: torch.Tensor, targets: torch.Tensor):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print('matplotlib not installed; skipping test prediction plots.')
+            return
+
+        # Expected shape: [batch, pred_len, num_series]
+        if predictions.ndim != 3 or targets.ndim != 3:
+            print('Unexpected prediction/target shape; skipping test prediction plots.')
+            return
+
+        if predictions.shape != targets.shape:
+            print('Prediction and target shapes differ; skipping test prediction plots.')
+            return
+
+        output_dir = self.checkpoint_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        num_series = min(predictions.shape[-1], targets.shape[-1])
+        pred_2d = predictions.reshape(-1, num_series)
+        target_2d = targets.reshape(-1, num_series)
+
+        for series_idx in range(num_series):
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(target_2d[:, series_idx].numpy(), label='Real', linewidth=1.5)
+            ax.plot(pred_2d[:, series_idx].numpy(), label='Prediction', linewidth=1.2, alpha=0.9)
+            ax.set_title(f'Test Set: Prediction vs Real (Series {series_idx + 1})')
+            ax.set_xlabel('Test Time Index')
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(output_dir / f'test_prediction_series_{series_idx + 1}.png', dpi=150)
+            plt.close(fig)
 
 
 
