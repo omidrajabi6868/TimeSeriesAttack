@@ -23,8 +23,7 @@ class ClassificationBase:
         checkpoint_dir: str = 'checkpoints',
         device: Optional[str] = None,
         use_multi_gpu: bool = True,
-        gpu_ids: Optional[Sequence[int]] = None,
-    ):
+        gpu_ids: Optional[Sequence[int]] = None):
         self.model_name = model_name
         self.optimizer_name = optimizer_name
         self.checkpoint_dir = Path(checkpoint_dir)

@@ -88,7 +88,7 @@ class AdversarialAttack:
     def learn_universal_trigger(self,
                                 data_loader,
                                 trigger_box,
-                                target_label=0.0,
+                                target_label=1.0,
                                 source_filter='bad',
                                 validation_loader=None,
                                 report_training_asr=True,

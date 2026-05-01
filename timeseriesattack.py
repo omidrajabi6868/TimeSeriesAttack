@@ -9,11 +9,13 @@ from Tasks.TimeSeriesForecasting import ForecastBase
 def main():
 
     task = 'adversarial_attack'
-    input_len = 24
-    output_len = 12
+    input_len = 96
+    output_len = 96
+
+    train_original_model = True
     
     dataset = TimeSeriesDataset(
-        cvs_path="/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv",
+        csv_path="/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv",
         timestamp_col='DATE_TIME',
         input_len=input_len,
         output_len=output_len,
@@ -24,25 +26,37 @@ def main():
         train_ratio=0.7,
         val_ratio=0.15,
         add_time_features=True,
-        normalize=True,
+        normalize=False,
         zero_threshold=1e-4,
         var_threshold=1e-5
     )
 
     train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=32)
 
+    forecast = ForecastBase(model_name='PatchTST', 
+                            optimizer_name='Adam', 
+                            checkpoint_dir='backups/forecast',
+                            input_len=input_len,
+                            output_len=output_len,
+                            num_vars=6)
+    
+    if train_original_model:
+            forecast.train_model(
+            train_loader,
+            val_loader,
+            learning_rate=1e-4,
+            epoch_num=10,
+            resume=False,
+            resume_from='backups/last_checkpoint.pth',
+        )
+    else:
+        forecast.load_checkpoint("backups/forecast/best_checkpoint.pth")
+    
+    test_metrics = forecast.evaluate_model(test_loader=test_loader)
+    print(f'test_loss: {test_metrics["loss"]}')
 
 
-
-    
-    
-    
-    
-    
     return
-
-
-
 
 
 
