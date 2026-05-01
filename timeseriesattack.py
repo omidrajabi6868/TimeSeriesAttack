@@ -33,12 +33,15 @@ def main():
 
     train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=32)
 
+    sample_inputs, _ = next(iter(train_loader))
+    num_vars = sample_inputs.shape[-1]
+
     forecast = ForecastBase(model_name='PatchTST', 
                             optimizer_name='Adam', 
                             checkpoint_dir='backups/forecast',
                             input_len=input_len,
                             output_len=output_len,
-                            num_vars=6)
+                            num_vars=num_vars)
     
     if train_original_model:
             forecast.train_model(

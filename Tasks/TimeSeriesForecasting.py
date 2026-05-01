@@ -30,12 +30,28 @@ class ForecastBase:
         self.use_multi_gpu = use_multi_gpu
         self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
         self.input_len = input_len
-        self.pred_len = output_len,
-        self.num_vars = num_vars,
+        self.pred_len = output_len
+        self.num_vars = num_vars
 
     def _build_model(self):
         if self.model_name == "PatchTST":
             self.model = PatchTST(input_len=self.input_len, pred_len=self.pred_len, num_vars=self.num_vars)
+
+        if self.model is None:
+            raise ValueError(f'Unsupported model_name: {self.model_name}')
+
+        self.model = self.model.to(self.device)
+
+        if self.use_multi_gpu and self.device.type == 'cuda':
+            available_gpus = torch.cuda.device_count()
+            if available_gpus > 1:
+                if self.gpu_ids is None:
+                    device_ids = list(range(available_gpus))
+                else:
+                    device_ids = [gpu_id for gpu_id in self.gpu_ids if 0 <= gpu_id < available_gpus]
+                if len(device_ids) > 1:
+                    self.model = torch.nn.DataParallel(self.model, device_ids=device_ids)
+
         return self.model
 
     def _build_cost_function(self):
@@ -160,7 +176,7 @@ class ForecastBase:
             self.model.train()
             for inputs, targets in train_loader:
                 inputs = inputs.to(self.device)
-                targets = targets.float().unsqueeze(-1).to(self.device)
+                targets = targets.float().to(self.device)
                 
 
                 outputs = self.model(inputs)
@@ -203,7 +219,7 @@ class ForecastBase:
         losses = []
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
-            targets = targets.float().unsqueeze(-1).to(self.device)
+            targets = targets.float().to(self.device)
 
             outputs = self.model(inputs)
             loss = self.cost_function(outputs, targets)
