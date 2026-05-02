@@ -1,9 +1,17 @@
+import json
 from pathlib import Path
+from statistics import mean
 import torch.nn as nn
 import torch
 
 from typing import Callable, Optional, Sequence
 from .TimeSeriesModels.PatchTSTModel import PatchTST
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    return {
+        (k[7:] if isinstance(k, str) and k.startswith('module.') else k): v
+        for k, v in state_dict.items()
+    }
 
 class ForecastBase:
     def __init__(
@@ -217,6 +225,8 @@ class ForecastBase:
     def evaluate_model(self, test_loader):
         self.model.eval()
         losses = []
+        all_outputs = []
+        all_targets = []
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
             targets = targets.float().to(self.device)
@@ -224,13 +234,118 @@ class ForecastBase:
             outputs = self.model(inputs)
             loss = self.cost_function(outputs, targets)
             losses.append(loss.item())
+            all_outputs.append(outputs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+
+        if all_outputs and all_targets:
+            self._plot_test_predictions(
+                predictions=torch.cat(all_outputs, dim=0),
+                targets=torch.cat(all_targets, dim=0),
+            )
 
         return {
             'loss': mean(losses) if losses else 0.0,
-            'accuracy': accuracy,
         }
 
+    def _plot_test_predictions(self, predictions: torch.Tensor, targets: torch.Tensor):
+        try:
+            import numpy as np
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print('matplotlib not installed; skipping test prediction plots.')
+            return
 
+        # Expected shape: [batch, pred_len, num_series]
+        if predictions.ndim != 3 or targets.ndim != 3:
+            print('Unexpected prediction/target shape; skipping test prediction plots.')
+            return
+
+        if predictions.shape != targets.shape:
+            print('Prediction and target shapes differ; skipping test prediction plots.')
+            return
+
+        output_dir = self.checkpoint_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        num_series = min(predictions.shape[-1], targets.shape[-1])
+        pred_2d = predictions.reshape(-1, num_series)
+        target_2d = targets.reshape(-1, num_series)
+
+        for series_idx in range(num_series):
+            y_true = target_2d[:, series_idx].numpy()
+            y_pred = pred_2d[:, series_idx].numpy()
+            n_points = len(y_true)
+
+            # Metrics for quick quality understanding beyond just loss.
+            mae = float(np.mean(np.abs(y_pred - y_true)))
+            rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
+            signal_span = float(np.max(y_true) - np.min(y_true))
+            nrmse = rmse / signal_span if signal_span > 1e-12 else float('nan')
+
+            # Downsample overview to avoid overcrowded 5000+ point figures.
+            max_overview_points = 600
+            step = max(1, n_points // max_overview_points)
+            overview_idx = np.arange(0, n_points, step)
+
+            # Find informative windows:
+            # 1) highest-energy target window (where real signal has large activity),
+            # 2) highest-error window (where model struggles most).
+            window = min(max(self.pred_len * 4, 192), max(64, n_points))
+            abs_err = np.abs(y_pred - y_true)
+            energy = np.abs(y_true)
+
+            kernel = np.ones(window, dtype=np.float64)
+            err_score = np.convolve(abs_err, kernel, mode='valid')
+            energy_score = np.convolve(energy, kernel, mode='valid')
+
+            high_err_start = int(np.argmax(err_score)) if err_score.size > 0 else 0
+            high_energy_start = int(np.argmax(energy_score)) if energy_score.size > 0 else 0
+
+            def _window_slice(start: int):
+                end = min(start + window, n_points)
+                return slice(start, end)
+
+            err_slice = _window_slice(high_err_start)
+            energy_slice = _window_slice(high_energy_start)
+
+            fig, axes = plt.subplots(3, 1, figsize=(13, 10))
+
+            axes[0].plot(overview_idx, y_true[overview_idx], label='Real', linewidth=1.5)
+            axes[0].plot(overview_idx, y_pred[overview_idx], label='Prediction', linewidth=1.2, alpha=0.9)
+            axes[0].set_title(
+                f'Series {series_idx + 1} - Test Overview (downsample step={step})\n'
+                f'MAE={mae:.5f}, RMSE={rmse:.5f}, NRMSE={nrmse:.5f}'
+            )
+            axes[0].set_xlabel('Test Time Index')
+            axes[0].set_ylabel('Value')
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend()
+
+            x_energy = np.arange(energy_slice.start, energy_slice.stop)
+            axes[1].plot(x_energy, y_true[energy_slice], label='Real', linewidth=1.6)
+            axes[1].plot(x_energy, y_pred[energy_slice], label='Prediction', linewidth=1.3, alpha=0.9)
+            axes[1].set_title(
+                f'Highest-information window (max |signal|), start={energy_slice.start}, size={energy_slice.stop - energy_slice.start}'
+            )
+            axes[1].set_xlabel('Test Time Index')
+            axes[1].set_ylabel('Value')
+            axes[1].grid(True, alpha=0.3)
+            axes[1].legend()
+
+            x_err = np.arange(err_slice.start, err_slice.stop)
+            axes[2].plot(x_err, y_true[err_slice], label='Real', linewidth=1.6)
+            axes[2].plot(x_err, y_pred[err_slice], label='Prediction', linewidth=1.3, alpha=0.9)
+            axes[2].set_title(
+                f'Hardest window (max |error|), start={err_slice.start}, size={err_slice.stop - err_slice.start}'
+            )
+            axes[2].set_xlabel('Test Time Index')
+            axes[2].set_ylabel('Value')
+            axes[2].grid(True, alpha=0.3)
+            axes[2].legend()
+
+            fig.tight_layout()
+            fig.savefig(output_dir / f'test_prediction_series_{series_idx + 1}.png', dpi=150)
+            plt.close(fig)
 
 
 
