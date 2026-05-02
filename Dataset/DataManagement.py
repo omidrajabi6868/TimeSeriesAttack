@@ -502,7 +502,7 @@ class TimeSeriesDataset(TorchDataset):
         freq="H",
         stride=1,
         train_ratio=0.7,
-        val_ratio=0.15,
+        val_ratio=0.25,
         add_time_features=True,
         normalize=True,
         zero_threshold=1e-4,

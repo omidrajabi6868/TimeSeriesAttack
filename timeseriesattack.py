@@ -12,7 +12,7 @@ def main():
     input_len = 96
     output_len = 96
 
-    train_original_model = True
+    train_original_model = False
     
     dataset = TimeSeriesDataset(
         csv_path="/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv",
@@ -22,13 +22,13 @@ def main():
         input_cols=['IBC1H04CRCUR2', 'MMSHLAE', 'BLA', 'rad48_p1', 'rad44_p1', 'rad29_p1'],
         output_cols=['rad48_p1', 'rad44_p1', 'rad29_p1'],
         freq="H",
-        stride=1,
-        train_ratio=0.7,
+        stride=8,
+        train_ratio=0.8,
         val_ratio=0.15,
         add_time_features=True,
         normalize=False,
         zero_threshold=1e-4,
-        var_threshold=1e-5
+        var_threshold=1e-4
     )
 
     train_loader, val_loader, test_loader = dataset.get_dataloaders(batch_size=32)
@@ -48,7 +48,7 @@ def main():
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=10,
+            epoch_num=300,
             resume=False,
             resume_from='backups/last_checkpoint.pth',
         )

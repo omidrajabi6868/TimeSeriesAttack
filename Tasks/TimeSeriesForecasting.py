@@ -1,10 +1,13 @@
 import json
 from pathlib import Path
 from statistics import mean
+from typing import Callable, Optional, Sequence
+
+import torch
+import numpy as np
 import torch.nn as nn
 import torch
 
-from typing import Callable, Optional, Sequence
 from .TimeSeriesModels.PatchTSTModel import PatchTST
 
 def _strip_module_prefix(state_dict: dict) -> dict:
@@ -21,7 +24,7 @@ class ForecastBase:
         checkpoint_dir: str = 'checkpoints',
         input_len: int = 96,
         output_len: int = 96,
-        num_vars: int = 6,
+        num_vars: int = 9,
         device: Optional[str] = None,
         use_multi_gpu: bool = True,
         gpu_ids: Optional[Sequence[int]] = None):
@@ -105,23 +108,15 @@ class ForecastBase:
         if not epochs:
             return
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+        fig, axes = plt.subplots(1, 1, figsize=(12, 4.5))
 
-        axes[0].plot(epochs, history.get('train_loss', []), label='Train Loss')
-        axes[0].plot(epochs, history.get('val_loss', []), label='Validation Loss')
-        axes[0].set_title('Loss vs Epoch')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].grid(True, alpha=0.3)
-        axes[0].legend()
-
-        axes[1].plot(epochs, history.get('train_accuracy', []), label='Train Accuracy')
-        axes[1].plot(epochs, history.get('val_accuracy', []), label='Validation Accuracy')
-        axes[1].set_title('Accuracy vs Epoch')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy (%)')
-        axes[1].grid(True, alpha=0.3)
-        axes[1].legend()
+        axes.plot(epochs, history.get('train_loss', []), label='Train Loss')
+        axes.plot(epochs, history.get('val_loss', []), label='Validation Loss')
+        axes.set_title('Loss vs Epoch')
+        axes.set_xlabel('Epoch')
+        axes.set_ylabel('Loss')
+        axes.grid(True, alpha=0.3)
+        axes.legend()
 
         fig.tight_layout()
         plot_path = self.checkpoint_dir / 'training_curves.png'
@@ -188,7 +183,7 @@ class ForecastBase:
                 
 
                 outputs = self.model(inputs)
-                loss = self.cost_function(outputs, targets)
+                loss = self.cost_function(outputs[:, :, 6:], targets[:, :, 3:])
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -232,10 +227,10 @@ class ForecastBase:
             targets = targets.float().to(self.device)
 
             outputs = self.model(inputs)
-            loss = self.cost_function(outputs, targets)
+            loss = self.cost_function(outputs[:, :, 6:], targets[:, :, 3:])
             losses.append(loss.item())
-            all_outputs.append(outputs.detach().cpu())
-            all_targets.append(targets.detach().cpu())
+            all_outputs.append(outputs[:, :, 6:].detach().cpu())
+            all_targets.append(targets[:, :, 3:].detach().cpu())
 
         if all_outputs and all_targets:
             self._plot_test_predictions(

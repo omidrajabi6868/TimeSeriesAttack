@@ -126,7 +126,7 @@ def main():
                 mask_learning_rate=0.005, 
 
                 optimize_mask=True,
-                initial_edge_softness=0.5,
+                initial_edge_softness=0.15,
                 min_edge_softness=0.04,
                 softness_decay=0.9,
                 softness_patience=6,
