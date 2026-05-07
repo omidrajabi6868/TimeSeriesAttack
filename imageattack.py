@@ -88,7 +88,7 @@ def main():
             window_size=adversarial_min_patch_size,
             stride=8,
             top_k=max(10, adversarial_patch_count * 8),
-            max_samples_per_group=2000,
+            max_samples_per_group=4000,
         )
         print('Natural trigger candidates (bad vs good):')
         for candidate in natural_trigger['top_candidates']:
@@ -136,6 +136,11 @@ def main():
                 mask_l1_weight=1e-2,
                 patch_l2_weight=1e-2,
                 softness_alignment_weight=1e-2,
+
+                patch_update_method='momentum_sign',
+                momentum_decay=1.0,
+                gradient_norm_epsilon=1e-12,
+                
                 progressive_shrink=True,
                 patch_shrink_factor=0.85,
                 min_patch_size=adversarial_min_patch_size,
