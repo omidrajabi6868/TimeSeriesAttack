@@ -4,7 +4,7 @@
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpu
+#SBATCH --partition=high-gpu-mem
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 
@@ -19,4 +19,4 @@ module load container_env pytorch-gpu/2.2.0
 export PYTHONUNBUFFERED=1
 
 # Execute
-crun python timeseriesattack.py
+crun python imageattack.py
