@@ -60,6 +60,7 @@ class AdversarialAttack:
                 'source_filter': trigger.get('source_filter', 'bad'),
                 'epsilon': float(trigger.get('epsilon', 0.0)),
                 'softness': trigger.get('softness', {}),
+                'progressive_shrink': trigger.get('progressive_shrink', {}),
                 'history': trigger.get('history', []),
             },
             output_path,
@@ -81,6 +82,7 @@ class AdversarialAttack:
             'source_filter': trigger_payload.get('source_filter', 'bad'),
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
             'softness': trigger_payload.get('softness', {}),
+            'progressive_shrink': trigger_payload.get('progressive_shrink', {}),
             'history': trigger_payload.get('history', []),
             'path': str(trigger_path),
         }
@@ -107,18 +109,32 @@ class AdversarialAttack:
                                 patch_update_method='momentum_sign',
                                 momentum_decay=1.0,
                                 gradient_norm_epsilon=1e-12,
-                                log_interval=1):
+                                log_interval=1,
+                                progressive_shrink=True,
+                                patch_shrink_factor=0.85,
+                                min_patch_size=(16, 16),
+                                randomize_training_location=True):
         self.model.eval()
 
-        trigger_boxes = self._normalize_trigger_boxes(trigger_box)
-        base_box = trigger_boxes[0]
+        validation_trigger_boxes = self._normalize_trigger_boxes(trigger_box)
+        validation_anchor_boxes = [dict(box) for box in validation_trigger_boxes]
+        base_box = validation_anchor_boxes[0]
         width = int(base_box['width'])
         height = int(base_box['height'])
-        for candidate_box in trigger_boxes[1:]:
+        for candidate_box in validation_anchor_boxes[1:]:
             if int(candidate_box['width']) != width or int(candidate_box['height']) != height:
                 raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
 
         channels = 3
+        full_patch_size = self._infer_full_patch_size(data_loader, fallback=(width, height))
+        if progressive_shrink:
+            width, height = full_patch_size
+        min_width, min_height = self._normalize_patch_size(min_patch_size)
+        patch_shrink_factor = float(patch_shrink_factor)
+        if not 0.0 < patch_shrink_factor < 1.0:
+            raise ValueError('patch_shrink_factor must be between 0 and 1.')
+
+        trigger_boxes = self._resize_trigger_boxes(validation_anchor_boxes, width, height, full_patch_size)
         trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device)
         trigger_delta.requires_grad_()
         patch_update_method = str(patch_update_method).lower()
@@ -167,8 +183,15 @@ class AdversarialAttack:
         history = []
         best_patch = None
         best_mask = None
+        best_trigger_boxes = [dict(box) for box in trigger_boxes]
         best_step = 0
         best_val_asr = float('-inf')
+        smallest_success_patch = None
+        smallest_success_mask = None
+        smallest_success_boxes = None
+        smallest_success_step = 0
+        smallest_success_asr = float('-inf')
+        shrink_events = []
         no_improve_steps = 0
 
         for step_idx in range(steps):
@@ -197,11 +220,27 @@ class AdversarialAttack:
                     if mask_logits is not None else None
                 )
                 bounded_trigger_patch = torch.tanh(trigger_delta)
+                training_trigger_boxes = (
+                    self._random_trigger_boxes(
+                        batch_size=selected_inputs.shape[0],
+                        patch_width=width,
+                        patch_height=height,
+                        image_width=selected_inputs.shape[-1],
+                        image_height=selected_inputs.shape[-2],
+                    )
+                    if randomize_training_location else trigger_boxes
+                )
+                training_patch = bounded_trigger_patch
+                training_mask = blend_mask
+                if randomize_training_location:
+                    training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
+                    training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
+
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
-                    trigger_boxes,
-                    trigger_patch=bounded_trigger_patch,
-                    trigger_mask=blend_mask,
+                    training_trigger_boxes,
+                    trigger_patch=training_patch,
+                    trigger_mask=training_mask,
                     edge_softness=current_softness,
                 )
 
@@ -318,6 +357,7 @@ class AdversarialAttack:
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
                         if mask_logits is not None else None
                     )
+                    best_trigger_boxes = [dict(box) for box in trigger_boxes]
                     best_step = step_idx + 1
                     no_improve_steps = 0
                 else:
@@ -335,6 +375,61 @@ class AdversarialAttack:
 
                 if val_asr >= asr_hardening_threshold:
                     mask_training_active = False
+                    smallest_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
+                    smallest_success_mask = (
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
+                        if mask_logits is not None else None
+                    )
+                    smallest_success_boxes = [dict(box) for box in trigger_boxes]
+                    smallest_success_step = step_idx + 1
+                    smallest_success_asr = val_asr
+
+                    next_width = max(int(round(width * patch_shrink_factor)), min_width)
+                    next_height = max(int(round(height * patch_shrink_factor)), min_height)
+                    can_shrink = progressive_shrink and (next_width < width or next_height < height)
+                    if can_shrink:
+                        shrink_events.append({
+                            'step': step_idx + 1,
+                            'from_size': (int(width), int(height)),
+                            'to_size': (int(next_width), int(next_height)),
+                            'validation_asr': val_asr,
+                        })
+                        resized_patch = torch.nn.functional.interpolate(
+                            torch.tanh(trigger_delta).detach(),
+                            size=(next_height, next_width),
+                            mode='bilinear',
+                            align_corners=False,
+                        )
+                        trigger_delta = torch.atanh(torch.clamp(resized_patch, -0.999999, 0.999999)).detach()
+                        trigger_delta.requires_grad_()
+                        width, height = next_width, next_height
+                        trigger_boxes = self._resize_trigger_boxes(
+                            validation_anchor_boxes,
+                            width,
+                            height,
+                            full_patch_size,
+                        )
+                        patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
+                        if patch_update_method == 'adam':
+                            patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+                        if optimize_mask:
+                            base_mask = self._build_blend_mask(
+                                height=height,
+                                width=width,
+                                channels=channels,
+                                device=self.device,
+                                dtype=trigger_delta.dtype,
+                                edge_softness=current_softness,
+                            ).expand(len(trigger_boxes), -1, -1, -1)
+                            mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
+                            mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+                            mask_training_active = True
+                        else:
+                            base_mask = None
+                            mask_logits = None
+                            mask_optimizer = None
+                        no_improve_steps = 0
+                        step_history['shrink_to_size'] = (int(width), int(height))
 
             history.append(step_history)
 
@@ -357,9 +452,16 @@ class AdversarialAttack:
                         f'"{source_filter}" at this step.'
                     )
 
-        if best_patch is not None:
+        if progressive_shrink and smallest_success_patch is not None:
+            learned_patch = smallest_success_patch
+            learned_mask = smallest_success_mask
+            trigger_boxes = smallest_success_boxes
+            selected_step = smallest_success_step
+            best_val_asr = smallest_success_asr
+        elif best_patch is not None:
             learned_patch = best_patch
             learned_mask = best_mask
+            trigger_boxes = best_trigger_boxes
             selected_step = best_step
         else:
             learned_patch = torch.tanh(trigger_delta).detach().cpu()
@@ -373,7 +475,7 @@ class AdversarialAttack:
             'patch': learned_patch,
             'mask': learned_mask,
             'history': history,
-            'trigger_box': base_box,
+            'trigger_box': trigger_boxes[0],
             'trigger_boxes': trigger_boxes,
             'target_label': float(target_label),
             'source_filter': source_filter,
@@ -385,6 +487,15 @@ class AdversarialAttack:
                 'softness_decay': float(softness_decay),
                 'softness_patience': int(softness_patience),
                 'asr_hardening_threshold': float(asr_hardening_threshold),
+            },
+            'progressive_shrink': {
+                'enabled': bool(progressive_shrink),
+                'randomize_training_location': bool(randomize_training_location),
+                'initial_patch_size': (int(full_patch_size[0]), int(full_patch_size[1])),
+                'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
+                'patch_shrink_factor': float(patch_shrink_factor),
+                'min_patch_size': (int(min_width), int(min_height)),
+                'events': shrink_events,
             },
             'selection': 'best_validation_asr' if validation_loader is not None else 'last_step',
             'selected_step': int(selected_step),
@@ -467,6 +578,65 @@ class AdversarialAttack:
             'source_filter': source_filter if source_filter is not None else ('bad' if source_only_bad else 'all'),
         }
 
+
+    @staticmethod
+    def _normalize_patch_size(patch_size):
+        if isinstance(patch_size, int):
+            return int(patch_size), int(patch_size)
+        if len(patch_size) != 2:
+            raise ValueError('patch_size must be an int or a (width, height) pair.')
+        width, height = int(patch_size[0]), int(patch_size[1])
+        if width <= 0 or height <= 0:
+            raise ValueError('patch_size values must be positive integers.')
+        return width, height
+
+    def _infer_full_patch_size(self, data_loader, fallback):
+        dataset = getattr(data_loader, 'dataset', None)
+        image_size = getattr(dataset, 'image_size', None)
+        if image_size is not None:
+            return self._normalize_patch_size(image_size)
+        try:
+            sample_inputs, _ = next(iter(data_loader))
+            return int(sample_inputs.shape[-1]), int(sample_inputs.shape[-2])
+        except StopIteration:
+            return self._normalize_patch_size(fallback)
+
+    @staticmethod
+    def _resize_trigger_boxes(anchor_boxes, width, height, image_size):
+        image_width, image_height = int(image_size[0]), int(image_size[1])
+        resized_boxes = []
+        for box in anchor_boxes:
+            anchor_w = int(box['width'])
+            anchor_h = int(box['height'])
+            center_x = int(box['x']) + anchor_w / 2.0
+            center_y = int(box['y']) + anchor_h / 2.0
+            x = int(round(center_x - width / 2.0))
+            y = int(round(center_y - height / 2.0))
+            x = max(0, min(x, image_width - int(width)))
+            y = max(0, min(y, image_height - int(height)))
+            resized_box = dict(box)
+            resized_box.update({
+                'x': int(x),
+                'y': int(y),
+                'width': int(width),
+                'height': int(height),
+            })
+            resized_boxes.append(resized_box)
+        return resized_boxes
+
+    @staticmethod
+    def _random_trigger_boxes(batch_size, patch_width, patch_height, image_width, image_height):
+        if patch_width > image_width or patch_height > image_height:
+            raise ValueError('Patch size cannot exceed image dimensions.')
+        max_x = int(image_width - patch_width)
+        max_y = int(image_height - patch_height)
+        xs = torch.randint(0, max_x + 1, (batch_size,)).tolist() if max_x > 0 else [0] * batch_size
+        ys = torch.randint(0, max_y + 1, (batch_size,)).tolist() if max_y > 0 else [0] * batch_size
+        return [
+            {'x': int(x), 'y': int(y), 'width': int(patch_width), 'height': int(patch_height)}
+            for x, y in zip(xs, ys)
+        ]
+
     @staticmethod
     def _normalize_trigger_boxes(trigger_box):
         if isinstance(trigger_box, list):
@@ -538,6 +708,47 @@ class AdversarialAttack:
                 mask_bank = trigger_mask
             else:
                 raise ValueError('trigger_mask must be CHW or NCHW tensor-like.')
+
+        per_sample_boxes = len(trigger_boxes) == poisoned_inputs.shape[0]
+        if per_sample_boxes and patch_bank is not None:
+            patch_count_valid = patch_bank.shape[0] in (1, poisoned_inputs.shape[0])
+            mask_count_valid = mask_bank is None or mask_bank.shape[0] in (1, poisoned_inputs.shape[0])
+            if patch_count_valid and mask_count_valid:
+                for sample_idx, box in enumerate(trigger_boxes):
+                    x = int(box['x'])
+                    y = int(box['y'])
+                    width = int(box['width'])
+                    height = int(box['height'])
+
+                    if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
+                        raise ValueError('trigger_box is out of image bounds.')
+
+                    region = poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width].clone()
+                    if patch_bank.shape[1] != channels or patch_bank.shape[2] != height or patch_bank.shape[3] != width:
+                        raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
+                    patch = patch_bank[0 if patch_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
+
+                    if mask_bank is not None:
+                        if mask_bank.shape[1] != channels or mask_bank.shape[2] != height or mask_bank.shape[3] != width:
+                            raise ValueError('trigger_mask shape must match (C, height, width) from trigger_box.')
+                        blend_mask = mask_bank[0 if mask_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
+                        blend_mask = torch.clamp(blend_mask, 0.0, 1.0)
+                    else:
+                        blend_mask = AdversarialAttack._build_blend_mask(
+                            height=height,
+                            width=width,
+                            channels=channels,
+                            device=poisoned_inputs.device,
+                            dtype=poisoned_inputs.dtype,
+                            edge_softness=edge_softness,
+                        )
+
+                    poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width] = torch.clamp(
+                        region + patch * blend_mask,
+                        0.0,
+                        1.0,
+                    )
+                return poisoned_inputs
 
         for idx, box in enumerate(trigger_boxes):
             x = int(box['x'])
