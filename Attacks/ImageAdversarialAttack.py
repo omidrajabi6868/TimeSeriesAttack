@@ -508,8 +508,7 @@ class AdversarialAttack:
         trigger_value=(1.0, 1.0, 1.0),
         trigger_patch=None,
         trigger_mask=None,
-        edge_softness=0.2,
-    ):
+        edge_softness=0.2):
         trigger_boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
         poisoned_inputs = inputs.clone()
 
