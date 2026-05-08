@@ -133,17 +133,14 @@ def main():
                 softness_patience=6,
                 asr_hardening_threshold=85.0, 
 
-                mask_l1_weight=1e-3,
-                patch_l2_weight=1e-4,
-                softness_alignment_weight=1e-3,
-
-                patch_update_method='momentum_sign',
-                momentum_decay=1.0,
-                gradient_norm_epsilon=1e-12,
-
-                progressive_shrink=True,
-                patch_shrink_factor=0.85,
+                mask_l1_weight=1e-2,
+                patch_l2_weight=1e-2,
+                softness_alignment_weight=1e-2,
+                progressive_resize=True,
+                patch_growth_factor=1.25,
                 min_patch_size=adversarial_min_patch_size,
+                min_steps_per_patch_size=10,
+                size_patience=6,
                 randomize_training_location=True,
             )
             print(

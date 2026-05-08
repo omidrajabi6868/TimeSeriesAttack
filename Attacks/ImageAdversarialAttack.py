@@ -61,6 +61,7 @@ class AdversarialAttack:
                 'epsilon': float(trigger.get('epsilon', 0.0)),
                 'softness': trigger.get('softness', {}),
                 'progressive_shrink': trigger.get('progressive_shrink', {}),
+                'progressive_resize': trigger.get('progressive_resize', {}),
                 'history': trigger.get('history', []),
             },
             output_path,
@@ -83,6 +84,7 @@ class AdversarialAttack:
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
             'softness': trigger_payload.get('softness', {}),
             'progressive_shrink': trigger_payload.get('progressive_shrink', {}),
+            'progressive_resize': trigger_payload.get('progressive_resize', {}),
             'history': trigger_payload.get('history', []),
             'path': str(trigger_path),
         }
@@ -110,11 +112,16 @@ class AdversarialAttack:
                                 momentum_decay=1.0,
                                 gradient_norm_epsilon=1e-12,
                                 log_interval=1,
+                                progressive_resize=None,
                                 progressive_shrink=True,
                                 patch_shrink_factor=0.85,
                                 min_patch_size=(16, 16),
-                                randomize_training_location=True):
+                                randomize_training_location=True,
+                                patch_growth_factor=None,
+                                min_steps_per_patch_size=10,
+                                size_patience=None):
         self.model.eval()
+        progressive_resize_enabled = bool(progressive_shrink if progressive_resize is None else progressive_resize)
 
         validation_trigger_boxes = self._normalize_trigger_boxes(trigger_box)
         validation_anchor_boxes = [dict(box) for box in validation_trigger_boxes]
@@ -127,12 +134,23 @@ class AdversarialAttack:
 
         channels = 3
         full_patch_size = self._infer_full_patch_size(data_loader, fallback=(width, height))
-        if progressive_shrink:
-            width, height = full_patch_size
+        max_width, max_height = self._normalize_patch_size(full_patch_size)
         min_width, min_height = self._normalize_patch_size(min_patch_size)
+        min_width = min(min_width, max_width)
+        min_height = min(min_height, max_height)
         patch_shrink_factor = float(patch_shrink_factor)
         if not 0.0 < patch_shrink_factor < 1.0:
             raise ValueError('patch_shrink_factor must be between 0 and 1.')
+        if patch_growth_factor is None:
+            patch_growth_factor = 1.0 / patch_shrink_factor
+        patch_growth_factor = float(patch_growth_factor)
+        if patch_growth_factor <= 1.0:
+            raise ValueError('patch_growth_factor must be greater than 1.')
+        min_steps_per_patch_size = max(1, int(min_steps_per_patch_size))
+        size_patience = int(size_patience) if size_patience is not None else int(softness_patience)
+        size_patience = max(1, size_patience)
+        if progressive_resize_enabled:
+            width, height = min_width, min_height
 
         trigger_boxes = self._resize_trigger_boxes(validation_anchor_boxes, width, height, full_patch_size)
         trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device)
@@ -186,15 +204,20 @@ class AdversarialAttack:
         best_trigger_boxes = [dict(box) for box in trigger_boxes]
         best_step = 0
         best_val_asr = float('-inf')
-        smallest_success_patch = None
-        smallest_success_mask = None
-        smallest_success_boxes = None
-        smallest_success_step = 0
-        smallest_success_asr = float('-inf')
-        shrink_events = []
+        first_success_patch = None
+        first_success_mask = None
+        first_success_boxes = None
+        first_success_step = 0
+        first_success_asr = float('-inf')
+        resize_events = []
         no_improve_steps = 0
+        size_step_count = 0
+        size_no_improve_steps = 0
+        best_size_asr = float('-inf')
 
         for step_idx in range(steps):
+            stop_training = False
+            size_step_count += 1
             step_losses = []
             step_samples = 0
             previous_patch = torch.tanh(trigger_delta).detach().clone()
@@ -363,6 +386,11 @@ class AdversarialAttack:
                 else:
                     no_improve_steps += 1
 
+                if val_asr > best_size_asr:
+                    best_size_asr = val_asr
+                    size_no_improve_steps = 0
+                else:
+                    size_no_improve_steps += 1
 
                 if (
                     val_asr < asr_hardening_threshold
@@ -373,26 +401,41 @@ class AdversarialAttack:
                         current_softness = new_softness
                     no_improve_steps = 0
 
-                if val_asr >= asr_hardening_threshold:
-                    mask_training_active = False
-                    smallest_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
-                    smallest_success_mask = (
+                size_optimized_enough = size_step_count >= min_steps_per_patch_size
+                if val_asr >= asr_hardening_threshold and size_optimized_enough:
+                    first_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
+                    first_success_mask = (
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
                         if mask_logits is not None else None
                     )
-                    smallest_success_boxes = [dict(box) for box in trigger_boxes]
-                    smallest_success_step = step_idx + 1
-                    smallest_success_asr = val_asr
+                    first_success_boxes = [dict(box) for box in trigger_boxes]
+                    first_success_step = step_idx + 1
+                    first_success_asr = val_asr
+                    step_history['size_decision'] = 'accepted'
+                    stop_training = True
 
-                    next_width = max(int(round(width * patch_shrink_factor)), min_width)
-                    next_height = max(int(round(height * patch_shrink_factor)), min_height)
-                    can_shrink = progressive_shrink and (next_width < width or next_height < height)
-                    if can_shrink:
-                        shrink_events.append({
+                should_grow = (
+                    progressive_resize_enabled
+                    and validation_loader is not None
+                    and size_optimized_enough
+                    and val_asr < asr_hardening_threshold
+                    and size_no_improve_steps >= size_patience
+                )
+                if should_grow:
+                    next_width = min(int(round(width * patch_growth_factor)), max_width)
+                    next_height = min(int(round(height * patch_growth_factor)), max_height)
+                    if next_width <= width and width < max_width:
+                        next_width = width + 1
+                    if next_height <= height and height < max_height:
+                        next_height = height + 1
+                    can_grow = next_width > width or next_height > height
+                    if can_grow:
+                        resize_events.append({
                             'step': step_idx + 1,
                             'from_size': (int(width), int(height)),
                             'to_size': (int(next_width), int(next_height)),
                             'validation_asr': val_asr,
+                            'decision': 'grow',
                         })
                         resized_patch = torch.nn.functional.interpolate(
                             torch.tanh(trigger_delta).detach(),
@@ -429,7 +472,12 @@ class AdversarialAttack:
                             mask_logits = None
                             mask_optimizer = None
                         no_improve_steps = 0
-                        step_history['shrink_to_size'] = (int(width), int(height))
+                        size_step_count = 0
+                        size_no_improve_steps = 0
+                        best_size_asr = float('-inf')
+                        step_history['grow_to_size'] = (int(width), int(height))
+                    else:
+                        step_history['size_decision'] = 'max_size_reached'
 
             history.append(step_history)
 
@@ -452,12 +500,15 @@ class AdversarialAttack:
                         f'"{source_filter}" at this step.'
                     )
 
-        if progressive_shrink and smallest_success_patch is not None:
-            learned_patch = smallest_success_patch
-            learned_mask = smallest_success_mask
-            trigger_boxes = smallest_success_boxes
-            selected_step = smallest_success_step
-            best_val_asr = smallest_success_asr
+            if stop_training:
+                break
+
+        if progressive_resize_enabled and first_success_patch is not None:
+            learned_patch = first_success_patch
+            learned_mask = first_success_mask
+            trigger_boxes = first_success_boxes
+            selected_step = first_success_step
+            best_val_asr = first_success_asr
         elif best_patch is not None:
             learned_patch = best_patch
             learned_mask = best_mask
@@ -489,13 +540,30 @@ class AdversarialAttack:
                 'asr_hardening_threshold': float(asr_hardening_threshold),
             },
             'progressive_shrink': {
-                'enabled': bool(progressive_shrink),
+                'enabled': bool(progressive_resize_enabled),
                 'randomize_training_location': bool(randomize_training_location),
-                'initial_patch_size': (int(full_patch_size[0]), int(full_patch_size[1])),
+                'direction': 'grow',
+                'initial_patch_size': (int(min_width), int(min_height)),
                 'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
-                'patch_shrink_factor': float(patch_shrink_factor),
-                'min_patch_size': (int(min_width), int(min_height)),
-                'events': shrink_events,
+                'max_patch_size': (int(max_width), int(max_height)),
+                'patch_growth_factor': float(patch_growth_factor),
+                'min_steps_per_patch_size': int(min_steps_per_patch_size),
+                'size_patience': int(size_patience),
+                'asr_threshold': float(asr_hardening_threshold),
+                'events': resize_events,
+            },
+            'progressive_resize': {
+                'enabled': bool(progressive_resize_enabled),
+                'direction': 'grow',
+                'randomize_training_location': bool(randomize_training_location),
+                'initial_patch_size': (int(min_width), int(min_height)),
+                'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
+                'max_patch_size': (int(max_width), int(max_height)),
+                'patch_growth_factor': float(patch_growth_factor),
+                'min_steps_per_patch_size': int(min_steps_per_patch_size),
+                'size_patience': int(size_patience),
+                'asr_threshold': float(asr_hardening_threshold),
+                'events': resize_events,
             },
             'selection': 'best_validation_asr' if validation_loader is not None else 'last_step',
             'selected_step': int(selected_step),
