@@ -39,6 +39,7 @@ def main():
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
+    adversarial_min_patch_size = (32, 32)
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
@@ -84,7 +85,7 @@ def main():
     if task == "adversarial_attack":
         adv_attack = AdversarialAttack(classification.model)
         natural_trigger = dataset.find_natural_trigger_candidates(
-            window_size=(608, 256),
+            window_size=adversarial_min_patch_size,
             stride=8,
             top_k=max(10, adversarial_patch_count * 8),
             max_samples_per_group=2000,
@@ -135,6 +136,12 @@ def main():
                 mask_l1_weight=1e-2,
                 patch_l2_weight=1e-2,
                 softness_alignment_weight=1e-2,
+                progressive_resize=True,
+                patch_growth_factor=1.25,
+                min_patch_size=adversarial_min_patch_size,
+                min_steps_per_patch_size=10,
+                size_patience=6,
+                randomize_training_location=True,
             )
             print(
                 'adversarial_patch_selection: '
