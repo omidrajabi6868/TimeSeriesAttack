@@ -127,8 +127,8 @@ def main():
                 mask_learning_rate=0.005, 
 
                 optimize_mask=True,
-                initial_edge_softness=0.9,
-                min_edge_softness=0.5,
+                initial_edge_softness=0.3,
+                min_edge_softness=0.05,
                 softness_decay=0.9,
                 softness_patience=6,
                 asr_hardening_threshold=85.0, 
@@ -137,7 +137,7 @@ def main():
                 patch_l2_weight=1e-4,
                 softness_alignment_weight=1e-3,
 
-                patch_update_method='adam',
+                patch_update_method='momentum_sign',
                 momentum_decay=1.0,
                 gradient_norm_epsilon=1e-12,
 
