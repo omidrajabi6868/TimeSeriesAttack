@@ -60,7 +60,6 @@ class AdversarialAttack:
                 'source_filter': trigger.get('source_filter', 'bad'),
                 'epsilon': float(trigger.get('epsilon', 0.0)),
                 'softness': trigger.get('softness', {}),
-                'progressive_shrink': trigger.get('progressive_shrink', {}),
                 'progressive_resize': trigger.get('progressive_resize', {}),
                 'history': trigger.get('history', []),
             },
@@ -83,7 +82,6 @@ class AdversarialAttack:
             'source_filter': trigger_payload.get('source_filter', 'bad'),
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
             'softness': trigger_payload.get('softness', {}),
-            'progressive_shrink': trigger_payload.get('progressive_shrink', {}),
             'progressive_resize': trigger_payload.get('progressive_resize', {}),
             'history': trigger_payload.get('history', []),
             'path': str(trigger_path),
@@ -112,16 +110,14 @@ class AdversarialAttack:
                                 momentum_decay=1.0,
                                 gradient_norm_epsilon=1e-12,
                                 log_interval=1,
-                                progressive_resize=None,
-                                progressive_shrink=True,
-                                patch_shrink_factor=0.85,
+                                progressive_resize=True,
                                 min_patch_size=(16, 16),
                                 randomize_training_location=True,
                                 patch_growth_factor=None,
                                 min_steps_per_patch_size=10,
                                 size_patience=None):
         self.model.eval()
-        progressive_resize_enabled = bool(progressive_shrink if progressive_resize is None else progressive_resize)
+        progressive_resize_enabled = bool(progressive_resize)
 
         validation_trigger_boxes = self._normalize_trigger_boxes(trigger_box)
         validation_anchor_boxes = [dict(box) for box in validation_trigger_boxes]
@@ -138,11 +134,8 @@ class AdversarialAttack:
         min_width, min_height = self._normalize_patch_size(min_patch_size)
         min_width = min(min_width, max_width)
         min_height = min(min_height, max_height)
-        patch_shrink_factor = float(patch_shrink_factor)
-        if not 0.0 < patch_shrink_factor < 1.0:
-            raise ValueError('patch_shrink_factor must be between 0 and 1.')
         if patch_growth_factor is None:
-            patch_growth_factor = 1.0 / patch_shrink_factor
+            patch_growth_factor = 1.25
         patch_growth_factor = float(patch_growth_factor)
         if patch_growth_factor <= 1.0:
             raise ValueError('patch_growth_factor must be greater than 1.')
@@ -538,19 +531,6 @@ class AdversarialAttack:
                 'softness_decay': float(softness_decay),
                 'softness_patience': int(softness_patience),
                 'asr_hardening_threshold': float(asr_hardening_threshold),
-            },
-            'progressive_shrink': {
-                'enabled': bool(progressive_resize_enabled),
-                'randomize_training_location': bool(randomize_training_location),
-                'direction': 'grow',
-                'initial_patch_size': (int(min_width), int(min_height)),
-                'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
-                'max_patch_size': (int(max_width), int(max_height)),
-                'patch_growth_factor': float(patch_growth_factor),
-                'min_steps_per_patch_size': int(min_steps_per_patch_size),
-                'size_patience': int(size_patience),
-                'asr_threshold': float(asr_hardening_threshold),
-                'events': resize_events,
             },
             'progressive_resize': {
                 'enabled': bool(progressive_resize_enabled),
