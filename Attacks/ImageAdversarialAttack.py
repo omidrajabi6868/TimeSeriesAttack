@@ -437,6 +437,10 @@ class AdversarialAttack:
                         trigger_delta = torch.atanh(torch.clamp(resized_patch, -0.999999, 0.999999)).detach()
                         trigger_delta.requires_grad_()
                         width, height = next_width, next_height
+                        print(
+                            'adversarial_patch_size_change: '
+                            f'step={step_idx + 1}, patch_size=({width}, {height})'
+                        )
                         trigger_boxes = self._resize_trigger_boxes(
                             validation_anchor_boxes,
                             width,
