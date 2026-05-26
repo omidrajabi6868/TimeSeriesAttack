@@ -5,6 +5,7 @@ from typing import Callable, Optional, Sequence
 
 import torch
 import numpy as np
+from torch.utils.data import WeightedRandomSampler
 
 from Network import ClassificationModels
 
@@ -67,6 +68,24 @@ class ClassificationBase:
     def _build_cost_function(self):
         self.cost_function = torch.nn.BCEWithLogitsLoss()
         return self.cost_function
+
+    def _build_weighted_cost_function(self, pos_weight: Optional[float]):
+        if pos_weight is None:
+            return self._build_cost_function()
+        pos_weight_tensor = torch.tensor([float(pos_weight)], device=self.device)
+        self.cost_function = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        return self.cost_function
+
+    @staticmethod
+    def build_weighted_sampler_from_labels(labels):
+        labels_np = np.array(labels, dtype=np.int64)
+        class_counts = np.bincount(labels_np, minlength=2)
+        if np.any(class_counts == 0):
+            return None
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[labels_np]
+        sample_weights_t = torch.from_numpy(sample_weights.astype(np.float64))
+        return WeightedRandomSampler(weights=sample_weights_t, num_samples=len(sample_weights_t), replacement=True)
 
     def _build_optimization_algorithm(self, params, learning_rate: float):
         if self.optimizer_name == 'Adam':
@@ -163,9 +182,13 @@ class ClassificationBase:
         epoch_num: int = 10,
         resume: bool = False,
         resume_from: Optional[str] = None,
+        pos_weight: Optional[float] = None,
+        noise_probability_check: bool = False,
+        noise_regularization_weight: float = 0.0,
+        input_shape: Sequence[int] = (3, 256, 608),
     ):
         self._build_model()
-        self._build_cost_function()
+        self._build_weighted_cost_function(pos_weight)
         self._build_optimization_algorithm(self.model.parameters(), learning_rate)
 
         history = {
@@ -189,13 +212,24 @@ class ClassificationBase:
             self.model.train()
             total_num = 0
             correct = 0
+            noise_probabilities = []
+            noise_reg_losses = []
             for inputs, targets in train_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().unsqueeze(-1).to(self.device)
                 
 
                 outputs = self.model(inputs)
-                loss = self.cost_function(outputs, targets)
+                classification_loss = self.cost_function(outputs, targets)
+                loss = classification_loss
+
+                if noise_regularization_weight > 0.0:
+                    noise_reg_loss = self._noise_regularization_loss(
+                        batch_size=int(inputs.shape[0]),
+                        input_shape=input_shape,
+                    )
+                    noise_reg_losses.append(float(noise_reg_loss.detach().cpu().item()))
+                    loss = classification_loss + (noise_regularization_weight * noise_reg_loss)
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -206,10 +240,40 @@ class ClassificationBase:
 
                 correct += (preds == targets).sum().item()
                 total_num += int(inputs.shape[0])
+
+                if noise_probability_check:
+                    noise_stats = self._noise_probability_check(
+                        batch_size=int(inputs.shape[0]),
+                        batches=1,
+                        input_shape=input_shape,
+                    )
+                    noise_probabilities.append(noise_stats['positive_probability_mean'])
             
             avg_train_loss = mean(train_loss) if train_loss else 0.0
             train_acc = (correct / total_num) * 100 if total_num else 0.0
             print(f'Epoch {epoch + 1}: train_loss={avg_train_loss:.5f}, train_accuracy={train_acc:.2f}')
+
+            if noise_probability_check:
+                pos_mean = float(np.mean(noise_probabilities)) if noise_probabilities else 0.0
+                noise_stats = {
+                    'positive_probability_mean': pos_mean,
+                    'negative_probability_mean': 1.0 - pos_mean,
+                    'deviation_from_0_5': abs(pos_mean - 0.5),
+                }
+                print(
+                    'noise_probability_check: '
+                    f'positive={noise_stats["positive_probability_mean"]:.4f}, '
+                    f'negative={noise_stats["negative_probability_mean"]:.4f}, '
+                    f'deviation_from_0.5={noise_stats["deviation_from_0_5"]:.4f}'
+                )
+
+            if noise_regularization_weight > 0.0:
+                noise_reg_mean = float(np.mean(noise_reg_losses)) if noise_reg_losses else 0.0
+                print(
+                    'noise_regularization: '
+                    f'weight={noise_regularization_weight:.6f}, '
+                    f'mean_loss={noise_reg_mean:.6f}'
+                )
 
 
             with torch.no_grad():
@@ -236,6 +300,44 @@ class ClassificationBase:
                 self._save_checkpoint(best_ckpt_path, epoch, best_val_loss, history)
 
         return self.model, history
+
+    def _noise_probability_check(self, batch_size: int = 32, batches: int = 5, input_shape: Sequence[int] = (3, 256, 608)):
+        if batch_size <= 0 or batches <= 0:
+            raise ValueError('batch_size and batches must be positive integers.')
+
+        state_before = self.model.training
+        self.model.eval()
+        probs = []
+
+        with torch.no_grad():
+            for _ in range(batches):
+                noise = torch.randn(batch_size, *input_shape, device=self.device)
+                outputs = self.model(noise)
+                prob_pos = torch.sigmoid(outputs).detach().cpu().view(-1)
+                probs.append(prob_pos)
+
+        if state_before:
+            self.model.train()
+
+        all_probs = torch.cat(probs)
+        pos_mean = float(all_probs.mean().item())
+        neg_mean = float((1.0 - all_probs).mean().item())
+        deviation = float(abs(pos_mean - 0.5))
+        return {
+            'positive_probability_mean': pos_mean,
+            'negative_probability_mean': neg_mean,
+            'deviation_from_0_5': deviation,
+        }
+
+    def _noise_regularization_loss(self, batch_size: int, input_shape: Sequence[int]):
+        if batch_size <= 0:
+            raise ValueError('batch_size must be a positive integer.')
+
+        noise = torch.randn(batch_size, *input_shape, device=self.device)
+        noise_logits = self.model(noise)
+        noise_probabilities = torch.sigmoid(noise_logits)
+        target = torch.full_like(noise_probabilities, 0.5)
+        return torch.nn.functional.mse_loss(noise_probabilities, target)
 
     def evaluate_model(self, test_loader):
         self.model.eval()

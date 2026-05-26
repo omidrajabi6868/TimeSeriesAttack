@@ -1,6 +1,7 @@
 from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import DataLoader
 from torch.utils.data import Subset
+from torchvision import transforms
 from PIL import Image
 from PIL.Image import Resampling
 import torch
@@ -87,6 +88,23 @@ class ImageDataset(TorchDataset):
         )
 
         return train_loader, val_loader, test_loader
+
+    @staticmethod
+    def default_train_augmentation(image_size):
+        if image_size is None:
+            raise ValueError('image_size must be provided to build default augmentation transforms.')
+
+        width, height = image_size
+        return transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.1),
+            transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1)], p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
+            transforms.RandomAffine(degrees=5, translate=(0.03, 0.03), scale=(0.97, 1.03), shear=2),
+            transforms.Resize((height, width)),
+            transforms.ToTensor(),
+        ])
 
     def split_statistics(self, train_loader, val_loader, test_loader):
         return {

@@ -1,5 +1,6 @@
 import numpy as np
 from pathlib import Path
+from torch.utils.data import DataLoader
 from Dataset.DataManagement import ImageDataset
 from Tasks.ImageClassification import ClassificationBase
 from Attacks.ImageAdversarialAttack import AdversarialAttack
@@ -43,8 +44,8 @@ def main():
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
-    
-    dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
+    train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
+    dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
         batch_size=256,
         stratify_by_bad_sample=True,
@@ -55,6 +56,21 @@ def main():
         print(f'{split_name} split size: {split_info["size"]}')
         print(f'{split_name} counts: {split_info["counts"]}')
         print(f'{split_name} bad_ratio: {split_info["bad_ratio"]:.4f}')
+
+    train_indices = train_loader.dataset.indices
+    train_labels = [dataset.labels[idx] for idx in train_indices]
+    bad_count = sum(1 for label in train_labels if label == 0)
+    good_count = sum(1 for label in train_labels if label == 1)
+    pos_weight = (bad_count / good_count) if good_count > 0 else 1.0
+    weighted_sampler = ClassificationBase.build_weighted_sampler_from_labels(train_labels)
+    if weighted_sampler is not None:
+        train_loader = DataLoader(
+            train_loader.dataset,
+            batch_size=train_loader.batch_size,
+            sampler=weighted_sampler,
+            num_workers=train_loader.num_workers,
+        )
+    print(f'train_pos_weight_for_BCE: {pos_weight:.6f}')
 
     classification = ClassificationBase(
         model_name='AlexNet', 
@@ -70,6 +86,10 @@ def main():
             epoch_num=10,
             resume=False,
             resume_from='backups/last_checkpoint.pth',
+            pos_weight=pos_weight,
+            noise_probability_check=True,
+            noise_regularization_weight=0.05,
+            input_shape=(3, image_size[1], image_size[0]),
         )
     else:
         classification.load_checkpoint("backups/alex_net.pth")
