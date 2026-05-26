@@ -209,7 +209,6 @@ class AdversarialAttack:
         best_size_asr = float('-inf')
 
         for step_idx in range(steps):
-            stop_training = False
             size_step_count += 1
             step_losses = []
             step_samples = 0
@@ -405,7 +404,6 @@ class AdversarialAttack:
                     first_success_step = step_idx + 1
                     first_success_asr = val_asr
                     step_history['size_decision'] = 'accepted'
-                    stop_training = True
 
                 should_grow = (
                     progressive_resize_enabled
@@ -492,9 +490,6 @@ class AdversarialAttack:
                         '[Trigger Learning] warning: no samples matched source_filter '
                         f'"{source_filter}" at this step.'
                     )
-
-            if stop_training:
-                break
 
         if progressive_resize_enabled and first_success_patch is not None:
             learned_patch = first_success_patch
@@ -625,7 +620,6 @@ class AdversarialAttack:
             'trigger_box': trigger_box,
             'source_filter': source_filter if source_filter is not None else ('bad' if source_only_bad else 'all'),
         }
-
 
     @staticmethod
     def _normalize_patch_size(patch_size):

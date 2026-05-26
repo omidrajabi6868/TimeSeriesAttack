@@ -39,7 +39,7 @@ def main():
 
     adversarial_patch_path = 'backups/adversarial_patch/latest_trigger.pth'
     backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
-    adversarial_min_patch_size = (32, 32)
+    adversarial_min_patch_size = (16, 8)
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
@@ -122,7 +122,7 @@ def main():
                 source_filter='bad',
                 validation_loader=val_loader,
 
-                steps=100,
+                steps=1000,
                 learning_rate=0.05,   
                 mask_learning_rate=0.005, 
 
@@ -133,14 +133,19 @@ def main():
                 softness_patience=6,
                 asr_hardening_threshold=85.0, 
 
-                mask_l1_weight=1e-2,
-                patch_l2_weight=1e-2,
-                softness_alignment_weight=1e-2,
+                mask_l1_weight=1e-3,
+                patch_l2_weight=1e-3,
+                softness_alignment_weight=1e-3,
+
+                patch_update_method='adam',
+                momentum_decay=.95,
+                gradient_norm_epsilon=1e-12,
+
                 progressive_resize=True,
-                patch_growth_factor=1.25,
+                patch_growth_factor=1.1,
                 min_patch_size=adversarial_min_patch_size,
                 min_steps_per_patch_size=10,
-                size_patience=6,
+                size_patience=10,
                 randomize_training_location=True,
             )
             print(

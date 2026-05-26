@@ -15,7 +15,7 @@ def main():
     train_original_model = False
     
     dataset = TimeSeriesDataset(
-        csv_path="/home/oraja001/Jlab/Sensor data/Original Data/2022_OUTPUT_VARS.1h.csv",
+        csv_path="/home/oraja001/Jlab/Sensor data/Original Data/2017_OUTPUT_VARS.1h.csv",
         timestamp_col='DATE_TIME',
         input_len=input_len,
         output_len=output_len,
