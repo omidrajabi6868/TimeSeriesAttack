@@ -47,7 +47,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=256,
+        batch_size=512,
         stratify_by_bad_sample=True,
     )
 
@@ -83,7 +83,7 @@ def main():
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=10,
+            epoch_num=50,
             resume=False,
             resume_from='backups/last_checkpoint.pth',
             pos_weight=pos_weight,
@@ -92,7 +92,7 @@ def main():
             input_shape=(3, image_size[1], image_size[0]),
         )
     else:
-        classification.load_checkpoint("backups/alex_net.pth")
+        classification.load_checkpoint("backups/best_checkpoint.pth")
 
     # test_metrics = classification.evaluate_model(test_loader=test_loader)
     # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
@@ -108,7 +108,7 @@ def main():
             window_size=adversarial_min_patch_size,
             stride=8,
             top_k=max(10, adversarial_patch_count * 8),
-            max_samples_per_group=4000,
+            max_samples_per_group=2000,
         )
         print('Natural trigger candidates (bad vs good):')
         for candidate in natural_trigger['top_candidates']:
@@ -142,13 +142,13 @@ def main():
                 source_filter='bad',
                 validation_loader=val_loader,
 
-                steps=1000,
+                steps=200,
                 learning_rate=0.05,   
                 mask_learning_rate=0.005, 
 
                 optimize_mask=True,
-                initial_edge_softness=0.3,
-                min_edge_softness=0.05,
+                initial_edge_softness=0.05,
+                min_edge_softness=0.0005,
                 softness_decay=0.9,
                 softness_patience=6,
                 asr_hardening_threshold=85.0, 
@@ -164,9 +164,9 @@ def main():
                 progressive_resize=True,
                 patch_growth_factor=1.1,
                 min_patch_size=adversarial_min_patch_size,
-                min_steps_per_patch_size=10,
+                min_steps_per_patch_size=6,
                 size_patience=10,
-                randomize_training_location=True,
+                randomize_training_location=False,
             )
             print(
                 'adversarial_patch_selection: '
