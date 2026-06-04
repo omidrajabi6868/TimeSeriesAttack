@@ -715,7 +715,6 @@ class AdversarialAttack:
             'best_validation_asr': None if validation_loader is None else float(best_val_asr),
         }
 
-
     @staticmethod
     def _image_tensor_to_pil(image_tensor, scale_from_signed=False):
         image_tensor = image_tensor.detach().cpu().float()

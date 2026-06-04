@@ -142,7 +142,7 @@ def main():
                 source_filter='bad',
                 validation_loader=val_loader,
 
-                steps=200,
+                steps=300,
                 learning_rate=0.05,   
                 mask_learning_rate=0.005, 
 
@@ -154,8 +154,8 @@ def main():
                 asr_hardening_threshold=85.0, 
 
                 mask_l1_weight=1e-3,
-                patch_l2_weight=1e-3,
-                softness_alignment_weight=1e-3,
+                patch_l2_weight=1e-4,
+                softness_alignment_weight=1e-4,
 
                 patch_update_method='adam',
                 momentum_decay=.95,
