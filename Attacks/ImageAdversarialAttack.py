@@ -3,6 +3,7 @@ import math
 
 import numpy as np
 import torch
+from PIL import Image
 from typing import Callable, Optional, Sequence
 from pathlib import Path
 from Network import ClassificationModels
@@ -97,6 +98,7 @@ class AdversarialAttack:
                 'selected_step': trigger.get('selected_step'),
                 'best_validation_loss': trigger.get('best_validation_loss'),
                 'best_validation_asr': trigger.get('best_validation_asr'),
+                'trigger_previews': trigger.get('trigger_previews', []),
                 'history_path': str(history_path),
             },
             output_path,
@@ -108,6 +110,7 @@ class AdversarialAttack:
             'selected_step': trigger.get('selected_step'),
             'best_validation_loss': trigger.get('best_validation_loss'),
             'best_validation_asr': trigger.get('best_validation_asr'),
+            'trigger_previews': trigger.get('trigger_previews', []),
             'patch_path': str(output_path),
         }
         with open(history_path, 'w', encoding='utf-8') as history_file:
@@ -148,6 +151,7 @@ class AdversarialAttack:
             'selected_step': trigger_payload.get('selected_step'),
             'best_validation_loss': trigger_payload.get('best_validation_loss'),
             'best_validation_asr': trigger_payload.get('best_validation_asr'),
+            'trigger_previews': trigger_payload.get('trigger_previews', []),
             'history': history,
             'path': str(trigger_path),
             'history_path': resolved_history_path,
@@ -176,6 +180,9 @@ class AdversarialAttack:
                                 momentum_decay=1.0,
                                 gradient_norm_epsilon=1e-12,
                                 log_interval=1,
+                                trigger_preview_interval=10,
+                                trigger_preview_dir='backups/adversarial_trigger_previews',
+                                trigger_preview_loader=None,
                                 progressive_resize=True,
                                 min_patch_size=(16, 16),
                                 randomize_training_location=True,
@@ -257,6 +264,13 @@ class AdversarialAttack:
             mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
 
+        preview_records = []
+        preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
+        preview_output_dir = Path(trigger_preview_dir) if trigger_preview_dir is not None else None
+        if preview_interval > 0 and preview_output_dir is not None:
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+        preview_data_loader = trigger_preview_loader or validation_loader or data_loader
+
         history = []
         best_patch = None
         best_mask = None
@@ -278,6 +292,10 @@ class AdversarialAttack:
         for step_idx in range(steps):
             size_step_count += 1
             step_losses = []
+            step_attack_losses = []
+            step_patch_reg_losses = []
+            step_mask_reg_losses = []
+            step_softness_reg_losses = []
             step_samples = 0
             previous_patch = torch.tanh(trigger_delta).detach().clone()
 
@@ -384,19 +402,57 @@ class AdversarialAttack:
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
 
-                step_losses.append(float(loss.item()))
-                step_samples += int(outputs.shape[0])
+                batch_samples = int(outputs.shape[0])
+                step_losses.append(float(loss.item()) * batch_samples)
+                step_attack_losses.append(float(attack_loss.item()) * batch_samples)
+                step_patch_reg_losses.append(float(patch_reg.item()) * batch_samples)
+                step_mask_reg_losses.append(float(mask_reg.item()) * batch_samples)
+                step_softness_reg_losses.append(float(softness_reg.item()) * batch_samples)
+                step_samples += batch_samples
 
-            step_loss = float(np.mean(step_losses)) if step_losses else 0.0
+            step_loss = (sum(step_losses) / step_samples) if step_samples else 0.0
+            step_attack_loss = (sum(step_attack_losses) / step_samples) if step_samples else 0.0
+            step_patch_reg_loss = (sum(step_patch_reg_losses) / step_samples) if step_samples else 0.0
+            step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
+            step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
+            current_patch_for_metrics = torch.tanh(trigger_delta).detach()
+            current_mask_for_metrics = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                if mask_logits is not None else None
+            )
             patch_update_l2 = float(torch.norm(
-                (torch.tanh(trigger_delta).detach() - previous_patch).reshape(-1),
+                (current_patch_for_metrics - previous_patch).reshape(-1),
                 p=2,
             ).item())
+            patch_l1_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=1).item())
+            patch_l2_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=2).item())
+            patch_linf_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=float('inf')).item())
+            if current_mask_for_metrics is not None:
+                mask_l1_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=1).item())
+                mask_l2_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=2).item())
+                mask_linf_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=float('inf')).item())
+                mask_mean = float(current_mask_for_metrics.mean().item())
+            else:
+                mask_l1_norm = 0.0
+                mask_l2_norm = 0.0
+                mask_linf_norm = 0.0
+                mask_mean = 0.0
             step_history = {
                 'step': step_idx + 1,
                 'loss': step_loss,
+                'attack_loss': step_attack_loss,
+                'patch_regularization_loss': step_patch_reg_loss,
+                'mask_regularization_loss': step_mask_reg_loss,
+                'softness_alignment_loss': step_softness_reg_loss,
                 'samples': step_samples,
                 'patch_update_l2': patch_update_l2,
+                'patch_l1_norm': patch_l1_norm,
+                'patch_l2_norm': patch_l2_norm,
+                'patch_linf_norm': patch_linf_norm,
+                'mask_l1_norm': mask_l1_norm,
+                'mask_l2_norm': mask_l2_norm,
+                'mask_linf_norm': mask_linf_norm,
+                'mask_mean': mask_mean,
                 'patch_update_method': patch_update_method,
             }
 
@@ -553,6 +609,26 @@ class AdversarialAttack:
                     else:
                         step_history['size_decision'] = 'max_size_reached'
 
+            if (
+                preview_interval > 0
+                and preview_output_dir is not None
+                and (step_idx + 1) % preview_interval == 0
+            ):
+                preview_record = self._save_trigger_preview(
+                    data_loader=preview_data_loader,
+                    output_dir=preview_output_dir,
+                    step=step_idx + 1,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=current_patch_for_metrics,
+                    trigger_mask=current_mask_for_metrics,
+                    target_label=target_label,
+                    source_filter=source_filter,
+                    edge_softness=current_softness,
+                )
+                if preview_record is not None:
+                    preview_records.append(preview_record)
+                    step_history['trigger_preview'] = preview_record
+
             history.append(step_history)
 
             if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
@@ -567,8 +643,14 @@ class AdversarialAttack:
                     )
                 print(
                     f'[Trigger Learning] step={step_idx + 1}/{steps}, '
-                    f'loss={step_loss:.6f}, samples={step_samples}, '
-                    f'patch_update_l2={patch_update_l2:.6f}'
+                    f'loss={step_loss:.6f}, attack_loss={step_attack_loss:.6f}, '
+                    f'patch_reg={step_patch_reg_loss:.6f}, mask_reg={step_mask_reg_loss:.6f}, '
+                    f'softness_reg={step_softness_reg_loss:.6f}, samples={step_samples}, '
+                    f'patch_update_l2={patch_update_l2:.6f}, '
+                    f'patch_l1_norm={patch_l1_norm:.6f}, patch_l2_norm={patch_l2_norm:.6f}, '
+                    f'patch_linf_norm={patch_linf_norm:.6f}, mask_l1_norm={mask_l1_norm:.6f}, '
+                    f'mask_l2_norm={mask_l2_norm:.6f}, mask_linf_norm={mask_linf_norm:.6f}, '
+                    f'mask_mean={mask_mean:.6f}'
                     f'{train_log}{val_log}'
                 )
                 if step_samples == 0:
@@ -620,10 +702,142 @@ class AdversarialAttack:
                 'asr_threshold': float(asr_hardening_threshold),
                 'events': resize_events,
             },
+            'trigger_previews': preview_records,
             'selection': 'best_validation_loss' if validation_loader is not None else 'last_step',
             'selected_step': int(selected_step),
             'best_validation_loss': None if validation_loader is None else float(best_val_loss),
             'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+        }
+
+
+    @staticmethod
+    def _image_tensor_to_pil(image_tensor, scale_from_signed=False):
+        image_tensor = image_tensor.detach().cpu().float()
+        if image_tensor.dim() == 4:
+            image_tensor = image_tensor[0]
+        if image_tensor.dim() == 2:
+            image_tensor = image_tensor.unsqueeze(0)
+        if image_tensor.shape[0] == 1:
+            image_tensor = image_tensor.repeat(3, 1, 1)
+        elif image_tensor.shape[0] > 3:
+            image_tensor = image_tensor[:3]
+
+        if scale_from_signed:
+            image_tensor = (image_tensor + 1.0) / 2.0
+        image_tensor = torch.clamp(image_tensor, 0.0, 1.0)
+        image_array = (image_tensor.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+        return Image.fromarray(image_array)
+
+    def _save_trigger_preview(
+        self,
+        data_loader,
+        output_dir,
+        step,
+        trigger_box,
+        trigger_patch,
+        trigger_mask,
+        target_label,
+        source_filter,
+        edge_softness,
+    ):
+        if data_loader is None:
+            return None
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        trigger_boxes = self._normalize_trigger_boxes(trigger_box)
+        target_value = float(target_label)
+        fallback = None
+
+        self.model.eval()
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
+
+                if source_filter == 'bad':
+                    source_mask = (flat_targets == 0)
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                else:
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+
+                if source_mask.sum().item() == 0:
+                    continue
+
+                source_inputs = inputs[source_mask].clone()
+                source_targets = targets[source_mask].view(-1)
+                poisoned_inputs = self._inject_trigger(
+                    source_inputs.clone(),
+                    trigger_boxes,
+                    trigger_patch=trigger_patch,
+                    trigger_mask=trigger_mask,
+                    edge_softness=edge_softness,
+                )
+                poisoned_outputs = self.model(poisoned_inputs)
+                poisoned_preds = (poisoned_outputs > 0).float().view(-1)
+                success_mask = (poisoned_preds == target_value)
+
+                candidate_idx = 0
+                success = False
+                if success_mask.any().item():
+                    candidate_idx = int(torch.nonzero(success_mask, as_tuple=False)[0].item())
+                    success = True
+
+                fallback = {
+                    'clean': source_inputs[candidate_idx].detach().cpu(),
+                    'poisoned': poisoned_inputs[candidate_idx].detach().cpu(),
+                    'source_label': float(source_targets[candidate_idx].detach().cpu().item()),
+                    'predicted_label': float(poisoned_preds[candidate_idx].detach().cpu().item()),
+                    'success': bool(success),
+                }
+                if success:
+                    break
+
+        if fallback is None:
+            return None
+
+        patch_preview = trigger_patch.detach().cpu()
+        if patch_preview.dim() == 4:
+            patch_preview = patch_preview[0]
+        mask_preview = trigger_mask.detach().cpu() if trigger_mask is not None else None
+        if mask_preview is not None and mask_preview.dim() == 4:
+            mask_preview = mask_preview[0]
+
+        clean_image = self._image_tensor_to_pil(fallback['clean'])
+        poisoned_image = self._image_tensor_to_pil(fallback['poisoned'])
+        patch_image = self._image_tensor_to_pil(patch_preview, scale_from_signed=True)
+        if mask_preview is None:
+            mask_image = Image.new('RGB', patch_image.size, color=(0, 0, 0))
+        else:
+            mask_image = self._image_tensor_to_pil(mask_preview)
+
+        panel_width, panel_height = clean_image.size
+        nearest_resample = getattr(Image, 'Resampling', Image).NEAREST
+        patch_image = patch_image.resize((panel_width, panel_height), nearest_resample)
+        mask_image = mask_image.resize((panel_width, panel_height), nearest_resample)
+        poisoned_image = poisoned_image.resize((panel_width, panel_height), nearest_resample)
+
+        preview_image = Image.new('RGB', (panel_width * 4, panel_height))
+        preview_image.paste(clean_image, (0, 0))
+        preview_image.paste(poisoned_image, (panel_width, 0))
+        preview_image.paste(patch_image, (panel_width * 2, 0))
+        preview_image.paste(mask_image, (panel_width * 3, 0))
+
+        status = 'success' if fallback['success'] else 'candidate'
+        filename = f'trigger_preview_step_{int(step):04d}_{status}.png'
+        preview_path = output_dir / filename
+        preview_image.save(preview_path)
+
+        return {
+            'step': int(step),
+            'path': str(preview_path),
+            'success': bool(fallback['success']),
+            'source_label': fallback['source_label'],
+            'predicted_label': fallback['predicted_label'],
+            'target_label': target_value,
+            'layout': 'clean|poisoned|patch|mask',
         }
 
     def evaluate_trigger_loss(self,
