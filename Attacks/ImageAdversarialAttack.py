@@ -183,6 +183,7 @@ class AdversarialAttack:
                                 trigger_preview_interval=10,
                                 trigger_preview_dir='backups/adversarial_trigger_previews',
                                 trigger_preview_loader=None,
+                                trigger_preview_max_images=5,
                                 progressive_resize=True,
                                 min_patch_size=(16, 16),
                                 randomize_training_location=True,
@@ -266,6 +267,10 @@ class AdversarialAttack:
 
         preview_records = []
         preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
+        preview_max_images = (
+            max(0, int(trigger_preview_max_images))
+            if trigger_preview_max_images is not None else 0
+        )
         preview_output_dir = Path(trigger_preview_dir) if trigger_preview_dir is not None else None
         if preview_interval > 0 and preview_output_dir is not None:
             preview_output_dir.mkdir(parents=True, exist_ok=True)
@@ -614,7 +619,7 @@ class AdversarialAttack:
                 and preview_output_dir is not None
                 and (step_idx + 1) % preview_interval == 0
             ):
-                preview_record = self._save_trigger_preview(
+                step_preview_records = self._save_trigger_preview(
                     data_loader=preview_data_loader,
                     output_dir=preview_output_dir,
                     step=step_idx + 1,
@@ -624,10 +629,11 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    max_images=preview_max_images,
                 )
-                if preview_record is not None:
-                    preview_records.append(preview_record)
-                    step_history['trigger_preview'] = preview_record
+                if step_preview_records:
+                    preview_records.extend(step_preview_records)
+                    step_history['trigger_previews'] = step_preview_records
 
             history.append(step_history)
 
@@ -739,15 +745,18 @@ class AdversarialAttack:
         target_label,
         source_filter,
         edge_softness,
+        max_images=5,
     ):
-        if data_loader is None:
-            return None
+        if data_loader is None or max_images <= 0:
+            return []
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         trigger_boxes = self._normalize_trigger_boxes(trigger_box)
         target_value = float(target_label)
-        fallback = None
+        max_images = int(max_images)
+        successful_examples = []
+        fallback_examples = []
 
         self.model.eval()
         with torch.no_grad():
@@ -779,24 +788,39 @@ class AdversarialAttack:
                 poisoned_preds = (poisoned_outputs > 0).float().view(-1)
                 success_mask = (poisoned_preds == target_value)
 
-                candidate_idx = 0
-                success = False
-                if success_mask.any().item():
-                    candidate_idx = int(torch.nonzero(success_mask, as_tuple=False)[0].item())
-                    success = True
+                for candidate_idx in torch.nonzero(success_mask, as_tuple=False).view(-1).tolist():
+                    successful_examples.append({
+                        'clean': source_inputs[candidate_idx].detach().cpu(),
+                        'poisoned': poisoned_inputs[candidate_idx].detach().cpu(),
+                        'source_label': float(source_targets[candidate_idx].detach().cpu().item()),
+                        'predicted_label': float(poisoned_preds[candidate_idx].detach().cpu().item()),
+                        'success': True,
+                    })
+                    if len(successful_examples) >= max_images:
+                        break
 
-                fallback = {
-                    'clean': source_inputs[candidate_idx].detach().cpu(),
-                    'poisoned': poisoned_inputs[candidate_idx].detach().cpu(),
-                    'source_label': float(source_targets[candidate_idx].detach().cpu().item()),
-                    'predicted_label': float(poisoned_preds[candidate_idx].detach().cpu().item()),
-                    'success': bool(success),
-                }
-                if success:
+                if len(fallback_examples) < max_images:
+                    for candidate_idx in range(int(source_inputs.shape[0])):
+                        if bool(success_mask[candidate_idx].detach().cpu().item()):
+                            continue
+                        fallback_examples.append({
+                            'clean': source_inputs[candidate_idx].detach().cpu(),
+                            'poisoned': poisoned_inputs[candidate_idx].detach().cpu(),
+                            'source_label': float(source_targets[candidate_idx].detach().cpu().item()),
+                            'predicted_label': float(poisoned_preds[candidate_idx].detach().cpu().item()),
+                            'success': False,
+                        })
+                        if len(fallback_examples) >= max_images:
+                            break
+
+                if len(successful_examples) >= max_images:
                     break
 
-        if fallback is None:
-            return None
+        selected_examples = successful_examples[:max_images]
+        if len(selected_examples) < max_images:
+            selected_examples.extend(fallback_examples[:max_images - len(selected_examples)])
+        if not selected_examples:
+            return []
 
         patch_preview = trigger_patch.detach().cpu()
         if patch_preview.dim() == 4:
@@ -805,40 +829,46 @@ class AdversarialAttack:
         if mask_preview is not None and mask_preview.dim() == 4:
             mask_preview = mask_preview[0]
 
-        clean_image = self._image_tensor_to_pil(fallback['clean'])
-        poisoned_image = self._image_tensor_to_pil(fallback['poisoned'])
         patch_image = self._image_tensor_to_pil(patch_preview, scale_from_signed=True)
         if mask_preview is None:
             mask_image = Image.new('RGB', patch_image.size, color=(0, 0, 0))
         else:
             mask_image = self._image_tensor_to_pil(mask_preview)
 
-        panel_width, panel_height = clean_image.size
+        records = []
         nearest_resample = getattr(Image, 'Resampling', Image).NEAREST
-        patch_image = patch_image.resize((panel_width, panel_height), nearest_resample)
-        mask_image = mask_image.resize((panel_width, panel_height), nearest_resample)
-        poisoned_image = poisoned_image.resize((panel_width, panel_height), nearest_resample)
+        for preview_idx, example in enumerate(selected_examples, start=1):
+            clean_image = self._image_tensor_to_pil(example['clean'])
+            poisoned_image = self._image_tensor_to_pil(example['poisoned'])
+            panel_width, panel_height = clean_image.size
+            resized_patch_image = patch_image.resize((panel_width, panel_height), nearest_resample)
+            resized_mask_image = mask_image.resize((panel_width, panel_height), nearest_resample)
+            poisoned_image = poisoned_image.resize((panel_width, panel_height), nearest_resample)
 
-        preview_image = Image.new('RGB', (panel_width * 4, panel_height))
-        preview_image.paste(clean_image, (0, 0))
-        preview_image.paste(poisoned_image, (panel_width, 0))
-        preview_image.paste(patch_image, (panel_width * 2, 0))
-        preview_image.paste(mask_image, (panel_width * 3, 0))
+            preview_image = Image.new('RGB', (panel_width * 4, panel_height))
+            preview_image.paste(clean_image, (0, 0))
+            preview_image.paste(poisoned_image, (panel_width, 0))
+            preview_image.paste(resized_patch_image, (panel_width * 2, 0))
+            preview_image.paste(resized_mask_image, (panel_width * 3, 0))
 
-        status = 'success' if fallback['success'] else 'candidate'
-        filename = f'trigger_preview_step_{int(step):04d}_{status}.png'
-        preview_path = output_dir / filename
-        preview_image.save(preview_path)
+            status = 'success' if example['success'] else 'candidate'
+            filename = f'trigger_preview_step_{int(step):04d}_{preview_idx:02d}_{status}.png'
+            preview_path = output_dir / filename
+            preview_image.save(preview_path)
 
-        return {
-            'step': int(step),
-            'path': str(preview_path),
-            'success': bool(fallback['success']),
-            'source_label': fallback['source_label'],
-            'predicted_label': fallback['predicted_label'],
-            'target_label': target_value,
-            'layout': 'clean|poisoned|patch|mask',
-        }
+            records.append({
+                'step': int(step),
+                'path': str(preview_path),
+                'success': bool(example['success']),
+                'source_label': example['source_label'],
+                'predicted_label': example['predicted_label'],
+                'target_label': target_value,
+                'preview_index': int(preview_idx),
+                'max_images': int(max_images),
+                'layout': 'clean|poisoned|patch|mask',
+            })
+
+        return records
 
     def evaluate_trigger_loss(self,
                               data_loader,
