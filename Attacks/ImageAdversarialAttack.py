@@ -1,3 +1,6 @@
+import json
+import math
+
 import numpy as np
 import torch
 from typing import Callable, Optional, Sequence
@@ -40,19 +43,47 @@ class AdversarialAttack:
         return self.cost_function
 
     @staticmethod
-    def save_trigger(trigger, output_path):
+    def _default_trigger_history_path(output_path):
+        output_path = Path(output_path)
+        return output_path.with_name(f'{output_path.stem}_history.json')
+
+    @staticmethod
+    def _json_safe(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(key): AdversarialAttack._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [AdversarialAttack._json_safe(item) for item in value]
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    @staticmethod
+    def save_trigger(trigger, output_path, history_path=None):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path = (
+            Path(history_path)
+            if history_path is not None else AdversarialAttack._default_trigger_history_path(output_path)
+        )
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+
         patch = trigger['patch']
         if not torch.is_tensor(patch):
             patch = torch.tensor(patch, dtype=torch.float32)
+        mask = trigger.get('mask')
         torch.save(
             {
                 'patch': patch.detach().cpu(),
                 'mask': (
-                    trigger.get('mask').detach().cpu()
-                    if trigger.get('mask') is not None and torch.is_tensor(trigger.get('mask'))
-                    else trigger.get('mask')
+                    mask.detach().cpu()
+                    if mask is not None and torch.is_tensor(mask)
+                    else mask
                 ),
                 'trigger_box': trigger.get('trigger_box'),
                 'trigger_boxes': trigger.get('trigger_boxes'),
@@ -61,18 +92,47 @@ class AdversarialAttack:
                 'epsilon': float(trigger.get('epsilon', 0.0)),
                 'softness': trigger.get('softness', {}),
                 'progressive_resize': trigger.get('progressive_resize', {}),
-                'history': trigger.get('history', []),
+                'patch_update_method': trigger.get('patch_update_method'),
+                'selection': trigger.get('selection'),
+                'selected_step': trigger.get('selected_step'),
+                'best_validation_loss': trigger.get('best_validation_loss'),
+                'best_validation_asr': trigger.get('best_validation_asr'),
+                'history_path': str(history_path),
             },
             output_path,
         )
+
+        history_payload = {
+            'history': trigger.get('history', []),
+            'selection': trigger.get('selection'),
+            'selected_step': trigger.get('selected_step'),
+            'best_validation_loss': trigger.get('best_validation_loss'),
+            'best_validation_asr': trigger.get('best_validation_asr'),
+            'patch_path': str(output_path),
+        }
+        with open(history_path, 'w', encoding='utf-8') as history_file:
+            json.dump(AdversarialAttack._json_safe(history_payload), history_file, indent=2)
+        trigger['path'] = str(output_path)
+        trigger['history_path'] = str(history_path)
         return str(output_path)
 
     @staticmethod
-    def load_trigger(trigger_path, map_location='cpu'):
+    def load_trigger(trigger_path, map_location='cpu', history_path=None):
         trigger_path = Path(trigger_path)
         if not trigger_path.exists():
             raise FileNotFoundError(f'Trigger file not found: {trigger_path}')
         trigger_payload = torch.load(trigger_path, map_location=map_location)
+
+        resolved_history_path = history_path or trigger_payload.get('history_path')
+        if resolved_history_path is None:
+            default_history_path = AdversarialAttack._default_trigger_history_path(trigger_path)
+            resolved_history_path = str(default_history_path) if default_history_path.exists() else None
+        history = trigger_payload.get('history', [])
+        if resolved_history_path is not None and Path(resolved_history_path).exists():
+            with open(resolved_history_path, 'r', encoding='utf-8') as history_file:
+                history_payload = json.load(history_file)
+            history = history_payload.get('history', history)
+
         return {
             'patch': trigger_payload['patch'],
             'mask': trigger_payload.get('mask'),
@@ -83,8 +143,14 @@ class AdversarialAttack:
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
             'softness': trigger_payload.get('softness', {}),
             'progressive_resize': trigger_payload.get('progressive_resize', {}),
-            'history': trigger_payload.get('history', []),
+            'patch_update_method': trigger_payload.get('patch_update_method'),
+            'selection': trigger_payload.get('selection'),
+            'selected_step': trigger_payload.get('selected_step'),
+            'best_validation_loss': trigger_payload.get('best_validation_loss'),
+            'best_validation_asr': trigger_payload.get('best_validation_asr'),
+            'history': history,
             'path': str(trigger_path),
+            'history_path': resolved_history_path,
         }
 
     def learn_universal_trigger(self,
@@ -196,6 +262,7 @@ class AdversarialAttack:
         best_mask = None
         best_trigger_boxes = [dict(box) for box in trigger_boxes]
         best_step = 0
+        best_val_loss = float('inf')
         best_val_asr = float('-inf')
         first_success_patch = None
         first_success_mask = None
@@ -350,28 +417,40 @@ class AdversarialAttack:
 
             if validation_loader is not None:
 
+                current_patch = torch.tanh(trigger_delta).detach()
+                current_mask = (
+                    self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                    if mask_logits is not None else None
+                )
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=torch.tanh(trigger_delta).detach(),
-                    trigger_mask=(
-                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
-                        if mask_logits is not None else None
-                    ),
+                    trigger_patch=current_patch,
+                    trigger_mask=current_mask,
+                    target_label=target_label,
+                    source_filter=source_filter,
+                    edge_softness=current_softness,
+                )
+                val_loss_metrics = self.evaluate_trigger_loss(
+                    data_loader=validation_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=current_patch,
+                    trigger_mask=current_mask,
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
                 )
                 val_asr = float(val_metrics['attack_success_rate'])
+                val_loss = float(val_loss_metrics['loss'])
                 step_history['validation_asr'] = val_asr
+                step_history['validation_loss'] = val_loss
+                step_history['validation_samples'] = int(val_loss_metrics['samples_evaluated'])
                 step_history['edge_softness'] = current_softness
-                if val_asr > best_val_asr:
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     best_val_asr = val_asr
-                    best_patch = torch.tanh(trigger_delta).detach().cpu().clone()
-                    best_mask = (
-                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
-                        if mask_logits is not None else None
-                    )
+                    best_patch = current_patch.cpu().clone()
+                    best_mask = current_mask.cpu().clone() if current_mask is not None else None
                     best_trigger_boxes = [dict(box) for box in trigger_boxes]
                     best_step = step_idx + 1
                     no_improve_steps = 0
@@ -482,7 +561,10 @@ class AdversarialAttack:
                 if report_training_asr:
                     train_log = f', train_asr={step_history.get("training_asr", 0.0):.4f}'
                 if validation_loader is not None:
-                    val_log = f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
+                    val_log = (
+                        f', val_loss={step_history.get("validation_loss", 0.0):.6f}'
+                        f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
+                    )
                 print(
                     f'[Trigger Learning] step={step_idx + 1}/{steps}, '
                     f'loss={step_loss:.6f}, samples={step_samples}, '
@@ -495,13 +577,7 @@ class AdversarialAttack:
                         f'"{source_filter}" at this step.'
                     )
 
-        if progressive_resize_enabled and first_success_patch is not None:
-            learned_patch = first_success_patch
-            learned_mask = first_success_mask
-            trigger_boxes = first_success_boxes
-            selected_step = first_success_step
-            best_val_asr = first_success_asr
-        elif best_patch is not None:
+        if best_patch is not None:
             learned_patch = best_patch
             learned_mask = best_mask
             trigger_boxes = best_trigger_boxes
@@ -544,9 +620,63 @@ class AdversarialAttack:
                 'asr_threshold': float(asr_hardening_threshold),
                 'events': resize_events,
             },
-            'selection': 'best_validation_asr' if validation_loader is not None else 'last_step',
+            'selection': 'best_validation_loss' if validation_loader is not None else 'last_step',
             'selected_step': int(selected_step),
+            'best_validation_loss': None if validation_loader is None else float(best_val_loss),
             'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+        }
+
+    def evaluate_trigger_loss(self,
+                              data_loader,
+                              trigger_box,
+                              trigger_patch=None,
+                              trigger_mask=None,
+                              target_label=0.0,
+                              source_filter='all',
+                              edge_softness=0.2):
+        self.model.eval()
+        losses = []
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
+
+                if source_filter == 'bad':
+                    source_mask = (flat_targets == 0)
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                elif source_filter == 'all':
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+                else:
+                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+
+                if source_mask.sum().item() == 0:
+                    continue
+
+                selected_inputs = inputs[source_mask].clone()
+                poisoned_inputs = self._inject_trigger(
+                    selected_inputs,
+                    trigger_box,
+                    trigger_patch=trigger_patch,
+                    trigger_mask=trigger_mask,
+                    edge_softness=edge_softness,
+                )
+                outputs = self.model(poisoned_inputs)
+                target_tensor = torch.full_like(outputs, float(target_label))
+                loss = self.cost_function(outputs, target_tensor)
+                batch_size = int(outputs.shape[0])
+                losses.append(float(loss.item()) * batch_size)
+                total += batch_size
+
+        return {
+            'loss': (sum(losses) / total) if total else float('inf'),
+            'samples_evaluated': total,
+            'target_label': float(target_label),
+            'trigger_box': trigger_box,
+            'source_filter': source_filter,
         }
 
     def evaluate_attack_success(self,

@@ -172,6 +172,7 @@ def main():
                 'adversarial_patch_selection: '
                 f'{learned_trigger["selection"]}, '
                 f'step={learned_trigger["selected_step"]}, '
+                f'best_val_loss={learned_trigger["best_validation_loss"]}, '
                 f'best_val_asr={learned_trigger["best_validation_asr"]}'
             )
             saved_trigger_path = adv_attack.save_trigger(
@@ -179,6 +180,7 @@ def main():
                 output_path=adversarial_patch_path,
             )
             print(f'saved_adversarial_trigger: {saved_trigger_path}')
+            print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
         else:
             learned_trigger = adv_attack.load_trigger(adversarial_patch_path)
             print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
