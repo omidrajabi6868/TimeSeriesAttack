@@ -610,6 +610,11 @@ class AdversarialAttack:
                         size_step_count = 0
                         size_no_improve_steps = 0
                         best_size_asr = float('-inf')
+                        current_patch_for_metrics = torch.tanh(trigger_delta).detach()
+                        current_mask_for_metrics = (
+                            self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                            if mask_logits is not None else None
+                        )
                         step_history['grow_to_size'] = (int(width), int(height))
                     else:
                         step_history['size_decision'] = 'max_size_reached'
