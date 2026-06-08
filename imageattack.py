@@ -150,7 +150,7 @@ def main():
                 initial_edge_softness=0.05,
                 min_edge_softness=0.0005,
                 softness_decay=0.9,
-                softness_patience=6,
+                softness_patience=5,
                 asr_hardening_threshold=85.0, 
 
                 mask_l1_weight=1e-3,
@@ -164,7 +164,7 @@ def main():
                 progressive_resize=True,
                 patch_growth_factor=1.1,
                 min_patch_size=adversarial_min_patch_size,
-                min_steps_per_patch_size=6,
+                min_steps_per_patch_size=5,
                 size_patience=10,
                 randomize_training_location=False,
             )
