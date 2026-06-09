@@ -4,8 +4,8 @@
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=high-gpu-mem
-#SBATCH --gres=gpu:2
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 
 # Ensure the logs directory exists

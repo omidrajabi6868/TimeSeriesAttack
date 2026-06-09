@@ -163,7 +163,7 @@ class AdversarialAttack:
                                 target_label=1.0,
                                 source_filter='bad',
                                 validation_loader=None,
-                                report_training_asr=True,
+                                report_training_asr=False,
                                 steps=100,
                                 learning_rate=0.1,
                                 mask_learning_rate=0.02,
@@ -1229,7 +1229,7 @@ class AdversarialAttack:
                 if trigger_tensor.shape[0] != channels:
                     raise ValueError('trigger_value channel count must match input channels.')
                 target_region = trigger_tensor.unsqueeze(0).expand(poisoned_inputs.shape[0], -1, height, width)
-                blended_region = region * (1.0 - blend_mask) + target_region * blend_mask
+                blended_region = target_region
 
             poisoned_inputs[:, :, y:y + height, x:x + width] = blended_region
         return poisoned_inputs

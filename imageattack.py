@@ -144,17 +144,17 @@ def main():
 
                 steps=300,
                 learning_rate=0.05,   
-                mask_learning_rate=0.005, 
+                mask_learning_rate=0.05, 
 
                 optimize_mask=True,
-                initial_edge_softness=0.05,
-                min_edge_softness=0.0005,
-                softness_decay=0.9,
+                initial_edge_softness=0.5,
+                min_edge_softness=0.005,
+                softness_decay=0.8,
                 softness_patience=5,
-                asr_hardening_threshold=85.0, 
+                asr_hardening_threshold=50.0, 
 
-                mask_l1_weight=1e-3,
-                patch_l2_weight=1e-4,
+                mask_l1_weight=1e-2,
+                patch_l2_weight=1e-3,
                 softness_alignment_weight=1e-4,
 
                 patch_update_method='adam',
@@ -164,8 +164,8 @@ def main():
                 progressive_resize=True,
                 patch_growth_factor=1.1,
                 min_patch_size=adversarial_min_patch_size,
-                min_steps_per_patch_size=5,
-                size_patience=10,
+                min_steps_per_patch_size=20,
+                size_patience=20,
                 randomize_training_location=False,
             )
             print(
