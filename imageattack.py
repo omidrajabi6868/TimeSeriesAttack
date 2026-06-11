@@ -153,8 +153,8 @@ def main():
                 softness_patience=5,
                 asr_hardening_threshold=50.0, 
 
-                mask_l1_weight=1e-2,
-                patch_l2_weight=1e-3,
+                mask_l1_weight=1e-1,
+                patch_l2_weight=1e-1,
                 softness_alignment_weight=1e-4,
 
                 patch_update_method='adam',
