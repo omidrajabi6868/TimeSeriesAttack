@@ -162,7 +162,10 @@ def main():
                 gradient_norm_epsilon=1e-12,
 
                 progressive_resize=True,
+                progressive_resize_direction='shrink',
                 patch_growth_factor=1.1,
+                patch_shrink_factor=1.1,
+                patch_recovery_growth_factor=1.05,
                 min_patch_size=adversarial_min_patch_size,
                 min_steps_per_patch_size=20,
                 size_patience=20,

@@ -185,9 +185,12 @@ class AdversarialAttack:
                                 trigger_preview_loader=None,
                                 trigger_preview_max_images=5,
                                 progressive_resize=True,
+                                progressive_resize_direction='grow',
                                 min_patch_size=(16, 16),
                                 randomize_training_location=True,
                                 patch_growth_factor=None,
+                                patch_shrink_factor=None,
+                                patch_recovery_growth_factor=None,
                                 min_steps_per_patch_size=10,
                                 size_patience=None):
         self.model.eval()
@@ -208,16 +211,45 @@ class AdversarialAttack:
         min_width, min_height = self._normalize_patch_size(min_patch_size)
         min_width = min(min_width, max_width)
         min_height = min(min_height, max_height)
+        progressive_resize_direction = str(progressive_resize_direction).lower()
+        if progressive_resize_direction in ('increase', 'growing'):
+            progressive_resize_direction = 'grow'
+        elif progressive_resize_direction in ('decrease', 'shrinking', 'minimize'):
+            progressive_resize_direction = 'shrink'
+        if progressive_resize_direction not in {'grow', 'shrink'}:
+            raise ValueError("progressive_resize_direction must be either 'grow' or 'shrink'.")
         if patch_growth_factor is None:
             patch_growth_factor = 1.25
         patch_growth_factor = float(patch_growth_factor)
         if patch_growth_factor <= 1.0:
             raise ValueError('patch_growth_factor must be greater than 1.')
+        patch_shrink_factor = patch_growth_factor if patch_shrink_factor is None else float(patch_shrink_factor)
+        if patch_shrink_factor <= 1.0:
+            raise ValueError('patch_shrink_factor must be greater than 1.')
+        if patch_recovery_growth_factor is None:
+            patch_recovery_growth_factor = (
+                math.sqrt(patch_shrink_factor)
+                if progressive_resize_direction == 'shrink' else patch_growth_factor
+            )
+        patch_recovery_growth_factor = float(patch_recovery_growth_factor)
+        if patch_recovery_growth_factor <= 1.0:
+            raise ValueError('patch_recovery_growth_factor must be greater than 1.')
+        if (
+            progressive_resize_direction == 'shrink'
+            and patch_recovery_growth_factor >= patch_shrink_factor
+        ):
+            raise ValueError(
+                'patch_recovery_growth_factor must be less than patch_shrink_factor '
+                'when progressive_resize_direction is shrink.'
+            )
         min_steps_per_patch_size = max(1, int(min_steps_per_patch_size))
         size_patience = int(size_patience) if size_patience is not None else int(softness_patience)
         size_patience = max(1, size_patience)
-        if progressive_resize_enabled:
+        if progressive_resize_enabled and progressive_resize_direction == 'grow':
             width, height = min_width, min_height
+        elif progressive_resize_enabled and progressive_resize_direction == 'shrink':
+            width, height = max_width, max_height
+        initial_width, initial_height = int(width), int(height)
 
         trigger_boxes = self._resize_trigger_boxes(validation_anchor_boxes, width, height, full_patch_size)
         trigger_delta = torch.zeros((len(trigger_boxes), channels, height, width), device=self.device)
@@ -545,28 +577,53 @@ class AdversarialAttack:
                     first_success_asr = val_asr
                     step_history['size_decision'] = 'accepted'
 
-                should_grow = (
-                    progressive_resize_enabled
-                    and validation_loader is not None
-                    and size_optimized_enough
-                    and val_asr < asr_hardening_threshold
-                    and size_no_improve_steps >= size_patience
-                )
-                if should_grow:
-                    next_width = min(int(round(width * patch_growth_factor)), max_width)
-                    next_height = min(int(round(height * patch_growth_factor)), max_height)
-                    if next_width <= width and width < max_width:
-                        next_width = width + 1
-                    if next_height <= height and height < max_height:
-                        next_height = height + 1
-                    can_grow = next_width > width or next_height > height
-                    if can_grow:
+                resize_decision = None
+                next_width = width
+                next_height = height
+                size_limit_decision = None
+                if progressive_resize_enabled and validation_loader is not None and size_optimized_enough:
+                    if progressive_resize_direction == 'grow' and val_asr < asr_hardening_threshold:
+                        if size_no_improve_steps >= size_patience:
+                            resize_decision = 'grow'
+                            next_width = min(int(round(width * patch_growth_factor)), max_width)
+                            next_height = min(int(round(height * patch_growth_factor)), max_height)
+                            if next_width <= width and width < max_width:
+                                next_width = width + 1
+                            if next_height <= height and height < max_height:
+                                next_height = height + 1
+                            size_limit_decision = 'max_size_reached'
+                    elif progressive_resize_direction == 'shrink':
+                        if val_asr >= asr_hardening_threshold:
+                            resize_decision = 'shrink'
+                            next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                            next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                            if next_width >= width and width > min_width:
+                                next_width = width - 1
+                            if next_height >= height and height > min_height:
+                                next_height = height - 1
+                            size_limit_decision = 'min_size_reached'
+                        elif size_no_improve_steps >= size_patience:
+                            # Shrink mode is intentionally allowed to oscillate around the
+                            # ASR threshold: shrink while the trigger still succeeds, then
+                            # recover-grow more slowly after the patch becomes too small.
+                            resize_decision = 'recover_grow'
+                            next_width = min(int(round(width * patch_recovery_growth_factor)), max_width)
+                            next_height = min(int(round(height * patch_recovery_growth_factor)), max_height)
+                            if next_width <= width and width < max_width:
+                                next_width = width + 1
+                            if next_height <= height and height < max_height:
+                                next_height = height + 1
+                            size_limit_decision = 'max_size_reached'
+
+                if resize_decision is not None:
+                    can_resize = next_width != width or next_height != height
+                    if can_resize:
                         resize_events.append({
                             'step': step_idx + 1,
                             'from_size': (int(width), int(height)),
                             'to_size': (int(next_width), int(next_height)),
                             'validation_asr': val_asr,
-                            'decision': 'grow',
+                            'decision': resize_decision,
                         })
                         resized_patch = torch.nn.functional.interpolate(
                             torch.tanh(trigger_delta).detach(),
@@ -579,7 +636,8 @@ class AdversarialAttack:
                         width, height = next_width, next_height
                         print(
                             'adversarial_patch_size_change: '
-                            f'step={step_idx + 1}, patch_size=({width}, {height})'
+                            f'step={step_idx + 1}, decision={resize_decision}, '
+                            f'patch_size=({width}, {height})'
                         )
                         trigger_boxes = self._resize_trigger_boxes(
                             validation_anchor_boxes,
@@ -615,9 +673,11 @@ class AdversarialAttack:
                             self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
                             if mask_logits is not None else None
                         )
-                        step_history['grow_to_size'] = (int(width), int(height))
+                        step_history['resize_decision'] = resize_decision
+                        step_history['resize_to_size'] = (int(width), int(height))
                     else:
-                        step_history['size_decision'] = 'max_size_reached'
+                        step_history['size_decision'] = size_limit_decision
+
 
             if (
                 preview_interval > 0
@@ -702,12 +762,15 @@ class AdversarialAttack:
             },
             'progressive_resize': {
                 'enabled': bool(progressive_resize_enabled),
-                'direction': 'grow',
+                'direction': progressive_resize_direction,
                 'randomize_training_location': bool(randomize_training_location),
-                'initial_patch_size': (int(min_width), int(min_height)),
+                'initial_patch_size': (int(initial_width), int(initial_height)),
                 'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
+                'min_patch_size': (int(min_width), int(min_height)),
                 'max_patch_size': (int(max_width), int(max_height)),
                 'patch_growth_factor': float(patch_growth_factor),
+                'patch_shrink_factor': float(patch_shrink_factor),
+                'patch_recovery_growth_factor': float(patch_recovery_growth_factor),
                 'min_steps_per_patch_size': int(min_steps_per_patch_size),
                 'size_patience': int(size_patience),
                 'asr_threshold': float(asr_hardening_threshold),
