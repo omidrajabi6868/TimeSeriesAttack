@@ -98,6 +98,9 @@ class AdversarialAttack:
                 'selected_step': trigger.get('selected_step'),
                 'best_validation_loss': trigger.get('best_validation_loss'),
                 'best_validation_asr': trigger.get('best_validation_asr'),
+                'smallest_success_validation_loss': trigger.get('smallest_success_validation_loss'),
+                'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
+                'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
                 'history_path': str(history_path),
             },
@@ -110,6 +113,9 @@ class AdversarialAttack:
             'selected_step': trigger.get('selected_step'),
             'best_validation_loss': trigger.get('best_validation_loss'),
             'best_validation_asr': trigger.get('best_validation_asr'),
+            'smallest_success_validation_loss': trigger.get('smallest_success_validation_loss'),
+            'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
+            'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
             'trigger_previews': trigger.get('trigger_previews', []),
             'patch_path': str(output_path),
         }
@@ -151,6 +157,9 @@ class AdversarialAttack:
             'selected_step': trigger_payload.get('selected_step'),
             'best_validation_loss': trigger_payload.get('best_validation_loss'),
             'best_validation_asr': trigger_payload.get('best_validation_asr'),
+            'smallest_success_validation_loss': trigger_payload.get('smallest_success_validation_loss'),
+            'smallest_success_validation_asr': trigger_payload.get('smallest_success_validation_asr'),
+            'smallest_success_patch_area': trigger_payload.get('smallest_success_patch_area'),
             'trigger_previews': trigger_payload.get('trigger_previews', []),
             'history': history,
             'path': str(trigger_path),
@@ -192,7 +201,10 @@ class AdversarialAttack:
                                 patch_shrink_factor=None,
                                 patch_recovery_growth_factor=None,
                                 min_steps_per_patch_size=10,
-                                size_patience=None):
+                                size_patience=None,
+                                resize_hysteresis=2.0,
+                                compression_asr_threshold=None,
+                                enable_compression_phase=True):
         self.model.eval()
         progressive_resize_enabled = bool(progressive_resize)
 
@@ -245,6 +257,17 @@ class AdversarialAttack:
         min_steps_per_patch_size = max(1, int(min_steps_per_patch_size))
         size_patience = int(size_patience) if size_patience is not None else int(softness_patience)
         size_patience = max(1, size_patience)
+        resize_hysteresis = max(0.0, float(resize_hysteresis))
+        shrink_asr_threshold = min(100.0, float(asr_hardening_threshold) + resize_hysteresis)
+        grow_asr_threshold = max(0.0, float(asr_hardening_threshold) - resize_hysteresis)
+        if compression_asr_threshold is None:
+            compression_asr_threshold = asr_hardening_threshold
+        compression_asr_threshold = min(100.0, max(0.0, float(compression_asr_threshold)))
+        compression_phase_active = (
+            bool(enable_compression_phase)
+            and progressive_resize_enabled
+            and progressive_resize_direction == 'shrink'
+        )
         if progressive_resize_enabled and progressive_resize_direction == 'grow':
             width, height = min_width, min_height
         elif progressive_resize_enabled and progressive_resize_direction == 'shrink':
@@ -315,11 +338,13 @@ class AdversarialAttack:
         best_step = 0
         best_val_loss = float('inf')
         best_val_asr = float('-inf')
-        first_success_patch = None
-        first_success_mask = None
-        first_success_boxes = None
-        first_success_step = 0
-        first_success_asr = float('-inf')
+        smallest_success_patch = None
+        smallest_success_mask = None
+        smallest_success_boxes = None
+        smallest_success_step = 0
+        smallest_success_asr = float('-inf')
+        smallest_success_val_loss = float('inf')
+        smallest_success_area = float('inf')
         resize_events = []
         no_improve_steps = 0
         size_step_count = 0
@@ -557,7 +582,7 @@ class AdversarialAttack:
                     size_no_improve_steps += 1
 
                 if (
-                    val_asr < asr_hardening_threshold
+                    val_asr < grow_asr_threshold
                     and no_improve_steps >= softness_patience
                 ):
                     new_softness = max(min_edge_softness, current_softness * softness_decay)
@@ -567,22 +592,54 @@ class AdversarialAttack:
 
                 size_optimized_enough = size_step_count >= min_steps_per_patch_size
                 if val_asr >= asr_hardening_threshold and size_optimized_enough:
-                    first_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
-                    first_success_mask = (
-                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
-                        if mask_logits is not None else None
+                    current_area = int(width) * int(height)
+                    is_smaller_success = current_area < smallest_success_area
+                    is_better_tie = (
+                        current_area == smallest_success_area
+                        and (
+                            val_asr > smallest_success_asr
+                            or (
+                                val_asr == smallest_success_asr
+                                and val_loss < smallest_success_val_loss
+                            )
+                        )
                     )
-                    first_success_boxes = [dict(box) for box in trigger_boxes]
-                    first_success_step = step_idx + 1
-                    first_success_asr = val_asr
+                    if is_smaller_success or is_better_tie:
+                        smallest_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
+                        smallest_success_mask = (
+                            self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
+                            if mask_logits is not None else None
+                        )
+                        smallest_success_boxes = [dict(box) for box in trigger_boxes]
+                        smallest_success_step = step_idx + 1
+                        smallest_success_asr = val_asr
+                        smallest_success_val_loss = val_loss
+                        smallest_success_area = current_area
                     step_history['size_decision'] = 'accepted'
+
+                if (
+                    bool(enable_compression_phase)
+                    and progressive_resize_enabled
+                    and val_asr >= compression_asr_threshold
+                ):
+                    compression_phase_active = True
+                step_history['compression_phase_active'] = bool(compression_phase_active)
 
                 resize_decision = None
                 next_width = width
                 next_height = height
                 size_limit_decision = None
                 if progressive_resize_enabled and validation_loader is not None and size_optimized_enough:
-                    if progressive_resize_direction == 'grow' and val_asr < asr_hardening_threshold:
+                    if compression_phase_active and val_asr >= shrink_asr_threshold:
+                        resize_decision = 'compress_shrink'
+                        next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                        next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                        if next_width >= width and width > min_width:
+                            next_width = width - 1
+                        if next_height >= height and height > min_height:
+                            next_height = height - 1
+                        size_limit_decision = 'min_size_reached'
+                    elif progressive_resize_direction == 'grow' and val_asr <= grow_asr_threshold:
                         if size_no_improve_steps >= size_patience:
                             resize_decision = 'grow'
                             next_width = min(int(round(width * patch_growth_factor)), max_width)
@@ -593,7 +650,7 @@ class AdversarialAttack:
                                 next_height = height + 1
                             size_limit_decision = 'max_size_reached'
                     elif progressive_resize_direction == 'shrink':
-                        if val_asr >= asr_hardening_threshold:
+                        if val_asr >= shrink_asr_threshold:
                             resize_decision = 'shrink'
                             next_width = max(int(round(width / patch_shrink_factor)), min_width)
                             next_height = max(int(round(height / patch_shrink_factor)), min_height)
@@ -602,10 +659,9 @@ class AdversarialAttack:
                             if next_height >= height and height > min_height:
                                 next_height = height - 1
                             size_limit_decision = 'min_size_reached'
-                        elif size_no_improve_steps >= size_patience:
-                            # Shrink mode is intentionally allowed to oscillate around the
-                            # ASR threshold: shrink while the trigger still succeeds, then
-                            # recover-grow more slowly after the patch becomes too small.
+                        elif val_asr <= grow_asr_threshold and size_no_improve_steps >= size_patience:
+                            # Hysteresis keeps shrink/recover decisions from flapping when
+                            # validation ASR hovers near the hardening threshold.
                             resize_decision = 'recover_grow'
                             next_width = min(int(round(width * patch_recovery_growth_factor)), max_width)
                             next_height = min(int(round(height * patch_recovery_growth_factor)), max_height)
@@ -624,6 +680,7 @@ class AdversarialAttack:
                             'to_size': (int(next_width), int(next_height)),
                             'validation_asr': val_asr,
                             'decision': resize_decision,
+                            'compression_phase_active': bool(compression_phase_active),
                         })
                         resized_patch = torch.nn.functional.interpolate(
                             torch.tanh(trigger_delta).detach(),
@@ -649,6 +706,7 @@ class AdversarialAttack:
                         if patch_update_method == 'adam':
                             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
                         if optimize_mask:
+                            previous_mask_logits = mask_logits.detach() if mask_logits is not None else None
                             base_mask = self._build_blend_mask(
                                 height=height,
                                 width=width,
@@ -657,7 +715,18 @@ class AdversarialAttack:
                                 dtype=trigger_delta.dtype,
                                 edge_softness=current_softness,
                             ).expand(len(trigger_boxes), -1, -1, -1)
-                            mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
+                            if previous_mask_logits is not None:
+                                mask_logits = torch.nn.functional.interpolate(
+                                    previous_mask_logits,
+                                    size=(height, width),
+                                    mode='bilinear',
+                                    align_corners=False,
+                                ).detach()
+                                if mask_logits.shape[0] != len(trigger_boxes):
+                                    mask_logits = mask_logits[:1].expand(len(trigger_boxes), -1, -1, -1).clone()
+                            else:
+                                mask_logits = torch.zeros_like(base_mask, device=self.device)
+                            mask_logits = mask_logits.to(device=self.device, dtype=base_mask.dtype).requires_grad_(True)
                             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
                             mask_training_active = True
                         else:
@@ -730,11 +799,19 @@ class AdversarialAttack:
                         f'"{source_filter}" at this step.'
                     )
 
-        if best_patch is not None:
+        selection = 'last_step'
+        if smallest_success_patch is not None:
+            learned_patch = smallest_success_patch
+            learned_mask = smallest_success_mask
+            trigger_boxes = smallest_success_boxes
+            selected_step = smallest_success_step
+            selection = 'smallest_successful_patch'
+        elif best_patch is not None:
             learned_patch = best_patch
             learned_mask = best_mask
             trigger_boxes = best_trigger_boxes
             selected_step = best_step
+            selection = 'best_validation_loss'
         else:
             learned_patch = torch.tanh(trigger_delta).detach().cpu()
             learned_mask = (
@@ -742,6 +819,7 @@ class AdversarialAttack:
                 if mask_logits is not None else None
             )
             selected_step = steps
+            selection = 'last_step'
 
         return {
             'patch': learned_patch,
@@ -774,13 +852,27 @@ class AdversarialAttack:
                 'min_steps_per_patch_size': int(min_steps_per_patch_size),
                 'size_patience': int(size_patience),
                 'asr_threshold': float(asr_hardening_threshold),
+                'shrink_asr_threshold': float(shrink_asr_threshold),
+                'grow_asr_threshold': float(grow_asr_threshold),
+                'resize_hysteresis': float(resize_hysteresis),
+                'compression_asr_threshold': float(compression_asr_threshold),
+                'compression_phase_active': bool(compression_phase_active),
                 'events': resize_events,
             },
             'trigger_previews': preview_records,
-            'selection': 'best_validation_loss' if validation_loader is not None else 'last_step',
+            'selection': selection,
             'selected_step': int(selected_step),
             'best_validation_loss': None if validation_loader is None else float(best_val_loss),
             'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+            'smallest_success_validation_loss': (
+                None if smallest_success_patch is None else float(smallest_success_val_loss)
+            ),
+            'smallest_success_validation_asr': (
+                None if smallest_success_patch is None else float(smallest_success_asr)
+            ),
+            'smallest_success_patch_area': (
+                None if smallest_success_patch is None else int(smallest_success_area)
+            ),
         }
 
     @staticmethod
