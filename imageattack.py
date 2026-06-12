@@ -155,7 +155,7 @@ def main():
 
                 mask_l1_weight=1e-1,
                 patch_l2_weight=1e-1,
-                softness_alignment_weight=1e-4,
+                softness_alignment_weight=1e-2,
 
                 patch_update_method='adam',
                 momentum_decay=.95,
@@ -163,8 +163,8 @@ def main():
 
                 progressive_resize=True,
                 progressive_resize_direction='shrink',
-                patch_growth_factor=1.1,
-                patch_shrink_factor=1.1,
+                patch_growth_factor=1.2,
+                patch_shrink_factor=1.2,
                 patch_recovery_growth_factor=1.05,
                 min_patch_size=adversarial_min_patch_size,
                 min_steps_per_patch_size=20,
