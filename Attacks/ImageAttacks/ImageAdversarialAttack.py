@@ -67,12 +67,12 @@ class AdversarialAttack:
     @staticmethod
     def save_trigger(trigger, output_path, history_path=None):
         output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
         history_path = (
             Path(history_path)
             if history_path is not None else AdversarialAttack._default_trigger_history_path(output_path)
         )
-        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.mkdir(parents=True, exist_ok=True)
 
         patch = trigger['patch']
         if not torch.is_tensor(patch):
@@ -204,7 +204,8 @@ class AdversarialAttack:
                                 size_patience=None,
                                 resize_hysteresis=2.0,
                                 compression_asr_threshold=None,
-                                enable_compression_phase=True):
+                                enable_compression_phase=True,
+                                how_to_attach='blend'):
         self.model.eval()
         progressive_resize_enabled = bool(progressive_resize)
 
@@ -404,6 +405,7 @@ class AdversarialAttack:
                     trigger_patch=training_patch,
                     trigger_mask=training_mask,
                     edge_softness=current_softness,
+                    how_to_attach=how_to_attach
                 )
 
                 outputs = self.model(poisoned_inputs)
@@ -530,6 +532,7 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    how_to_attach=how_to_attach
                 )
                 step_history['training_asr'] = float(train_metrics['attack_success_rate'])
 
@@ -548,6 +551,7 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    how_to_attach=how_to_attach
                 )
                 val_loss_metrics = self.evaluate_trigger_loss(
                     data_loader=validation_loader,
@@ -557,6 +561,7 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    how_to_attach=how_to_attach
                 )
                 val_asr = float(val_metrics['attack_success_rate'])
                 val_loss = float(val_loss_metrics['loss'])
@@ -764,6 +769,7 @@ class AdversarialAttack:
                     source_filter=source_filter,
                     edge_softness=current_softness,
                     max_images=preview_max_images,
+                    how_to_attach=how_to_attach
                 )
                 if step_preview_records:
                     preview_records.extend(step_preview_records)
@@ -905,6 +911,7 @@ class AdversarialAttack:
         source_filter,
         edge_softness,
         max_images=5,
+        how_to_attach='blend'
     ):
         if data_loader is None or max_images <= 0:
             return []
@@ -942,6 +949,8 @@ class AdversarialAttack:
                     trigger_patch=trigger_patch,
                     trigger_mask=trigger_mask,
                     edge_softness=edge_softness,
+                    how_to_attach=how_to_attach
+
                 )
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float().view(-1)
@@ -1036,7 +1045,8 @@ class AdversarialAttack:
                               trigger_mask=None,
                               target_label=0.0,
                               source_filter='all',
-                              edge_softness=0.2):
+                              edge_softness=0.2, 
+                              how_to_attach='blend'):
         self.model.eval()
         losses = []
         total = 0
@@ -1066,6 +1076,7 @@ class AdversarialAttack:
                     trigger_patch=trigger_patch,
                     trigger_mask=trigger_mask,
                     edge_softness=edge_softness,
+                    how_to_attach=how_to_attach
                 )
                 outputs = self.model(poisoned_inputs)
                 target_tensor = torch.full_like(outputs, float(target_label))
@@ -1091,7 +1102,8 @@ class AdversarialAttack:
                                  target_label=0.0,
                                  source_only_bad=False,
                                  source_filter=None,
-                                 edge_softness=0.2):
+                                 edge_softness=0.2,
+                                 how_to_attach='blend'):
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
 
@@ -1136,6 +1148,7 @@ class AdversarialAttack:
                     trigger_patch=trigger_patch,
                     trigger_mask=trigger_mask,
                     edge_softness=edge_softness,
+                    how_to_attach=how_to_attach
                 )
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
@@ -1257,7 +1270,8 @@ class AdversarialAttack:
         trigger_value=(1.0, 1.0, 1.0),
         trigger_patch=None,
         trigger_mask=None,
-        edge_softness=0.2):
+        edge_softness=0.2,
+        how_to_attach='blend'):
         trigger_boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
         poisoned_inputs = inputs.clone()
 
@@ -1288,46 +1302,46 @@ class AdversarialAttack:
             else:
                 raise ValueError('trigger_mask must be CHW or NCHW tensor-like.')
 
-        per_sample_boxes = len(trigger_boxes) == poisoned_inputs.shape[0]
-        if per_sample_boxes and patch_bank is not None:
-            patch_count_valid = patch_bank.shape[0] in (1, poisoned_inputs.shape[0])
-            mask_count_valid = mask_bank is None or mask_bank.shape[0] in (1, poisoned_inputs.shape[0])
-            if patch_count_valid and mask_count_valid:
-                for sample_idx, box in enumerate(trigger_boxes):
-                    x = int(box['x'])
-                    y = int(box['y'])
-                    width = int(box['width'])
-                    height = int(box['height'])
+        # per_sample_boxes = len(trigger_boxes) == poisoned_inputs.shape[0]
+        # if per_sample_boxes and patch_bank is not None:
+        #     patch_count_valid = patch_bank.shape[0] in (1, poisoned_inputs.shape[0])
+        #     mask_count_valid = mask_bank is None or mask_bank.shape[0] in (1, poisoned_inputs.shape[0])
+        #     if patch_count_valid and mask_count_valid:
+        #         for sample_idx, box in enumerate(trigger_boxes):
+        #             x = int(box['x'])
+        #             y = int(box['y'])
+        #             width = int(box['width'])
+        #             height = int(box['height'])
 
-                    if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
-                        raise ValueError('trigger_box is out of image bounds.')
+        #             if x < 0 or y < 0 or x + width > input_w or y + height > input_h:
+        #                 raise ValueError('trigger_box is out of image bounds.')
 
-                    region = poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width].clone()
-                    if patch_bank.shape[1] != channels or patch_bank.shape[2] != height or patch_bank.shape[3] != width:
-                        raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
-                    patch = patch_bank[0 if patch_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
+        #             region = poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width].clone()
+        #             if patch_bank.shape[1] != channels or patch_bank.shape[2] != height or patch_bank.shape[3] != width:
+        #                 raise ValueError('trigger_patch shape must match (C, height, width) from trigger_box.')
+        #             patch = patch_bank[0 if patch_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
 
-                    if mask_bank is not None:
-                        if mask_bank.shape[1] != channels or mask_bank.shape[2] != height or mask_bank.shape[3] != width:
-                            raise ValueError('trigger_mask shape must match (C, height, width) from trigger_box.')
-                        blend_mask = mask_bank[0 if mask_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
-                        blend_mask = torch.clamp(blend_mask, 0.0, 1.0)
-                    else:
-                        blend_mask = AdversarialAttack._build_blend_mask(
-                            height=height,
-                            width=width,
-                            channels=channels,
-                            device=poisoned_inputs.device,
-                            dtype=poisoned_inputs.dtype,
-                            edge_softness=edge_softness,
-                        )
+        #             if mask_bank is not None:
+        #                 if mask_bank.shape[1] != channels or mask_bank.shape[2] != height or mask_bank.shape[3] != width:
+        #                     raise ValueError('trigger_mask shape must match (C, height, width) from trigger_box.')
+        #                 blend_mask = mask_bank[0 if mask_bank.shape[0] == 1 else sample_idx].unsqueeze(0)
+        #                 blend_mask = torch.clamp(blend_mask, 0.0, 1.0)
+        #             else:
+        #                 blend_mask = AdversarialAttack._build_blend_mask(
+        #                     height=height,
+        #                     width=width,
+        #                     channels=channels,
+        #                     device=poisoned_inputs.device,
+        #                     dtype=poisoned_inputs.dtype,
+        #                     edge_softness=edge_softness,
+        #                 )
 
-                    poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width] = torch.clamp(
-                        region + patch * blend_mask,
-                        0.0,
-                        1.0,
-                    )
-                return poisoned_inputs
+        #             poisoned_inputs[sample_idx:sample_idx + 1, :, y:y + height, x:x + width] = torch.clamp(
+        #                 region + patch * blend_mask,
+        #                 0.0,
+        #                 1.0,
+        #             )
+        #         return poisoned_inputs
 
         for idx, box in enumerate(trigger_boxes):
             x = int(box['x'])
@@ -1374,7 +1388,10 @@ class AdversarialAttack:
                         'trigger_patch batch dimension must be 1, match input batch size, '
                         'or match number of trigger boxes.'
                     )
-                blended_region = torch.clamp(region + patch * blend_mask, 0.0, 1.0)
+                if how_to_attach == 'replace':
+                    blended_region = torch.clamp(patch*blend_mask, 0, 1)
+                else:
+                    blended_region = torch.clamp(region + patch * blend_mask, 0.0, 1.0)
             else:
                 trigger_tensor = torch.tensor(
                     trigger_value,

@@ -272,7 +272,7 @@ class ImageDataset(TorchDataset):
         return candidates[:top_k]
 
     def save_trigger_visualizations(self,
-                                    trigger_analysis,
+                                    trigger_analysis=None,
                                     output_dir='trigger_visualization',
                                     num_examples=4,
                                     trigger_box=None,
@@ -283,10 +283,11 @@ class ImageDataset(TorchDataset):
                                     only_successful_poisoned=False):
         os.makedirs(output_dir, exist_ok=True)
 
-        diff_map = trigger_analysis['diff_map']
-        self._save_heatmap(diff_map, os.path.join(output_dir, 'diff_map.png'))
-        self._save_rgb_image(trigger_analysis['mean_good'], os.path.join(output_dir, 'mean_good.png'))
-        self._save_rgb_image(trigger_analysis['mean_bad'], os.path.join(output_dir, 'mean_bad.png'))
+        if trigger_analysis:
+            diff_map = trigger_analysis['diff_map']
+            self._save_heatmap(diff_map, os.path.join(output_dir, 'diff_map.png'))
+            self._save_rgb_image(trigger_analysis['mean_good'], os.path.join(output_dir, 'mean_good.png'))
+            self._save_rgb_image(trigger_analysis['mean_bad'], os.path.join(output_dir, 'mean_bad.png'))
 
         labels_np = np.array(self.labels)
         good_indices = np.where(labels_np == 1)[0]
