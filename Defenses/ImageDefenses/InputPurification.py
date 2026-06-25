@@ -1,3 +1,5 @@
+import torch
+
 class FeatureDistillation(torch.nn.Module):
     def __init__(self, scale=30.0, block=8):
         super().__init__()
