@@ -1,5 +1,9 @@
-import torch
+from pathlib import Path
 from typing import Optional, Sequence
+
+import numpy as np
+import torch
+from PIL import Image, ImageDraw
 from .InputPurification import FeatureDistillation
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
@@ -40,7 +44,8 @@ class Defender:
                             trigger_path,
                             source_filter='bad',
                             how_to_attach='blend',
-                            block=8, QS=50.0, preserve_ratio=0.5, fd_batch_size=32, fd_max_blocks_per_chunk=65536):
+                            block=8, QS=50.0, preserve_ratio=0.5, fd_batch_size=32, fd_max_blocks_per_chunk=65536,
+                            save_examples_dir=None, max_saved_examples=5):
 
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
         target_label = float(learned_trigger['target_label'])
@@ -71,6 +76,9 @@ class Defender:
         poisoned_fd_pixel_count = 0
         trigger_region_fd_abs_diff_sum = 0.0
         trigger_region_fd_pixel_count = 0
+        successful_defense_examples = []
+        unsuccessful_defense_examples = []
+        max_saved_examples = int(max_saved_examples)
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -100,10 +108,12 @@ class Defender:
             clean_correct_and_not_target += int(eligible_mask.sum().item())
 
             fd_clean_preds = []
+            fd_clean_input_batches = []
             with torch.no_grad():
                 for start in range(0, source_inputs.shape[0], fd_batch_size):
                     end = min(start + fd_batch_size, source_inputs.shape[0])
                     fd_clean_inputs = fd(source_inputs[start:end].clone())
+                    fd_clean_input_batches.append(fd_clean_inputs.detach().cpu())
                     clean_fd_abs_diff_sum += float(
                         (fd_clean_inputs - source_inputs[start:end]).abs().sum().item()
                     )
@@ -112,6 +122,7 @@ class Defender:
                     fd_clean_preds.append((fd_outputs > 0).float().view(-1))
 
             fd_preds = torch.cat(fd_clean_preds, dim=0)
+            fd_clean_all = torch.cat(fd_clean_input_batches, dim=0)
             fd_correct += int((fd_preds == clean_targets).sum().item())
             clean_prediction_changes_after_fd += int((fd_preds != clean_preds).sum().item())
 
@@ -132,10 +143,12 @@ class Defender:
             attack_success += int((poisoned_preds == target_label).sum().item())
 
             fd_poisoned_preds_by_batch = []
+            fd_poisoned_input_batches = []
             with torch.no_grad():
                 for start in range(0, poisoned_inputs.shape[0], fd_batch_size):
                     end = min(start + fd_batch_size, poisoned_inputs.shape[0])
                     fd_poisoned_inputs = fd(poisoned_inputs[start:end].clone())
+                    fd_poisoned_input_batches.append(fd_poisoned_inputs.detach().cpu())
                     poisoned_fd_abs_diff_sum += float(
                         (fd_poisoned_inputs - poisoned_inputs[start:end]).abs().sum().item()
                     )
@@ -157,11 +170,60 @@ class Defender:
                     fd_poisoned_preds_by_batch.append((fd_outputs > 0).float().view(-1))
 
             fd_poisoned_preds = torch.cat(fd_poisoned_preds_by_batch, dim=0)
+            fd_poisoned_all = torch.cat(fd_poisoned_input_batches, dim=0)
             asr_after_defend += int((fd_poisoned_preds == target_label).sum().item())
             poisoned_prediction_changes_after_fd += int((fd_poisoned_preds != poisoned_preds).sum().item())
             conditional_attack_success += int((poisoned_preds[eligible_mask] == target_label).sum().item())
             conditional_asr_after_defend += int((fd_poisoned_preds[eligible_mask] == target_label).sum().item())
+
+            if save_examples_dir is not None and max_saved_examples > 0:
+                successful_mask = (poisoned_preds == target_label) & (fd_poisoned_preds != target_label)
+                fallback_mask = ~successful_mask
+                self._collect_fd_examples(
+                    successful_defense_examples,
+                    successful_mask,
+                    max_saved_examples,
+                    source_inputs.detach().cpu(),
+                    fd_clean_all,
+                    poisoned_inputs.detach().cpu(),
+                    fd_poisoned_all,
+                    clean_targets.detach().cpu(),
+                    clean_preds.detach().cpu(),
+                    fd_preds.detach().cpu(),
+                    poisoned_preds.detach().cpu(),
+                    fd_poisoned_preds.detach().cpu(),
+                    defended=True,
+                )
+                if len(successful_defense_examples) < max_saved_examples:
+                    self._collect_fd_examples(
+                        unsuccessful_defense_examples,
+                        fallback_mask,
+                        max_saved_examples,
+                        source_inputs.detach().cpu(),
+                        fd_clean_all,
+                        poisoned_inputs.detach().cpu(),
+                        fd_poisoned_all,
+                        clean_targets.detach().cpu(),
+                        clean_preds.detach().cpu(),
+                        fd_preds.detach().cpu(),
+                        poisoned_preds.detach().cpu(),
+                        fd_poisoned_preds.detach().cpu(),
+                        defended=False,
+                    )
             total += int(poisoned_preds.shape[0])
+
+        saved_example_info = None
+        if save_examples_dir is not None and max_saved_examples > 0:
+            examples_to_save = successful_defense_examples[:max_saved_examples]
+            example_source = 'successful_defenses'
+            if not examples_to_save:
+                examples_to_save = unsuccessful_defense_examples[:max_saved_examples]
+                example_source = 'unsuccessful_defenses'
+            saved_example_info = self._save_fd_examples(
+                examples_to_save,
+                save_examples_dir,
+                example_source,
+            )
 
         clean_source_accuracy = (clean_correct / total) * 100 if total else 0.0
         clean_fd_accuracy = (fd_correct / total) * 100 if total else 0.0
@@ -211,4 +273,74 @@ class Defender:
             'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
+            'saved_feature_distillation_examples': saved_example_info,
         }
+
+    @staticmethod
+    def _collect_fd_examples(example_list, selection_mask, max_examples, clean_inputs,
+                             fd_clean_inputs, poisoned_inputs, fd_poisoned_inputs,
+                             targets, clean_preds, fd_clean_preds,
+                             poisoned_preds, fd_poisoned_preds, defended):
+        if len(example_list) >= max_examples:
+            return
+        for idx in torch.where(selection_mask.cpu())[0].tolist():
+            if len(example_list) >= max_examples:
+                break
+            example_list.append({
+                'clean': clean_inputs[idx],
+                'clean_fd': fd_clean_inputs[idx],
+                'adversarial': poisoned_inputs[idx],
+                'adversarial_fd': fd_poisoned_inputs[idx],
+                'target': float(targets.view(-1)[idx].item()),
+                'clean_pred': float(clean_preds.view(-1)[idx].item()),
+                'clean_fd_pred': float(fd_clean_preds.view(-1)[idx].item()),
+                'adversarial_pred': float(poisoned_preds.view(-1)[idx].item()),
+                'adversarial_fd_pred': float(fd_poisoned_preds.view(-1)[idx].item()),
+                'defended': bool(defended),
+            })
+
+    @staticmethod
+    def _save_fd_examples(examples, output_dir, example_source):
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        saved_paths = []
+        for idx, example in enumerate(examples, start=1):
+            save_path = output_path / f'feature_distillation_{example_source}_{idx:02d}.png'
+            Defender._save_fd_comparison(example, save_path)
+            saved_paths.append(str(save_path))
+        return {
+            'output_dir': str(output_path),
+            'selection': example_source,
+            'saved_images': len(saved_paths),
+            'paths': saved_paths,
+        }
+
+    @staticmethod
+    def _save_fd_comparison(example, save_path):
+        panels = [
+            ('Clean', example['clean'], example['clean_pred']),
+            ('Clean + FD', example['clean_fd'], example['clean_fd_pred']),
+            ('Adversarial', example['adversarial'], example['adversarial_pred']),
+            ('Adversarial + FD', example['adversarial_fd'], example['adversarial_fd_pred']),
+        ]
+        images = [Defender._tensor_to_pil_image(tensor) for _, tensor, _ in panels]
+        widths, heights = zip(*(image.size for image in images))
+        label_height = 42
+        canvas = Image.new('RGB', (sum(widths), max(heights) + label_height), color='white')
+        draw = ImageDraw.Draw(canvas)
+        x_offset = 0
+        for (title, _, pred), image in zip(panels, images):
+            canvas.paste(image, (x_offset, label_height))
+            draw.text(
+                (x_offset + 4, 4),
+                f'{title}\ntrue={example["target"]:.0f}, pred={pred:.0f}',
+                fill='black',
+            )
+            x_offset += image.size[0]
+        canvas.save(save_path)
+
+    @staticmethod
+    def _tensor_to_pil_image(image_tensor):
+        image_np = image_tensor.detach().cpu().permute(1, 2, 0).numpy()
+        image_uint8 = np.clip(image_np * 255.0, 0.0, 255.0).astype(np.uint8)
+        return Image.fromarray(image_uint8)
