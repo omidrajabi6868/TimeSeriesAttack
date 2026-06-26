@@ -4,9 +4,9 @@ from .InputPurification import FeatureDistillation
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
 class Defender:
-    def __init__(self, 
-                model, 
-                dataset, 
+    def __init__(self,
+                model,
+                dataset,
                 val_loader,
                 calibration_loader=None,
                 device: Optional[str] = None,
@@ -37,8 +37,8 @@ class Defender:
         return
 
     def feature_distillation(self,
-                            trigger_path, 
-                            source_filter='bad', 
+                            trigger_path,
+                            source_filter='bad',
                             how_to_attach='blend',
                             block=8, QS=50.0, preserve_ratio=0.5, fd_batch_size=32, fd_max_blocks_per_chunk=65536):
 
@@ -63,6 +63,14 @@ class Defender:
         clean_correct_and_not_target = 0
         conditional_attack_success = 0
         conditional_asr_after_defend = 0
+        clean_prediction_changes_after_fd = 0
+        poisoned_prediction_changes_after_fd = 0
+        clean_fd_abs_diff_sum = 0.0
+        clean_fd_pixel_count = 0
+        poisoned_fd_abs_diff_sum = 0.0
+        poisoned_fd_pixel_count = 0
+        trigger_region_fd_abs_diff_sum = 0.0
+        trigger_region_fd_pixel_count = 0
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -91,9 +99,21 @@ class Defender:
             eligible_mask = (clean_preds == clean_targets) & (clean_preds != target_label)
             clean_correct_and_not_target += int(eligible_mask.sum().item())
 
-            fd_preds = fd.predict(self.model, source_inputs, fd_batch_size, output_device=self.device)
-            clean_targets = source_targets.view(-1)
+            fd_clean_preds = []
+            with torch.no_grad():
+                for start in range(0, source_inputs.shape[0], fd_batch_size):
+                    end = min(start + fd_batch_size, source_inputs.shape[0])
+                    fd_clean_inputs = fd(source_inputs[start:end].clone())
+                    clean_fd_abs_diff_sum += float(
+                        (fd_clean_inputs - source_inputs[start:end]).abs().sum().item()
+                    )
+                    clean_fd_pixel_count += int(fd_clean_inputs.numel())
+                    fd_outputs = self.model(fd_clean_inputs)
+                    fd_clean_preds.append((fd_outputs > 0).float().view(-1))
+
+            fd_preds = torch.cat(fd_clean_preds, dim=0)
             fd_correct += int((fd_preds == clean_targets).sum().item())
+            clean_prediction_changes_after_fd += int((fd_preds != clean_preds).sum().item())
 
             poisoned_inputs = AdversarialAttack._inject_trigger(
                 source_inputs.clone(),
@@ -111,39 +131,84 @@ class Defender:
 
             attack_success += int((poisoned_preds == target_label).sum().item())
 
-            fd_poisoned_preds = fd.predict(self.model, poisoned_inputs, fd_batch_size, output_device=self.device)
+            fd_poisoned_preds_by_batch = []
+            with torch.no_grad():
+                for start in range(0, poisoned_inputs.shape[0], fd_batch_size):
+                    end = min(start + fd_batch_size, poisoned_inputs.shape[0])
+                    fd_poisoned_inputs = fd(poisoned_inputs[start:end].clone())
+                    poisoned_fd_abs_diff_sum += float(
+                        (fd_poisoned_inputs - poisoned_inputs[start:end]).abs().sum().item()
+                    )
+                    poisoned_fd_pixel_count += int(fd_poisoned_inputs.numel())
+
+                    for box in AdversarialAttack._normalize_trigger_boxes(learned_trigger['trigger_boxes']):
+                        x = int(box['x'])
+                        y = int(box['y'])
+                        width = int(box['width'])
+                        height = int(box['height'])
+                        before_region = poisoned_inputs[start:end, :, y:y + height, x:x + width]
+                        after_region = fd_poisoned_inputs[:, :, y:y + height, x:x + width]
+                        trigger_region_fd_abs_diff_sum += float(
+                            (after_region - before_region).abs().sum().item()
+                        )
+                        trigger_region_fd_pixel_count += int(after_region.numel())
+
+                    fd_outputs = self.model(fd_poisoned_inputs)
+                    fd_poisoned_preds_by_batch.append((fd_outputs > 0).float().view(-1))
+
+            fd_poisoned_preds = torch.cat(fd_poisoned_preds_by_batch, dim=0)
             asr_after_defend += int((fd_poisoned_preds == target_label).sum().item())
+            poisoned_prediction_changes_after_fd += int((fd_poisoned_preds != poisoned_preds).sum().item())
             conditional_attack_success += int((poisoned_preds[eligible_mask] == target_label).sum().item())
             conditional_asr_after_defend += int((fd_poisoned_preds[eligible_mask] == target_label).sum().item())
             total += int(poisoned_preds.shape[0])
 
+        clean_source_accuracy = (clean_correct / total) * 100 if total else 0.0
+        clean_fd_accuracy = (fd_correct / total) * 100 if total else 0.0
+        attack_success_rate = (attack_success / total) * 100 if total else 0.0
+        defended_attack_success_rate = (asr_after_defend / total) * 100 if total else 0.0
+        conditional_attack_success_rate = (
+            (conditional_attack_success / clean_correct_and_not_target) * 100
+            if clean_correct_and_not_target else 0.0
+        )
+        conditional_defended_attack_success_rate = (
+            (conditional_asr_after_defend / clean_correct_and_not_target) * 100
+            if clean_correct_and_not_target else 0.0
+        )
+
         return {
             'samples_evaluated': total,
-            'clean_source_accuracy': (clean_correct / total) * 100 if total else 0.0,
-            'clean_fd_accuracy': (fd_correct / total) * 100 if total else 0.0,
-            'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
-            'asr_after_defend':(asr_after_defend / total) * 100 if total else 0.0,
+            'clean_source_accuracy': clean_source_accuracy,
+            'clean_fd_accuracy': clean_fd_accuracy,
+            'clean_accuracy_change_after_fd': clean_fd_accuracy - clean_source_accuracy,
+            'clean_prediction_changes_after_fd': clean_prediction_changes_after_fd,
+            'clean_fd_mean_abs_input_change': (
+                clean_fd_abs_diff_sum / clean_fd_pixel_count
+                if clean_fd_pixel_count else 0.0
+            ),
+            'attack_success_rate': attack_success_rate,
+            'asr_after_defend': defended_attack_success_rate,
+            'asr_reduction_after_defend': attack_success_rate - defended_attack_success_rate,
+            'poisoned_prediction_changes_after_fd': poisoned_prediction_changes_after_fd,
+            'poisoned_fd_mean_abs_input_change': (
+                poisoned_fd_abs_diff_sum / poisoned_fd_pixel_count
+                if poisoned_fd_pixel_count else 0.0
+            ),
+            'trigger_region_fd_mean_abs_input_change': (
+                trigger_region_fd_abs_diff_sum / trigger_region_fd_pixel_count
+                if trigger_region_fd_pixel_count else 0.0
+            ),
             'clean_not_target_count': clean_correct_and_not_target,
-            'conditional_attack_success_rate': (
-                (conditional_attack_success / clean_correct_and_not_target) * 100
-                if clean_correct_and_not_target else 0.0
+            'conditional_attack_success_rate': conditional_attack_success_rate,
+            'conditional_asr_after_defend': conditional_defended_attack_success_rate,
+            'conditional_asr_reduction_after_defend': (
+                conditional_attack_success_rate - conditional_defended_attack_success_rate
             ),
-            'conditional_asr_after_defend': (
-                (conditional_asr_after_defend / clean_correct_and_not_target) * 100
-                if clean_correct_and_not_target else 0.0
-            ),
+            'fd_quality': fd.quality,
+            'fd_preserve_ratio': fd.preserve_ratio,
+            'fd_preserved_coefficients': int(fd.accuracy_sensitive_mask.sum().item()),
+            'fd_total_coefficients': int(fd.accuracy_sensitive_mask.numel()),
+            'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
         }
-            
-
-
-
-
-
-
-
-
-            
-
-    
