@@ -121,7 +121,17 @@ class Defender:
         variance = (coeff_squares_sum - coeff_sum.square() / count) / (count - 1)
         std_map = variance.clamp_min(0.0).sqrt()
 
-        return std_map
+        return std_map.to(self.device)
+
+    def _predict_with_feature_distillation(self, fd, inputs, fd_batch_size):
+        preds = []
+        with torch.no_grad():
+            for start in range(0, inputs.shape[0], fd_batch_size):
+                end = min(start + fd_batch_size, inputs.shape[0])
+                fd_inputs = fd(inputs[start:end].clone())
+                outputs = self.model(fd_inputs)
+                preds.append((outputs > 0).float().view(-1).cpu())
+        return torch.cat(preds, dim=0).to(self.device)
 
     def _predict_with_feature_distillation(self, fd, inputs, fd_batch_size):
         preds = []
