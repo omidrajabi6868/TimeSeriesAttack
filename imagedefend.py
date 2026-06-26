@@ -11,7 +11,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=1024,
+        batch_size=512,
         stratify_by_bad_sample=True,
     )
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -29,10 +29,15 @@ def main():
 
     classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
 
-    
+    defender = Defender(classification.model, dataset, test_loader)
 
+    print(defender.feature_distillation(
+            trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256/saved_trigger',
+            source_filter='bad',
+            how_to_attach='blend'
+        )
+    )
 
-    return
 
 if __name__=='__main__':
     main()
