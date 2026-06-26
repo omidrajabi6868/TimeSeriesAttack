@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Optional, Sequence
 
-import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from .InputPurification import FeatureDistillation
@@ -76,6 +75,12 @@ class Defender:
         poisoned_fd_pixel_count = 0
         trigger_region_fd_abs_diff_sum = 0.0
         trigger_region_fd_pixel_count = 0
+        clean_fd_max_abs_input_change = 0.0
+        poisoned_fd_max_abs_input_change = 0.0
+        clean_output_abs_diff_sum = 0.0
+        clean_output_count = 0
+        poisoned_output_abs_diff_sum = 0.0
+        poisoned_output_count = 0
         successful_defense_examples = []
         unsuccessful_defense_examples = []
         max_saved_examples = int(max_saved_examples)
@@ -114,11 +119,20 @@ class Defender:
                     end = min(start + fd_batch_size, source_inputs.shape[0])
                     fd_clean_inputs = fd(source_inputs[start:end].clone())
                     fd_clean_input_batches.append(fd_clean_inputs.detach().cpu())
+                    clean_input_diff = (fd_clean_inputs - source_inputs[start:end]).abs()
                     clean_fd_abs_diff_sum += float(
-                        (fd_clean_inputs - source_inputs[start:end]).abs().sum().item()
+                        clean_input_diff.sum().item()
+                    )
+                    clean_fd_max_abs_input_change = max(
+                        clean_fd_max_abs_input_change,
+                        float(clean_input_diff.max().item()),
                     )
                     clean_fd_pixel_count += int(fd_clean_inputs.numel())
                     fd_outputs = self.model(fd_clean_inputs)
+                    clean_output_abs_diff_sum += float(
+                        (fd_outputs.view(-1) - clean_outputs[start:end].view(-1)).abs().sum().item()
+                    )
+                    clean_output_count += int(fd_outputs.numel())
                     fd_clean_preds.append((fd_outputs > 0).float().view(-1))
 
             fd_preds = torch.cat(fd_clean_preds, dim=0)
@@ -149,8 +163,13 @@ class Defender:
                     end = min(start + fd_batch_size, poisoned_inputs.shape[0])
                     fd_poisoned_inputs = fd(poisoned_inputs[start:end].clone())
                     fd_poisoned_input_batches.append(fd_poisoned_inputs.detach().cpu())
+                    poisoned_input_diff = (fd_poisoned_inputs - poisoned_inputs[start:end]).abs()
                     poisoned_fd_abs_diff_sum += float(
-                        (fd_poisoned_inputs - poisoned_inputs[start:end]).abs().sum().item()
+                        poisoned_input_diff.sum().item()
+                    )
+                    poisoned_fd_max_abs_input_change = max(
+                        poisoned_fd_max_abs_input_change,
+                        float(poisoned_input_diff.max().item()),
                     )
                     poisoned_fd_pixel_count += int(fd_poisoned_inputs.numel())
 
@@ -167,6 +186,10 @@ class Defender:
                         trigger_region_fd_pixel_count += int(after_region.numel())
 
                     fd_outputs = self.model(fd_poisoned_inputs)
+                    poisoned_output_abs_diff_sum += float(
+                        (fd_outputs.view(-1) - poisoned_outputs[start:end].view(-1)).abs().sum().item()
+                    )
+                    poisoned_output_count += int(fd_outputs.numel())
                     fd_poisoned_preds_by_batch.append((fd_outputs > 0).float().view(-1))
 
             fd_poisoned_preds = torch.cat(fd_poisoned_preds_by_batch, dim=0)
@@ -178,7 +201,7 @@ class Defender:
 
             if save_examples_dir is not None and max_saved_examples > 0:
                 successful_mask = (poisoned_preds == target_label) & (fd_poisoned_preds != target_label)
-                fallback_mask = ~successful_mask
+                unsuccessful_mask = (poisoned_preds == target_label) & (fd_poisoned_preds == target_label)
                 self._collect_fd_examples(
                     successful_defense_examples,
                     successful_mask,
@@ -197,7 +220,7 @@ class Defender:
                 if len(successful_defense_examples) < max_saved_examples:
                     self._collect_fd_examples(
                         unsuccessful_defense_examples,
-                        fallback_mask,
+                        unsuccessful_mask,
                         max_saved_examples,
                         source_inputs.detach().cpu(),
                         fd_clean_all,
@@ -248,6 +271,11 @@ class Defender:
                 clean_fd_abs_diff_sum / clean_fd_pixel_count
                 if clean_fd_pixel_count else 0.0
             ),
+            'clean_fd_max_abs_input_change': clean_fd_max_abs_input_change,
+            'clean_fd_mean_abs_output_change': (
+                clean_output_abs_diff_sum / clean_output_count
+                if clean_output_count else 0.0
+            ),
             'attack_success_rate': attack_success_rate,
             'asr_after_defend': defended_attack_success_rate,
             'asr_reduction_after_defend': attack_success_rate - defended_attack_success_rate,
@@ -255,6 +283,11 @@ class Defender:
             'poisoned_fd_mean_abs_input_change': (
                 poisoned_fd_abs_diff_sum / poisoned_fd_pixel_count
                 if poisoned_fd_pixel_count else 0.0
+            ),
+            'poisoned_fd_max_abs_input_change': poisoned_fd_max_abs_input_change,
+            'poisoned_fd_mean_abs_output_change': (
+                poisoned_output_abs_diff_sum / poisoned_output_count
+                if poisoned_output_count else 0.0
             ),
             'trigger_region_fd_mean_abs_input_change': (
                 trigger_region_fd_abs_diff_sum / trigger_region_fd_pixel_count
@@ -273,6 +306,11 @@ class Defender:
             'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
+            'trigger_coverage_ratio': self._trigger_coverage_ratio(
+                learned_trigger['trigger_boxes'],
+                image_height=self.dataset.image_size[1] if getattr(self.dataset, 'image_size', None) else None,
+                image_width=self.dataset.image_size[0] if getattr(self.dataset, 'image_size', None) else None,
+            ),
             'saved_feature_distillation_examples': saved_example_info,
         }
 
@@ -320,8 +358,10 @@ class Defender:
         panels = [
             ('Clean', example['clean'], example['clean_pred']),
             ('Clean + FD', example['clean_fd'], example['clean_fd_pred']),
+            ('|Clean FD diff| x5', Defender._difference_image(example['clean'], example['clean_fd'], scale=5.0), None),
             ('Adversarial', example['adversarial'], example['adversarial_pred']),
             ('Adversarial + FD', example['adversarial_fd'], example['adversarial_fd_pred']),
+            ('|Adv FD diff| x5', Defender._difference_image(example['adversarial'], example['adversarial_fd'], scale=5.0), None),
         ]
         images = [Defender._tensor_to_pil_image(tensor) for _, tensor, _ in panels]
         widths, heights = zip(*(image.size for image in images))
@@ -331,9 +371,10 @@ class Defender:
         x_offset = 0
         for (title, _, pred), image in zip(panels, images):
             canvas.paste(image, (x_offset, label_height))
+            pred_text = '' if pred is None else f'\ntrue={example["target"]:.0f}, pred={pred:.0f}'
             draw.text(
                 (x_offset + 4, 4),
-                f'{title}\ntrue={example["target"]:.0f}, pred={pred:.0f}',
+                f'{title}{pred_text}',
                 fill='black',
             )
             x_offset += image.size[0]
@@ -341,6 +382,23 @@ class Defender:
 
     @staticmethod
     def _tensor_to_pil_image(image_tensor):
-        image_np = image_tensor.detach().cpu().permute(1, 2, 0).numpy()
-        image_uint8 = np.clip(image_np * 255.0, 0.0, 255.0).astype(np.uint8)
-        return Image.fromarray(image_uint8)
+        image_uint8 = image_tensor.detach().cpu().clamp(0.0, 1.0).mul(255.0).byte()
+        image_uint8 = image_uint8.permute(1, 2, 0).contiguous()
+        height, width = image_uint8.shape[:2]
+        return Image.frombytes('RGB', (width, height), bytes(image_uint8.view(-1).tolist()))
+
+    @staticmethod
+    def _difference_image(before, after, scale=5.0):
+        return (after.detach().cpu() - before.detach().cpu()).abs().mul(float(scale)).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _trigger_coverage_ratio(trigger_boxes, image_height=None, image_width=None):
+        if image_height is None or image_width is None:
+            return None
+        image_area = float(image_height * image_width)
+        if image_area <= 0:
+            return None
+        covered_area = 0.0
+        for box in AdversarialAttack._normalize_trigger_boxes(trigger_boxes):
+            covered_area += max(0, int(box['width'])) * max(0, int(box['height']))
+        return min(1.0, covered_area / image_area)
