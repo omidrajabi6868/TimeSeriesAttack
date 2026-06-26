@@ -76,6 +76,74 @@ class FeatureDistillation(torch.nn.Module):
         rec = rec.add(128.0).div(255.0).clamp(0.0, 1.0)
         return rec[..., :orig_h, :orig_w]
 
+    @staticmethod
+    def compute_dct_statistics(calibration_loader, block=8, max_blocks_per_chunk=65536, output_device=None):
+        """
+        Compute the per-coefficient DCT standard deviation used to initialize
+        the feature-distillation quantization table.
+
+        Statistics are accumulated on CPU to avoid using GPU memory during the
+        calibration pass. The returned tensor is moved to ``output_device`` when
+        one is provided.
+        """
+        if max_blocks_per_chunk <= 0:
+            raise ValueError("max_blocks_per_chunk must be positive.")
+
+        device = torch.device("cpu")
+        dct_mat = FeatureDistillation.build_dct_matrix(device, block)
+        count = 0
+        coeff_sum = torch.zeros((block, block), device=device)
+        coeff_squares_sum = torch.zeros((block, block), device=device)
+
+        with torch.no_grad():
+            for images, _ in calibration_loader:
+                images = images.to(device, non_blocking=False).mul(255.0)
+                _, _, height, width = images.shape
+
+                pad_h = (block - height % block) % block
+                pad_w = (block - width % block) % block
+                if pad_h or pad_w:
+                    images = F.pad(images, (0, pad_w, 0, pad_h), mode="reflect")
+
+                blocks = images.unfold(2, block, block).unfold(3, block, block)
+                blocks = blocks.contiguous().view(-1, block, block)
+
+                for start in range(0, blocks.shape[0], max_blocks_per_chunk):
+                    end = min(start + max_blocks_per_chunk, blocks.shape[0])
+                    dct = FeatureDistillation.dct2(blocks[start:end], dct_mat)
+                    coeff_sum += dct.sum(dim=0)
+                    coeff_squares_sum += dct.square().sum(dim=0)
+                    count += dct.shape[0]
+
+        if count < 2:
+            raise ValueError("At least two DCT blocks are required to compute standard deviation.")
+
+        variance = (coeff_squares_sum - coeff_sum.square() / count) / (count - 1)
+        std_map = variance.clamp_min(0.0).sqrt()
+        if output_device is not None:
+            std_map = std_map.to(output_device)
+        return std_map
+
+    def predict(self, model, inputs, batch_size=32, output_device=None):
+        """Run ``model`` on inputs purified by this feature-distillation module."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+
+        preds = []
+        model.eval()
+        self.eval()
+        if output_device is None:
+            output_device = inputs.device
+
+        with torch.no_grad():
+            for start in range(0, inputs.shape[0], batch_size):
+                end = min(start + batch_size, inputs.shape[0])
+                fd_inputs = self(inputs[start:end].clone())
+                outputs = model(fd_inputs)
+                preds.append((outputs > 0).float().view(-1).cpu())
+
+        return torch.cat(preds, dim=0).to(output_device)
+
     def _build_accuracy_sensitive_mask(self, std_map):
         """Select high-variation benign DCT coefficients as DNN-important bands."""
         if self.preserve_ratio == 0.0:
