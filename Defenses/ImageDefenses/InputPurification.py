@@ -33,7 +33,9 @@ class FeatureDistillation(torch.nn.Module):
         if self.max_blocks_per_chunk <= 0:
             raise ValueError("max_blocks_per_chunk must be positive.")
 
-        std_map = std_map.detach().float()
+        # Build all derived quantization buffers on CPU first; the module-level
+        # `.to(device)` call moves every registered buffer together afterwards.
+        std_map = std_map.detach().float().cpu()
         if std_map.shape != (block, block):
             raise ValueError(f"std_map must have shape ({block}, {block}); got {tuple(std_map.shape)}.")
 
