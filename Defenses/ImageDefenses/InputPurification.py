@@ -1,136 +1,106 @@
-import torch
 import math
+
+import torch
+import torch.nn.functional as F
 
 
 class FeatureDistillation(torch.nn.Module):
     """
-    Paper-aligned implementation of:
-    "Feature Distillation: DNN-Oriented JPEG Compression Against Adversarial Examples"
+    JPEG-style feature-distillation preprocessor from
+    "Feature Distillation: DNN-Oriented JPEG Compression Against Adversarial Examples".
+
+    The defense keeps the JPEG pipeline structure (level shift, block DCT,
+    quantize/dequantize, IDCT) and replaces the JPEG quantization table with a
+    DNN-oriented table: coefficients with high benign-data DCT variation are
+    treated as accuracy-sensitive and receive very light quantization, while the
+    remaining coefficients use a defensive JPEG table controlled by ``quality``.
     """
 
-    def __init__(self, std_map, block=8, QS=30.0, S1=50.0, S2=10.0):
+    def __init__(self, std_map, block=8, quality=50.0, preserve_ratio=0.5, preserved_quant_step=1.0):
         super().__init__()
+        if block != 8:
+            raise ValueError("FeatureDistillation currently supports the JPEG 8x8 block size only.")
+        if not 0.0 < float(quality) <= 100.0:
+            raise ValueError("quality must be in (0, 100].")
+        if not 0.0 <= float(preserve_ratio) <= 1.0:
+            raise ValueError("preserve_ratio must be in [0, 1].")
 
         self.block = block
+        self.quality = float(quality)
+        self.preserve_ratio = float(preserve_ratio)
+        self.preserved_quant_step = float(preserved_quant_step)
 
-        # -------------------------------------------------
-        # Step 1: GLOBAL DEFENSIVE QUANTIZATION STRENGTH
-        # QS controls adversarial suppression level
-        # -------------------------------------------------
-        self.QS = QS
-
-        # Step 2: band-level quantization parameters
-        self.S1 = S1  # Malicious Defense band (strong compression)
-        self.S2 = S2  # Accuracy Sensitive band (weak compression)
+        std_map = std_map.detach().float()
+        if std_map.shape != (block, block):
+            raise ValueError(f"std_map must have shape ({block}, {block}); got {tuple(std_map.shape)}.")
 
         self.register_buffer("std_map", std_map)
         self.register_buffer("jpeg_table", self._build_jpeg_table())
+        self.register_buffer("defensive_table", self._quality_scaled_table(self.quality))
+        self.register_buffer("accuracy_sensitive_mask", self._build_accuracy_sensitive_mask(std_map))
+        self.register_buffer("quantization_table", self._build_fd_table())
 
-        # -------------------------------------------------
-        # Paper Step 2: frequency importance + band split
-        # -------------------------------------------------
-        self.register_buffer("freq_importance", self._build_importance(std_map))
-        self.register_buffer("qs_table", self._build_qs_table(self.freq_importance))
-
-    # =====================================================
-    # FORWARD (ONE-PASS DEFENSE PIPELINE)
-    # =====================================================
     def forward(self, x):
-        device = x.device
-        B, C, H, W = x.shape
-        N = self.block
+        if x.dim() != 4:
+            raise ValueError(f"Expected BCHW tensor; got shape {tuple(x.shape)}.")
 
-        dct_mat = self.build_dct_matrix(device, N)
+        orig_h, orig_w = x.shape[-2:]
+        n = self.block
+        pad_h = (n - orig_h % n) % n
+        pad_w = (n - orig_w % n) % n
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
 
-        # JPEG scaling assumption
-        x = x * 255.0
+        b, c, h, w = x.shape
+        dct_mat = self.build_dct_matrix(x.device, n, dtype=x.dtype)
+        q = self.quantization_table.to(device=x.device, dtype=x.dtype)
 
-        # blockify
-        blocks = x.unfold(2, N, N).unfold(3, N, N)
-        B, C, Hb, Wb, _, _ = blocks.shape
+        # Standard JPEG level shift before DCT. Inputs are expected in [0, 1].
+        pixels = x.mul(255.0).sub(128.0)
+        blocks = pixels.unfold(2, n, n).unfold(3, n, n).contiguous().view(-1, n, n)
 
-        blocks = blocks.contiguous().view(-1, N, N)
-
-        # DCT
         freq = self.dct2(blocks, dct_mat)
-
-        # =====================================================
-        # PAPER CORE: QS × Q(i,j)
-        # =====================================================
-
-        q_band = self.qs_table.to(device)
-
-        # FULL PAPER QUANTIZATION MODEL:
-        # (Step 1 global suppression + Step 2 frequency adaptation)
-        q = self.QS * q_band
-
         freq = torch.round(freq / q) * q
-
-        # IDCT
         rec = self.idct2(freq, dct_mat)
 
-        # reshape back
-        rec = rec.view(B, C, Hb, Wb, N, N)
-        rec = rec.permute(0, 1, 2, 4, 3, 5)
-        rec = rec.reshape(B, C, H, W)
+        rec = rec.view(b, c, h // n, w // n, n, n)
+        rec = rec.permute(0, 1, 2, 4, 3, 5).reshape(b, c, h, w)
+        rec = rec.add(128.0).div(255.0).clamp(0.0, 1.0)
+        return rec[..., :orig_h, :orig_w]
 
-        return torch.clamp(rec / 255.0, 0, 1)
+    def _build_accuracy_sensitive_mask(self, std_map):
+        """Select high-variation benign DCT coefficients as DNN-important bands."""
+        if self.preserve_ratio == 0.0:
+            return torch.zeros_like(std_map, dtype=torch.bool)
+        if self.preserve_ratio == 1.0:
+            return torch.ones_like(std_map, dtype=torch.bool)
 
-    # =====================================================
-    # STEP 2: FREQUENCY IMPORTANCE (δi,j)
-    # =====================================================
-    def _build_importance(self, std_map):
-        """
-        δi,j estimation from dataset statistics.
-        Paper: standard deviation over DCT coefficients.
-        """
-        importance = std_map / (std_map.mean() + 1e-6)
+        flat = std_map.reshape(-1)
+        keep = max(1, int(round(flat.numel() * self.preserve_ratio)))
+        threshold = torch.topk(flat, keep, largest=True).values.min()
+        return std_map >= threshold
 
-        # normalize to [0,1]
-        importance = importance / (importance.max() + 1e-6)
+    def _build_fd_table(self):
+        preserved = torch.full_like(self.defensive_table, self.preserved_quant_step)
+        return torch.where(self.accuracy_sensitive_mask, preserved, self.defensive_table).clamp_min(1.0)
 
-        return importance
+    def _quality_scaled_table(self, quality):
+        base = self._build_jpeg_table()
+        if quality < 50.0:
+            scale = 5000.0 / quality
+        else:
+            scale = 200.0 - 2.0 * quality
+        return torch.floor((base * scale + 50.0) / 100.0).clamp(1.0, 255.0)
 
-    # =====================================================
-    # STEP 2: AS / MD BAND SPLIT (PAPER-STYLE)
-    # =====================================================
-    def _build_qs_table(self, importance):
-        """
-        Paper:
-        QSi,j = S2 if frequency is important (AS band)
-                S1 otherwise (MD band)
-        """
-
-        # rank-based split (closer to paper than median)
-        flat = importance.view(-1)
-
-        # top 50% = Accuracy Sensitive (AS band)
-        threshold = torch.quantile(flat, 0.5)
-
-        qs = torch.where(
-            importance >= threshold,
-            torch.tensor(self.S2),
-            torch.tensor(self.S1)
-        )
-
-        return qs
-
-    # =====================================================
-    # DCT UTILITIES
-    # =====================================================
     @staticmethod
-    def build_dct_matrix(device, block):
-        N = block
-        dct = torch.zeros((N, N), device=device)
-
-        for k in range(N):
-            for n in range(N):
+    def build_dct_matrix(device, block, dtype=torch.float32):
+        dct = torch.zeros((block, block), device=device, dtype=dtype)
+        for k in range(block):
+            for n in range(block):
                 if k == 0:
-                    dct[k, n] = 1 / math.sqrt(N)
+                    dct[k, n] = 1.0 / math.sqrt(block)
                 else:
-                    dct[k, n] = math.sqrt(2 / N) * math.cos(
-                        math.pi * (2 * n + 1) * k / (2 * N)
-                    )
+                    dct[k, n] = math.sqrt(2.0 / block) * math.cos(math.pi * (2 * n + 1) * k / (2 * block))
         return dct
 
     @staticmethod
@@ -141,18 +111,15 @@ class FeatureDistillation(torch.nn.Module):
     def idct2(x, dct):
         return dct.t() @ x @ dct
 
-    # =====================================================
-    # JPEG BASE TABLE (REFERENCE ONLY)
-    # =====================================================
     @staticmethod
     def _build_jpeg_table():
         return torch.tensor([
-            [16,11,10,16,24,40,51,61],
-            [12,12,14,19,26,58,60,55],
-            [14,13,16,24,40,57,69,56],
-            [14,17,22,29,51,87,80,62],
-            [18,22,37,56,68,109,103,77],
-            [24,36,55,64,81,104,113,92],
-            [49,64,78,87,103,121,120,101],
-            [72,92,95,98,112,100,103,99],
+            [16, 11, 10, 16, 24, 40, 51, 61],
+            [12, 12, 14, 19, 26, 58, 60, 55],
+            [14, 13, 16, 24, 40, 57, 69, 56],
+            [14, 17, 22, 29, 51, 87, 80, 62],
+            [18, 22, 37, 56, 68, 109, 103, 77],
+            [24, 36, 55, 64, 81, 104, 113, 92],
+            [49, 64, 78, 87, 103, 121, 120, 101],
+            [72, 92, 95, 98, 112, 100, 103, 99],
         ], dtype=torch.float32)

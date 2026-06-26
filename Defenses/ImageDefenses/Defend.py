@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Callable, Optional, Sequence
+from typing import Optional, Sequence
 from .InputPurification import FeatureDistillation
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
@@ -8,13 +8,15 @@ class Defender:
     def __init__(self, 
                 model, 
                 dataset, 
-                val_loader, 
+                val_loader,
+                calibration_loader=None,
                 device: Optional[str] = None,
                 use_multi_gpu: bool = True,
                 gpu_ids: Optional[Sequence[int]] = None):
 
         self.dataset = dataset
         self.val_loader = val_loader
+        self.calibration_loader = calibration_loader if calibration_loader is not None else val_loader
         self.model = model
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -71,7 +73,7 @@ class Defender:
 
         with torch.no_grad():
 
-            for images, _ in self.val_loader:
+            for images, _ in self.calibration_loader:
 
                 images = images.to(device)
 
@@ -85,10 +87,15 @@ class Defender:
                 # ----------------------------------------------------------
                 # split into 8x8 blocks
                 # ----------------------------------------------------------
-                blocks = images.unfold(2, 8, 8).unfold(3, 8, 8)
+                pad_h = (block - H % block) % block
+                pad_w = (block - W % block) % block
+                if pad_h or pad_w:
+                    images = torch.nn.functional.pad(images, (0, pad_w, 0, pad_h), mode='reflect')
 
-                # (B,C,Hb,Wb,8,8)
-                blocks = blocks.contiguous().view(-1, 8, 8)
+                blocks = images.unfold(2, block, block).unfold(3, block, block)
+
+                # (B,C,Hb,Wb,block,block)
+                blocks = blocks.contiguous().view(-1, block, block)
 
                 # ----------------------------------------------------------
                 # DCT
@@ -110,14 +117,15 @@ class Defender:
                             trigger_path, 
                             source_filter='bad', 
                             how_to_attach='blend',
-                            block=8, QS=30.0):
+                            block=8, QS=50.0, preserve_ratio=0.5):
 
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
-        target_tensor = torch.tensor(learned_trigger['target_label'], dtype=torch.float32, device=self.device).view(1, -1)
+        target_label = float(learned_trigger['target_label'])
 
         std_map = self.compute_dct_statistics(block=block)
 
-        fd = FeatureDistillation(std_map=std_map, block=block, QS=QS)
+        fd = FeatureDistillation(std_map=std_map, block=block, quality=QS, preserve_ratio=preserve_ratio).to(self.device)
+        fd.eval()
 
         total = 0
         attack_success = 0
@@ -125,6 +133,8 @@ class Defender:
         clean_correct = 0
         fd_correct = 0
         clean_correct_and_not_target = 0
+        conditional_attack_success = 0
+        conditional_asr_after_defend = 0
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -145,14 +155,18 @@ class Defender:
             source_inputs = inputs[source_mask]
             source_targets = targets[source_mask]
 
-            clean_outputs = self.model(source_inputs)
+            with torch.no_grad():
+                clean_outputs = self.model(source_inputs)
             clean_preds = (clean_outputs > 0).float().view(-1)
             clean_targets = source_targets.view(-1)
             clean_correct += int((clean_preds == clean_targets).sum().item())
-            clean_correct_and_not_target += ((clean_preds == clean_targets) & (clean_preds != target_tensor.view(-1))).sum().item()
+            eligible_mask = (clean_preds == clean_targets) & (clean_preds != target_label)
+            clean_correct_and_not_target += int(eligible_mask.sum().item())
 
-            fd_inputs = fd(source_inputs.clone())
-            fd_outputs = self.model(fd_inputs)
+            with torch.no_grad():
+                fd_inputs = fd(source_inputs.clone())
+            with torch.no_grad():
+                fd_outputs = self.model(fd_inputs)
             fd_preds = (fd_outputs > 0).float().view(-1)
             clean_targets = source_targets.view(-1)
             fd_correct += int((fd_preds == clean_targets).sum().item())
@@ -167,16 +181,20 @@ class Defender:
                 how_to_attach=how_to_attach
             )
 
-            poisoned_outputs = self.model(poisoned_inputs.clone())
-            poisoned_preds = (poisoned_outputs > 0).float()
+            with torch.no_grad():
+                poisoned_outputs = self.model(poisoned_inputs.clone())
+            poisoned_preds = (poisoned_outputs > 0).float().view(-1)
 
-            expanded_target = target_tensor.expand(poisoned_preds.shape[0], -1)
-            attack_success += int((poisoned_preds == expanded_target).sum().item())
+            attack_success += int((poisoned_preds == target_label).sum().item())
 
-            fd_poisoned_inputs = fd(poisoned_inputs)
-            fd_poisoned_outputs = self.model(fd_poisoned_inputs)
-            fd_poisoned_preds = (fd_poisoned_outputs > 0).float()
-            asr_after_defend += int((fd_poisoned_preds == expanded_target).sum().item())
+            with torch.no_grad():
+                fd_poisoned_inputs = fd(poisoned_inputs)
+            with torch.no_grad():
+                fd_poisoned_outputs = self.model(fd_poisoned_inputs)
+            fd_poisoned_preds = (fd_poisoned_outputs > 0).float().view(-1)
+            asr_after_defend += int((fd_poisoned_preds == target_label).sum().item())
+            conditional_attack_success += int((poisoned_preds[eligible_mask] == target_label).sum().item())
+            conditional_asr_after_defend += int((fd_poisoned_preds[eligible_mask] == target_label).sum().item())
             total += int(poisoned_preds.shape[0])
 
         return {
@@ -187,10 +205,14 @@ class Defender:
             'asr_after_defend':(asr_after_defend / total) * 100 if total else 0.0,
             'clean_not_target_count': clean_correct_and_not_target,
             'conditional_attack_success_rate': (
-                (attack_success / clean_correct_and_not_target) * 100
+                (conditional_attack_success / clean_correct_and_not_target) * 100
                 if clean_correct_and_not_target else 0.0
             ),
-            'target_label': float(learned_trigger['target_label']),
+            'conditional_asr_after_defend': (
+                (conditional_asr_after_defend / clean_correct_and_not_target) * 100
+                if clean_correct_and_not_target else 0.0
+            ),
+            'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
         }
             
