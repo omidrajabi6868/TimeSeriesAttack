@@ -39,7 +39,9 @@ def main():
             how_to_attach='blend',
             QS=50.0,
             preserve_ratio=0.5,
-            fd_batch_size=16
+            fd_batch_size=16,
+            save_examples_dir='backups/feature_distillation_examples',
+            max_saved_examples=5
         )
     )
 
