@@ -16,7 +16,7 @@ class FeatureDistillation(torch.nn.Module):
     remaining coefficients use a defensive JPEG table controlled by ``quality``.
     """
 
-    def __init__(self, std_map, block=8, quality=50.0, preserve_ratio=0.5, preserved_quant_step=1.0):
+    def __init__(self, std_map, block=8, quality=50.0, preserve_ratio=0.5, preserved_quant_step=1.0, max_blocks_per_chunk=65536):
         super().__init__()
         if block != 8:
             raise ValueError("FeatureDistillation currently supports the JPEG 8x8 block size only.")
@@ -29,6 +29,9 @@ class FeatureDistillation(torch.nn.Module):
         self.quality = float(quality)
         self.preserve_ratio = float(preserve_ratio)
         self.preserved_quant_step = float(preserved_quant_step)
+        self.max_blocks_per_chunk = int(max_blocks_per_chunk)
+        if self.max_blocks_per_chunk <= 0:
+            raise ValueError("max_blocks_per_chunk must be positive.")
 
         std_map = std_map.detach().float()
         if std_map.shape != (block, block):
@@ -59,9 +62,12 @@ class FeatureDistillation(torch.nn.Module):
         pixels = x.mul(255.0).sub(128.0)
         blocks = pixels.unfold(2, n, n).unfold(3, n, n).contiguous().view(-1, n, n)
 
-        freq = self.dct2(blocks, dct_mat)
-        freq = torch.round(freq / q) * q
-        rec = self.idct2(freq, dct_mat)
+        rec = torch.empty_like(blocks)
+        for start in range(0, blocks.shape[0], self.max_blocks_per_chunk):
+            end = min(start + self.max_blocks_per_chunk, blocks.shape[0])
+            freq = self.dct2(blocks[start:end], dct_mat)
+            freq = torch.round(freq / q) * q
+            rec[start:end] = self.idct2(freq, dct_mat)
 
         rec = rec.view(b, c, h // n, w // n, n, n)
         rec = rec.permute(0, 1, 2, 4, 3, 5).reshape(b, c, h, w)

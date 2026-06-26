@@ -13,7 +13,7 @@ def main():
     # calibration statistics from run to run.
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=512,
+        batch_size=64,
         stratify_by_bad_sample=True,
     )
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -38,7 +38,8 @@ def main():
             source_filter='bad',
             how_to_attach='blend',
             QS=50.0,
-            preserve_ratio=0.5
+            preserve_ratio=0.5,
+            fd_batch_size=16
         )
     )
 

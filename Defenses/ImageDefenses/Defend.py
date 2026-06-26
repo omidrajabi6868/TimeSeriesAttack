@@ -37,7 +37,7 @@ class Defender:
                 self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
         return
 
-    def compute_dct_statistics(self, block=8):
+    def compute_dct_statistics(self, block=8, max_blocks_per_chunk=65536):
         """
         Compute the standard deviation of each DCT coefficient over the
         entire validation/training loader.
@@ -50,7 +50,10 @@ class Defender:
 
         self.model.eval()
 
-        device = self.device
+        # Keep calibration statistics on CPU by default. The DCT statistics pass
+        # can touch every image in the calibration set and does not need GPU
+        # memory. Moving full 608x256 batches to CUDA here can easily cause OOM.
+        device = torch.device('cpu')
 
         # ------------------------------------------------------------------
         # DCT matrix
@@ -69,13 +72,15 @@ class Defender:
                     math.pi * (2 * n + 1) * k / (2 * block)
                 )
 
-        coeffs = []
+        count = 0
+        coeff_sum = torch.zeros((block, block), device=device)
+        coeff_squares_sum = torch.zeros((block, block), device=device)
 
         with torch.no_grad():
 
             for images, _ in self.calibration_loader:
 
-                images = images.to(device)
+                images = images.to(device, non_blocking=False)
 
                 # ----------------------------------------------------------
                 # paper assumes pixel values in [0,255]
@@ -100,24 +105,39 @@ class Defender:
                 # ----------------------------------------------------------
                 # DCT
                 # ----------------------------------------------------------
-                dct = T @ blocks @ T.t()
+                for start in range(0, blocks.shape[0], max_blocks_per_chunk):
+                    end = min(start + max_blocks_per_chunk, blocks.shape[0])
+                    dct = T @ blocks[start:end] @ T.t()
+                    coeff_sum += dct.sum(dim=0)
+                    coeff_squares_sum += dct.square().sum(dim=0)
+                    count += dct.shape[0]
 
-                coeffs.append(dct)
-
-        coeffs = torch.cat(coeffs, dim=0)
+        if count < 2:
+            raise ValueError('At least two DCT blocks are required to compute standard deviation.')
 
         # --------------------------------------------------------------
-        # std of every coefficient
+        # unbiased std of every coefficient without storing all blocks
         # --------------------------------------------------------------
-        std_map = coeffs.std(dim=0)
+        variance = (coeff_squares_sum - coeff_sum.square() / count) / (count - 1)
+        std_map = variance.clamp_min(0.0).sqrt()
 
-        return std_map
+        return std_map.to(self.device)
+
+    def _predict_with_feature_distillation(self, fd, inputs, fd_batch_size):
+        preds = []
+        with torch.no_grad():
+            for start in range(0, inputs.shape[0], fd_batch_size):
+                end = min(start + fd_batch_size, inputs.shape[0])
+                fd_inputs = fd(inputs[start:end].clone())
+                outputs = self.model(fd_inputs)
+                preds.append((outputs > 0).float().view(-1).cpu())
+        return torch.cat(preds, dim=0).to(self.device)
 
     def feature_distillation(self,
                             trigger_path, 
                             source_filter='bad', 
                             how_to_attach='blend',
-                            block=8, QS=50.0, preserve_ratio=0.5):
+                            block=8, QS=50.0, preserve_ratio=0.5, fd_batch_size=32):
 
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
         target_label = float(learned_trigger['target_label'])
@@ -163,11 +183,7 @@ class Defender:
             eligible_mask = (clean_preds == clean_targets) & (clean_preds != target_label)
             clean_correct_and_not_target += int(eligible_mask.sum().item())
 
-            with torch.no_grad():
-                fd_inputs = fd(source_inputs.clone())
-            with torch.no_grad():
-                fd_outputs = self.model(fd_inputs)
-            fd_preds = (fd_outputs > 0).float().view(-1)
+            fd_preds = self._predict_with_feature_distillation(fd, source_inputs, fd_batch_size)
             clean_targets = source_targets.view(-1)
             fd_correct += int((fd_preds == clean_targets).sum().item())
 
@@ -187,11 +203,7 @@ class Defender:
 
             attack_success += int((poisoned_preds == target_label).sum().item())
 
-            with torch.no_grad():
-                fd_poisoned_inputs = fd(poisoned_inputs)
-            with torch.no_grad():
-                fd_poisoned_outputs = self.model(fd_poisoned_inputs)
-            fd_poisoned_preds = (fd_poisoned_outputs > 0).float().view(-1)
+            fd_poisoned_preds = self._predict_with_feature_distillation(fd, poisoned_inputs, fd_batch_size)
             asr_after_defend += int((fd_poisoned_preds == target_label).sum().item())
             conditional_attack_success += int((poisoned_preds[eligible_mask] == target_label).sum().item())
             conditional_asr_after_defend += int((fd_poisoned_preds[eligible_mask] == target_label).sum().item())
