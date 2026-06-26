@@ -8,8 +8,10 @@ def main():
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
-    train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
-    dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
+    # Use deterministic preprocessing for defense evaluation. Random training
+    # augmentation would change both the learned trigger placement and the DCT
+    # calibration statistics from run to run.
+    dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
         batch_size=512,
         stratify_by_bad_sample=True,
@@ -29,12 +31,14 @@ def main():
 
     classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
 
-    defender = Defender(classification.model, dataset, test_loader)
+    defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
 
     print(defender.feature_distillation(
             trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256/saved_trigger',
             source_filter='bad',
-            how_to_attach='blend'
+            how_to_attach='blend',
+            QS=50.0,
+            preserve_ratio=0.5
         )
     )
 
