@@ -11,9 +11,12 @@ import os
 
  
 class ImageDataset(TorchDataset):
-    def __init__(self, label_path, transform=None, image_size=None):
+    def __init__(self, label_path, transform=None, image_size=None, transform_input='pil'):
         self.label_path = label_path
         self.transform = transform
+        self.transform_input = transform_input
+        if self.transform_input not in {'pil', 'tensor'}:
+            raise ValueError("transform_input must be either 'pil' or 'tensor'.")
         self.image_size = self._validate_image_size(image_size)
         self.image_paths, self.labels = self.solve_paths(self.label_path)
 
@@ -21,15 +24,18 @@ class ImageDataset(TorchDataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
+        with Image.open(self.image_paths[idx]) as image:
+            image = image.convert('RGB')
 
-        if self.image_size is not None:
-            image = image.resize(self.image_size, Resampling.BILINEAR)
+            if self.image_size is not None:
+                image = image.resize(self.image_size, Resampling.BILINEAR)
 
-        image = torch.from_numpy(np.array(image, dtype=np.float32) / 255.0).permute(2, 0, 1)
-
-        if self.transform:
-            image = self.transform(image)
+            if self.transform and self.transform_input == 'pil':
+                image = self.transform(image)
+            else:
+                image = self._pil_to_tensor(image)
+                if self.transform:
+                    image = self.transform(image)
 
         label = torch.tensor(self.labels[idx], dtype=torch.float32)
 
@@ -41,9 +47,12 @@ class ImageDataset(TorchDataset):
                               test_ratio=0.15,
                               batch_size=32,
                               shuffle_train=True,
-                              num_workers=0,
+                              num_workers=None,
                               seed=42,
-                              stratify_by_bad_sample=True):
+                              stratify_by_bad_sample=True,
+                              pin_memory=None,
+                              persistent_workers=None,
+                              prefetch_factor=2):
         if not torch.isclose(torch.tensor(train_ratio + val_ratio + test_ratio), torch.tensor(1.0)):
             raise ValueError('train_ratio, val_ratio and test_ratio must sum to 1.')
 
@@ -68,26 +77,44 @@ class ImageDataset(TorchDataset):
         val_set = Subset(self, val_indices)
         test_set = Subset(self, test_indices)
 
+        if num_workers is None:
+            cpu_count = os.cpu_count() or 1
+            num_workers = min(4, max(0, cpu_count - 1))
+        if pin_memory is None:
+            pin_memory = torch.cuda.is_available()
+        if persistent_workers is None:
+            persistent_workers = num_workers > 0
+
+        loader_kwargs = {
+            'batch_size': batch_size,
+            'num_workers': num_workers,
+            'pin_memory': pin_memory,
+            'persistent_workers': persistent_workers,
+        }
+        if num_workers > 0:
+            loader_kwargs['prefetch_factor'] = prefetch_factor
+
         train_loader = DataLoader(
             train_set,
-            batch_size=batch_size,
             shuffle=shuffle_train,
-            num_workers=num_workers,
+            **loader_kwargs,
         )
         val_loader = DataLoader(
             val_set,
-            batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            **loader_kwargs,
         )
         test_loader = DataLoader(
             test_set,
-            batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            **loader_kwargs,
         )
 
         return train_loader, val_loader, test_loader
+
+    @staticmethod
+    def _pil_to_tensor(image):
+        return torch.from_numpy(np.array(image, dtype=np.float32) / 255.0).permute(2, 0, 1)
 
     @staticmethod
     def default_train_augmentation(image_size):
@@ -96,7 +123,6 @@ class ImageDataset(TorchDataset):
 
         width, height = image_size
         return transforms.Compose([
-            transforms.ToPILImage(),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.1),
             transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1)], p=0.5),
