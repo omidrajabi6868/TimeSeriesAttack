@@ -67,12 +67,14 @@ class AdversarialAttack:
     @staticmethod
     def save_trigger(trigger, output_path, history_path=None):
         output_path = Path(output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
+        if not output_path.exists():
+            output_path.mkdir(parents=True, exist_ok=True)
         history_path = (
             Path(history_path)
             if history_path is not None else AdversarialAttack._default_trigger_history_path(output_path)
         )
-        history_path.mkdir(parents=True, exist_ok=True)
+        if not history_path.exists():
+            history_path.mkdir(parents=True, exist_ok=True)
 
         patch = trigger['patch']
         if not torch.is_tensor(patch):

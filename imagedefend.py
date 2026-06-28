@@ -13,7 +13,7 @@ def main():
     # calibration statistics from run to run.
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=64,
+        batch_size=512,
         stratify_by_bad_sample=True,
     )
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -37,11 +37,11 @@ def main():
             trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256/saved_trigger',
             source_filter='bad',
             how_to_attach='blend',
-            QS=50.0,
-            preserve_ratio=0.5,
+            QS=1,
+            preserve_ratio=0.0,
             fd_batch_size=16,
             save_examples_dir='backups/feature_distillation_examples',
-            max_saved_examples=5
+            max_saved_examples=5,
         )
     )
 

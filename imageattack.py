@@ -26,7 +26,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=1024,
+        batch_size=512,
         stratify_by_bad_sample=True,
     )
 
@@ -102,7 +102,7 @@ def main():
                                             learning_rate=0.05,
                                             mask_learning_rate=0.05,
                                             mask_l1_weight=10.,
-                                            patch_l2_weight=1.,
+                                            patch_l2_weight=100.,
                                             trigger_preview_dir=trigger_preview_dir,
                                             trigger_preview_loader=test_loader,
                                             trigger_preview_max_images=1,
