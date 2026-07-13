@@ -25,7 +25,17 @@ from Defenses.ImageDefenses.DiffusionPurification import DiffusionPurifier
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the DDPM used by DiffPure-style input purification.")
-    parser.add_argument("--label-path", required=True, help="Path to the image label file consumed by ImageDataset.")
+    parser.add_argument(
+        "label_path_arg",
+        nargs="?",
+        help="Path to the image label file consumed by ImageDataset. Can also be passed with --label-path.",
+    )
+    parser.add_argument(
+        "--label-path",
+        dest="label_path_option",
+        default=None,
+        help="Path to the image label file consumed by ImageDataset.",
+    )
     parser.add_argument("--image-width", type=int, default=None, help="Optional resize width.")
     parser.add_argument("--image-height", type=int, default=None, help="Optional resize height.")
     parser.add_argument("--checkpoint-path", default="backups/diffusion_purifier/best.pth")
@@ -39,7 +49,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None)
     parser.add_argument("--save-every", type=int, default=0, help="Save numbered epoch checkpoints when > 0.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.label_path = args.label_path_option or args.label_path_arg
+    if args.label_path is None:
+        parser.error("label path is required; pass it positionally or with --label-path")
+    return args
 
 
 def main():
