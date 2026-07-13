@@ -90,7 +90,12 @@ def main():
         patch_size = (608, 256)
         how_to_attach = 'blend'
         patch_attack = PatchAttck(patch_size =patch_size, model=classification.model)
-        trigger_preview_dir=f'backups/{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}'
+        steps = 500
+        learning_rate = 0.05
+        mask_learning_rate = 0.05
+        mask_l1_weight = 10
+        patch_l2_weight = 100
+        trigger_preview_dir=f'backups/{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
         print(trigger_preview_dir)
 
         learned_trigger = patch_attack.learn_fixed_size_patch_with_mask_optimization(dataset=dataset,
@@ -98,11 +103,11 @@ def main():
                                             val_loader=val_loader,
                                             target_label=1,
                                             source_filter='bad',
-                                            steps=500,
-                                            learning_rate=0.05,
-                                            mask_learning_rate=0.05,
-                                            mask_l1_weight=10.,
-                                            patch_l2_weight=100.,
+                                            steps=steps,
+                                            learning_rate=learning_rate,
+                                            mask_learning_rate=mask_learning_rate,
+                                            mask_l1_weight=mask_l1_weight,
+                                            patch_l2_weight=patch_l2_weight,
                                             trigger_preview_dir=trigger_preview_dir,
                                             trigger_preview_loader=test_loader,
                                             trigger_preview_max_images=1,

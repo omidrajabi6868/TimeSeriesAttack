@@ -34,7 +34,7 @@ def main():
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
 
     print(defender.feature_distillation(
-            trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256/saved_trigger',
+            trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth',
             source_filter='bad',
             how_to_attach='blend',
             QS=1,
