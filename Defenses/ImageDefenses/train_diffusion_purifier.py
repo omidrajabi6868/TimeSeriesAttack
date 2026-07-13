@@ -9,11 +9,15 @@ Example:
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
 
 from Dataset.DataManagement import ImageDataset
 from Defenses.ImageDefenses.DiffusionPurification import DiffusionPurifier
