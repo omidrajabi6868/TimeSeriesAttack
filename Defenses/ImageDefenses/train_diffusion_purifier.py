@@ -48,6 +48,8 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--use-multi-gpu", action="store_true", help="Use torch.nn.DataParallel when multiple CUDA GPUs are available.")
+    parser.add_argument("--gpu-ids", default=None, help="Comma-separated CUDA GPU ids for DataParallel, for example '0,1'.")
     parser.add_argument("--save-every", type=int, default=0, help="Save numbered epoch checkpoints when > 0.")
     args = parser.parse_args()
     args.label_path = args.label_path_option or args.label_path_arg
@@ -75,6 +77,15 @@ def main():
     )
 
     purifier = DiffusionPurifier(base_channels=args.base_channels, timesteps=args.timesteps).to(device)
+    gpu_ids = None
+    if args.gpu_ids is not None:
+        gpu_ids = [int(gpu_id.strip()) for gpu_id in args.gpu_ids.split(',') if gpu_id.strip()]
+    if args.use_multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
+        if gpu_ids is None:
+            gpu_ids = list(range(torch.cuda.device_count()))
+        if len(gpu_ids) > 1:
+            print(f"Using DataParallel for diffusion model on GPUs: {gpu_ids}")
+            purifier.model = torch.nn.DataParallel(purifier.model, device_ids=gpu_ids)
     optimizer = AdamW(purifier.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_val = float("inf")
     checkpoint_path = Path(args.checkpoint_path)

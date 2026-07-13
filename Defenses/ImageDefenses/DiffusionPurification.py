@@ -203,8 +203,9 @@ class DiffusionPurifier(nn.Module):
         return torch.cat(preds, dim=0).to(output_device)
 
     def checkpoint_dict(self, extra: Optional[Dict] = None) -> Dict:
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
         payload = {
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": model.state_dict(),
             "image_channels": self.image_channels,
             "base_channels": self.base_channels,
             "timesteps": self.schedule.timesteps,
@@ -225,7 +226,10 @@ class DiffusionPurifier(nn.Module):
             beta_start=float(checkpoint.get("beta_start", 1e-4)),
             beta_end=float(checkpoint.get("beta_end", 2e-2)),
         )
-        purifier.model.load_state_dict(checkpoint["model_state_dict"])
+        state_dict = checkpoint["model_state_dict"]
+        if any(key.startswith("module.") for key in state_dict):
+            state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+        purifier.model.load_state_dict(state_dict)
         return purifier
 
     def save_checkpoint(self, checkpoint_path, extra: Optional[Dict] = None) -> None:

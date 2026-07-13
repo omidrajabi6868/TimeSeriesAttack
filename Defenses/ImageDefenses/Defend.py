@@ -336,6 +336,15 @@ class Defender:
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
         target_label = float(learned_trigger['target_label'])
         purifier = DiffusionPurifier.from_checkpoint(diffusion_checkpoint_path, map_location=self.device).to(self.device)
+        if (
+            self.use_multi_gpu
+            and self.device.type == "cuda"
+            and torch.cuda.device_count() > 1
+        ):
+            dp_gpu_ids = self.gpu_ids if self.gpu_ids is not None else list(range(torch.cuda.device_count()))
+            if len(dp_gpu_ids) > 1:
+                print(f"Using DataParallel for diffusion purifier on GPUs: {dp_gpu_ids}")
+                purifier.model = torch.nn.DataParallel(purifier.model, device_ids=dp_gpu_ids)
         purifier.eval()
 
         total = 0
