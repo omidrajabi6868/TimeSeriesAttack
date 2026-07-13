@@ -47,8 +47,8 @@ def main():
             )
         )
     
-    if defend_name == "difussion_purification":
-        print("Difussion Purification")
+    if defend_name == "diffusion_purification":
+        print("Diffusion Purification")
         print(defender.diffusion_purification(
                 trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth",
                 diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',

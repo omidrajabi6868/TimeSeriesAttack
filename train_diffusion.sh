@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=training
+#SBATCH --job-name=Diffusion training
 #SBATCH --output=logs/%j_out.txt   # %j inserts the Job ID automatically
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=high-gpu-mem
-#SBATCH --gres=gpu:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:2
 #SBATCH --nodes=1
 
 # Ensure the logs directory exists
