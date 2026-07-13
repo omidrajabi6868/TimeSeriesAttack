@@ -18,6 +18,7 @@ backups/
 *.txt
 logs/
 slurm-*.out
+*.sh
 
 # --- Data & Large Files ---
 # Since your data is in /home/oraja001/, it's likely outside the repo, 

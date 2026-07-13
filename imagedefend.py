@@ -32,7 +32,8 @@ def main():
     classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
 
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
-
+    
+    print("Feature Distillation")
     print(defender.feature_distillation(
             trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth',
             source_filter='bad',
@@ -44,7 +45,18 @@ def main():
             max_saved_examples=5,
         )
     )
-
+    print("Difussion Purification")
+    print(defender.diffusion_purification(
+            trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth",
+            diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
+            source_filter='bad',
+            how_to_attach='blend',
+            diffusion_step=100,
+            reverse_steps=None,
+            stochastic=True,
+            dp_batch_size=16
+        )
+    )
 
 if __name__=='__main__':
     main()
