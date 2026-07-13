@@ -324,7 +324,9 @@ class Defender:
                             diffusion_step=100,
                             reverse_steps=None,
                             stochastic=True,
-                            dp_batch_size=16):
+                            dp_batch_size=16,
+                            save_examples_dir=None,
+                            max_saved_examples=5):
         """Evaluate a DiffPure-style defense using a trained diffusion checkpoint.
 
         The purifier first applies the forward diffusion process to each clean or
@@ -352,6 +354,9 @@ class Defender:
         poisoned_dp_pixel_count = 0
         trigger_region_dp_abs_diff_sum = 0.0
         trigger_region_dp_pixel_count = 0
+        successful_defense_examples = []
+        unsuccessful_defense_examples = []
+        max_saved_examples = int(max_saved_examples)
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -381,6 +386,7 @@ class Defender:
             clean_correct_and_not_target += int(eligible_mask.sum().item())
 
             purified_clean_preds = []
+            purified_clean_batches = []
             with torch.no_grad():
                 for start in range(0, source_inputs.shape[0], dp_batch_size):
                     end = min(start + dp_batch_size, source_inputs.shape[0])
@@ -390,6 +396,7 @@ class Defender:
                         reverse_steps=reverse_steps,
                         stochastic=stochastic,
                     )
+                    purified_clean_batches.append(purified_clean.detach().cpu())
                     clean_diff = (purified_clean - source_inputs[start:end]).abs()
                     clean_dp_abs_diff_sum += float(clean_diff.sum().item())
                     clean_dp_pixel_count += int(purified_clean.numel())
@@ -397,6 +404,7 @@ class Defender:
                     purified_clean_preds.append((purified_clean_outputs > 0).float().view(-1))
 
             dp_clean_preds = torch.cat(purified_clean_preds, dim=0)
+            purified_clean_all = torch.cat(purified_clean_batches, dim=0)
             purified_clean_correct += int((dp_clean_preds == clean_targets).sum().item())
             clean_prediction_changes_after_dp += int((dp_clean_preds != clean_preds).sum().item())
 
@@ -416,6 +424,7 @@ class Defender:
             attack_success += int((poisoned_preds == target_label).sum().item())
 
             purified_poisoned_preds = []
+            purified_poisoned_batches = []
             with torch.no_grad():
                 for start in range(0, poisoned_inputs.shape[0], dp_batch_size):
                     end = min(start + dp_batch_size, poisoned_inputs.shape[0])
@@ -425,6 +434,7 @@ class Defender:
                         reverse_steps=reverse_steps,
                         stochastic=stochastic,
                     )
+                    purified_poisoned_batches.append(purified_poisoned.detach().cpu())
                     poisoned_diff = (purified_poisoned - poisoned_inputs[start:end]).abs()
                     poisoned_dp_abs_diff_sum += float(poisoned_diff.sum().item())
                     poisoned_dp_pixel_count += int(purified_poisoned.numel())
@@ -441,11 +451,60 @@ class Defender:
                     purified_poisoned_preds.append((purified_poisoned_outputs > 0).float().view(-1))
 
             dp_poisoned_preds = torch.cat(purified_poisoned_preds, dim=0)
+            purified_poisoned_all = torch.cat(purified_poisoned_batches, dim=0)
             asr_after_defend += int((dp_poisoned_preds == target_label).sum().item())
             poisoned_prediction_changes_after_dp += int((dp_poisoned_preds != poisoned_preds).sum().item())
             conditional_attack_success += int((poisoned_preds[eligible_mask] == target_label).sum().item())
             conditional_asr_after_defend += int((dp_poisoned_preds[eligible_mask] == target_label).sum().item())
+
+            if save_examples_dir is not None and max_saved_examples > 0:
+                successful_mask = (poisoned_preds == target_label) & (dp_poisoned_preds != target_label)
+                unsuccessful_mask = (poisoned_preds == target_label) & (dp_poisoned_preds == target_label)
+                self._collect_dp_examples(
+                    successful_defense_examples,
+                    successful_mask,
+                    max_saved_examples,
+                    source_inputs.detach().cpu(),
+                    purified_clean_all,
+                    poisoned_inputs.detach().cpu(),
+                    purified_poisoned_all,
+                    clean_targets.detach().cpu(),
+                    clean_preds.detach().cpu(),
+                    dp_clean_preds.detach().cpu(),
+                    poisoned_preds.detach().cpu(),
+                    dp_poisoned_preds.detach().cpu(),
+                    defended=True,
+                )
+                if len(successful_defense_examples) < max_saved_examples:
+                    self._collect_dp_examples(
+                        unsuccessful_defense_examples,
+                        unsuccessful_mask,
+                        max_saved_examples,
+                        source_inputs.detach().cpu(),
+                        purified_clean_all,
+                        poisoned_inputs.detach().cpu(),
+                        purified_poisoned_all,
+                        clean_targets.detach().cpu(),
+                        clean_preds.detach().cpu(),
+                        dp_clean_preds.detach().cpu(),
+                        poisoned_preds.detach().cpu(),
+                        dp_poisoned_preds.detach().cpu(),
+                        defended=False,
+                    )
             total += int(poisoned_preds.shape[0])
+
+        saved_example_info = None
+        if save_examples_dir is not None and max_saved_examples > 0:
+            examples_to_save = successful_defense_examples[:max_saved_examples]
+            example_source = 'successful_defenses'
+            if not examples_to_save:
+                examples_to_save = unsuccessful_defense_examples[:max_saved_examples]
+                example_source = 'unsuccessful_defenses'
+            saved_example_info = self._save_dp_examples(
+                examples_to_save,
+                save_examples_dir,
+                example_source,
+            )
 
         clean_source_accuracy = (clean_correct / total) * 100 if total else 0.0
         clean_dp_accuracy = (purified_clean_correct / total) * 100 if total else 0.0
@@ -482,7 +541,74 @@ class Defender:
                 image_height=self.dataset.image_size[1] if getattr(self.dataset, 'image_size', None) else None,
                 image_width=self.dataset.image_size[0] if getattr(self.dataset, 'image_size', None) else None,
             ),
+            'saved_diffusion_purification_examples': saved_example_info,
         }
+
+    @staticmethod
+    def _collect_dp_examples(example_list, selection_mask, max_examples, clean_inputs,
+                             dp_clean_inputs, poisoned_inputs, dp_poisoned_inputs,
+                             targets, clean_preds, dp_clean_preds,
+                             poisoned_preds, dp_poisoned_preds, defended):
+        if len(example_list) >= max_examples:
+            return
+        for idx in torch.where(selection_mask.cpu())[0].tolist():
+            if len(example_list) >= max_examples:
+                break
+            example_list.append({
+                'clean': clean_inputs[idx],
+                'clean_dp': dp_clean_inputs[idx],
+                'adversarial': poisoned_inputs[idx],
+                'adversarial_dp': dp_poisoned_inputs[idx],
+                'target': float(targets.view(-1)[idx].item()),
+                'clean_pred': float(clean_preds.view(-1)[idx].item()),
+                'clean_dp_pred': float(dp_clean_preds.view(-1)[idx].item()),
+                'adversarial_pred': float(poisoned_preds.view(-1)[idx].item()),
+                'adversarial_dp_pred': float(dp_poisoned_preds.view(-1)[idx].item()),
+                'defended': bool(defended),
+            })
+
+    @staticmethod
+    def _save_dp_examples(examples, output_dir, example_source):
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        saved_paths = []
+        for idx, example in enumerate(examples, start=1):
+            save_path = output_path / f'diffusion_purification_{example_source}_{idx:02d}.png'
+            Defender._save_dp_comparison(example, save_path)
+            saved_paths.append(str(save_path))
+        return {
+            'output_dir': str(output_path),
+            'selection': example_source,
+            'saved_images': len(saved_paths),
+            'paths': saved_paths,
+        }
+
+    @staticmethod
+    def _save_dp_comparison(example, save_path):
+        panels = [
+            ('Clean', example['clean'], example['clean_pred']),
+            ('Clean + DP', example['clean_dp'], example['clean_dp_pred']),
+            ('|Clean DP diff| x5', Defender._difference_image(example['clean'], example['clean_dp'], scale=5.0), None),
+            ('Adversarial', example['adversarial'], example['adversarial_pred']),
+            ('Adversarial + DP', example['adversarial_dp'], example['adversarial_dp_pred']),
+            ('|Adv DP diff| x5', Defender._difference_image(example['adversarial'], example['adversarial_dp'], scale=5.0), None),
+        ]
+        images = [Defender._tensor_to_pil_image(tensor) for _, tensor, _ in panels]
+        widths, heights = zip(*(image.size for image in images))
+        label_height = 42
+        canvas = Image.new('RGB', (sum(widths), max(heights) + label_height), color='white')
+        draw = ImageDraw.Draw(canvas)
+        x_offset = 0
+        for (title, _, pred), image in zip(panels, images):
+            canvas.paste(image, (x_offset, label_height))
+            pred_text = '' if pred is None else f'\ntrue={example["target"]:.0f}, pred={pred:.0f}'
+            draw.text(
+                (x_offset + 4, 4),
+                f'{title}{pred_text}',
+                fill='black',
+            )
+            x_offset += image.size[0]
+        canvas.save(save_path)
 
     @staticmethod
     def _collect_fd_examples(example_list, selection_mask, max_examples, clean_inputs,
