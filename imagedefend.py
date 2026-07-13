@@ -3,7 +3,7 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'feature distillation'
+    defend_name = 'feature_distillation'
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
@@ -33,18 +33,33 @@ def main():
 
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
 
-    print(defender.feature_distillation(
-            trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth',
-            source_filter='bad',
-            how_to_attach='blend',
-            QS=1,
-            preserve_ratio=0.0,
-            fd_batch_size=16,
-            save_examples_dir='backups/feature_distillation_examples',
-            max_saved_examples=5,
+    if defend_name == "feature_distillation":
+        print("Feature Distillation")
+        print(defender.feature_distillation(
+                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth',
+                source_filter='bad',
+                how_to_attach='blend',
+                QS=1,
+                preserve_ratio=0.0,
+                fd_batch_size=16,
+                save_examples_dir='backups/feature_distillation_examples',
+                max_saved_examples=5,
+            )
         )
-    )
-
+    
+    if defend_name == "diffusion_purification":
+        print("Diffusion Purification")
+        print(defender.diffusion_purification(
+                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth",
+                diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
+                source_filter='bad',
+                how_to_attach='blend',
+                diffusion_step=100,
+                reverse_steps=None,
+                stochastic=True,
+                dp_batch_size=16
+            )
+        )
 
 if __name__=='__main__':
     main()

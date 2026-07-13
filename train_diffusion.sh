@@ -1,0 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=Diffusion training
+#SBATCH --output=logs/%j_out.txt   # %j inserts the Job ID automatically
+#SBATCH --error=logs/%j_out.txt
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:2
+#SBATCH --nodes=1
+
+# Ensure the logs directory exists
+mkdir -p logs
+
+# Environment Setup
+enable_lmod
+module load container_env pytorch-gpu/2.2.0
+
+# Force Python to flush output immediately
+export PYTHONUNBUFFERED=1
+
+# Execute
+crun python Defenses/ImageDefenses/train_diffusion_purifier.py \
+        --label-path /home/oraja001/Jlab/Hydra\ data/labels_v2.txt \
+        --image-width 608 --image-height 256 --epochs 50 --batch-size 16 \
+        --checkpoint-path backups/diffusion_purifier/best_checkpoint.pth
