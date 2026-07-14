@@ -27,18 +27,43 @@ class Defender:
         self.use_multi_gpu = use_multi_gpu
         self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
 
-        self.model = self.model.to(self.device)
+        self.model = self._prepare_data_parallel_model(
+            self.model,
+            model_name="classifier",
+        )
+        return
+
+    def _unwrap_data_parallel(self, model):
+        """Return the underlying module and its DataParallel device IDs.
+
+        Loading code may already wrap checkpoints in DataParallel. Wrapping an
+        existing DataParallel module again creates nested replicas, which can
+        feed cuda:1 inputs to inner modules whose parameters still live on
+        cuda:0. Unwrapping first guarantees there is only one DataParallel layer.
+        """
+        device_ids = None
+        while isinstance(model, torch.nn.DataParallel):
+            if device_ids is None:
+                device_ids = list(model.device_ids)
+            model = model.module
+        return model, device_ids
+
+    def _prepare_data_parallel_model(self, model, model_name="model"):
+        model, existing_device_ids = self._unwrap_data_parallel(model)
+        if self.gpu_ids is None and existing_device_ids:
+            self.gpu_ids = existing_device_ids
+
+        model = model.to(self.device)
         if (
             self.use_multi_gpu
             and self.device.type == "cuda"
             and torch.cuda.device_count() > 1
         ):
-            if self.gpu_ids is None:
-                self.gpu_ids = list(range(torch.cuda.device_count()))
-            if len(self.gpu_ids) > 1:
-                print(f"Using DataParallel on GPUs: {self.gpu_ids}")
-                self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
-        return
+            dp_gpu_ids = self.gpu_ids if self.gpu_ids is not None else list(range(torch.cuda.device_count()))
+            if len(dp_gpu_ids) > 1:
+                print(f"Using DataParallel for {model_name} on GPUs: {dp_gpu_ids}")
+                model = torch.nn.DataParallel(model, device_ids=dp_gpu_ids)
+        return model
 
     def feature_distillation(self,
                             trigger_path,
@@ -336,15 +361,10 @@ class Defender:
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
         target_label = float(learned_trigger['target_label'])
         purifier = DiffusionPurifier.from_checkpoint(diffusion_checkpoint_path, map_location=self.device).to(self.device)
-        if (
-            self.use_multi_gpu
-            and self.device.type == "cuda"
-            and torch.cuda.device_count() > 1
-        ):
-            dp_gpu_ids = self.gpu_ids if self.gpu_ids is not None else list(range(torch.cuda.device_count()))
-            if len(dp_gpu_ids) > 1:
-                print(f"Using DataParallel for diffusion purifier on GPUs: {dp_gpu_ids}")
-                purifier.model = torch.nn.DataParallel(purifier.model, device_ids=dp_gpu_ids)
+        purifier.model = self._prepare_data_parallel_model(
+            purifier.model,
+            model_name="diffusion purifier",
+        )
         purifier.eval()
 
         total = 0
