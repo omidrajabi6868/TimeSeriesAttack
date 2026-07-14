@@ -3,7 +3,7 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'feature_distillation'
+    defend_name = 'diffusion_purification'
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
@@ -36,7 +36,7 @@ def main():
     if defend_name == "feature_distillation":
         print("Feature Distillation")
         print(defender.feature_distillation(
-                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth',
+                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger',
                 source_filter='bad',
                 how_to_attach='blend',
                 QS=1,
@@ -50,14 +50,16 @@ def main():
     if defend_name == "diffusion_purification":
         print("Diffusion Purification")
         print(defender.diffusion_purification(
-                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/adversarial_patch/latest_trigger.pth",
+                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger",
                 diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
                 source_filter='bad',
                 how_to_attach='blend',
                 diffusion_step=100,
                 reverse_steps=None,
                 stochastic=True,
-                dp_batch_size=16
+                dp_batch_size=16,
+                save_examples_dir="backups/diffusion_purifier",
+                max_saved_examples=5
             )
         )
 
