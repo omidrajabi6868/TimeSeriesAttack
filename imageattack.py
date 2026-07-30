@@ -93,8 +93,8 @@ def main():
         steps = 500
         learning_rate = 0.05
         mask_learning_rate = 0.05
-        mask_l1_weight = 10
-        patch_l2_weight = 100
+        mask_l1_weight = 100
+        patch_l2_weight = 1000
         trigger_preview_dir=f'backups/{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
         print(trigger_preview_dir)
 

@@ -123,11 +123,11 @@ class ImageDataset(TorchDataset):
 
         width, height = image_size
         return transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomVerticalFlip(p=0.1),
+            # transforms.RandomHorizontalFlip(p=0.05),
+            # transforms.RandomVerticalFlip(p=0.05),
             transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1)], p=0.5),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
-            transforms.RandomAffine(degrees=5, translate=(0.03, 0.03), scale=(0.97, 1.03), shear=2),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
+            # transforms.RandomAffine(degrees=5, translate=(0.03, 0.03), scale=(0.97, 1.03), shear=2),
             transforms.Resize((height, width)),
             transforms.ToTensor(),
         ])
