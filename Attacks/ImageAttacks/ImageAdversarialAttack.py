@@ -561,12 +561,25 @@ class AdversarialAttack:
                     target_label=target_label,
                     source_filter=source_filter,
                     edge_softness=current_softness,
+                    mask_l1_weight=mask_l1_weight,
+                    patch_l2_weight=patch_l2_weight,
+                    softness_alignment_weight=softness_alignment_weight,
                     how_to_attach=how_to_attach
                 )
                 val_asr = float(val_metrics['attack_success_rate'])
                 val_loss = float(val_loss_metrics['loss'])
                 step_history['validation_asr'] = val_asr
                 step_history['validation_loss'] = val_loss
+                step_history['validation_attack_loss'] = float(val_loss_metrics['attack_loss'])
+                step_history['validation_patch_regularization_loss'] = float(
+                    val_loss_metrics['patch_regularization_loss']
+                )
+                step_history['validation_mask_regularization_loss'] = float(
+                    val_loss_metrics['mask_regularization_loss']
+                )
+                step_history['validation_softness_alignment_loss'] = float(
+                    val_loss_metrics['softness_alignment_loss']
+                )
                 step_history['validation_samples'] = int(val_loss_metrics['samples_evaluated'])
                 step_history['edge_softness'] = current_softness
                 if val_loss < best_val_loss:
@@ -1045,11 +1058,49 @@ class AdversarialAttack:
                               trigger_mask=None,
                               target_label=0.0,
                               source_filter='all',
-                              edge_softness=0.2, 
+                              edge_softness=0.2,
+                              mask_l1_weight=0.0,
+                              patch_l2_weight=0.0,
+                              softness_alignment_weight=0.0,
                               how_to_attach='blend'):
         self.model.eval()
         losses = []
+        attack_losses = []
         total = 0
+
+        patch_reg = 0.0
+        mask_reg = 0.0
+        softness_reg = 0.0
+        if trigger_patch is not None:
+            patch_tensor = trigger_patch.to(device=self.device, dtype=torch.float32)
+            patch_reg = float(patch_l2_weight) * float(torch.mean(patch_tensor ** 2).item())
+
+            if trigger_mask is not None:
+                mask_tensor = trigger_mask.to(device=self.device, dtype=patch_tensor.dtype)
+                if patch_tensor.dim() == 3:
+                    _, patch_height, patch_width = patch_tensor.shape
+                elif patch_tensor.dim() == 4:
+                    _, _, patch_height, patch_width = patch_tensor.shape
+                else:
+                    raise ValueError('trigger_patch must be CHW or NCHW tensor-like.')
+                channels = int(mask_tensor.shape[-3])
+                base_mask = self._build_blend_mask(
+                    height=int(patch_height),
+                    width=int(patch_width),
+                    channels=channels,
+                    device=self.device,
+                    dtype=mask_tensor.dtype,
+                    edge_softness=edge_softness,
+                )
+                if mask_tensor.dim() == 4:
+                    base_mask = base_mask.expand(mask_tensor.shape[0], -1, -1, -1)
+                mask_growth = torch.relu(mask_tensor - base_mask)
+                mask_reg = float(mask_l1_weight) * float(torch.mean(mask_growth).item())
+                softness_reg = float(softness_alignment_weight) * float(
+                    torch.mean((mask_tensor - base_mask) ** 2).item()
+                )
+
+        regularization_loss = patch_reg + mask_reg + softness_reg
 
         with torch.no_grad():
             for inputs, targets in data_loader:
@@ -1080,13 +1131,20 @@ class AdversarialAttack:
                 )
                 outputs = self.model(poisoned_inputs)
                 target_tensor = torch.full_like(outputs, float(target_label))
-                loss = self.cost_function(outputs, target_tensor)
+                attack_loss = self.cost_function(outputs, target_tensor)
+                loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(outputs.shape[0])
-                losses.append(float(loss.item()) * batch_size)
+                losses.append(loss * batch_size)
+                attack_losses.append(float(attack_loss.item()) * batch_size)
                 total += batch_size
 
+        attack_loss = (sum(attack_losses) / total) if total else float('inf')
         return {
             'loss': (sum(losses) / total) if total else float('inf'),
+            'attack_loss': attack_loss,
+            'patch_regularization_loss': patch_reg,
+            'mask_regularization_loss': mask_reg,
+            'softness_alignment_loss': softness_reg,
             'samples_evaluated': total,
             'target_label': float(target_label),
             'trigger_box': trigger_box,
