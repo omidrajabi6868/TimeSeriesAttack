@@ -1,10 +1,9 @@
-from pathlib import Path
 from typing import Optional, Sequence
 
 import torch
-from PIL import Image, ImageDraw
 from .InputPurification import FeatureDistillation
 from .DiffusionPurification import DiffusionPurifier
+from .defense_visualization import trigger_coverage_ratio
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
 class Defender:
@@ -228,7 +227,7 @@ class Defender:
             if save_examples_dir is not None and max_saved_examples > 0:
                 successful_mask = (poisoned_preds == target_label) & (fd_poisoned_preds != target_label)
                 unsuccessful_mask = (poisoned_preds == target_label) & (fd_poisoned_preds == target_label)
-                self._collect_fd_examples(
+                FeatureDistillation.collect_examples(
                     successful_defense_examples,
                     successful_mask,
                     max_saved_examples,
@@ -244,7 +243,7 @@ class Defender:
                     defended=True,
                 )
                 if len(successful_defense_examples) < max_saved_examples:
-                    self._collect_fd_examples(
+                    FeatureDistillation.collect_examples(
                         unsuccessful_defense_examples,
                         unsuccessful_mask,
                         max_saved_examples,
@@ -268,7 +267,7 @@ class Defender:
             if not examples_to_save:
                 examples_to_save = unsuccessful_defense_examples[:max_saved_examples]
                 example_source = 'unsuccessful_defenses'
-            saved_example_info = self._save_fd_examples(
+            saved_example_info = FeatureDistillation.save_examples(
                 examples_to_save,
                 save_examples_dir,
                 example_source,
@@ -332,7 +331,7 @@ class Defender:
             'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
-            'trigger_coverage_ratio': self._trigger_coverage_ratio(
+            'trigger_coverage_ratio': trigger_coverage_ratio(
                 learned_trigger['trigger_boxes'],
                 image_height=self.dataset.image_size[1] if getattr(self.dataset, 'image_size', None) else None,
                 image_width=self.dataset.image_size[0] if getattr(self.dataset, 'image_size', None) else None,
@@ -489,7 +488,7 @@ class Defender:
             if save_examples_dir is not None and max_saved_examples > 0:
                 successful_mask = (poisoned_preds == target_label) & (dp_poisoned_preds != target_label)
                 unsuccessful_mask = (poisoned_preds == target_label) & (dp_poisoned_preds == target_label)
-                self._collect_dp_examples(
+                DiffusionPurifier.collect_examples(
                     successful_defense_examples,
                     successful_mask,
                     max_saved_examples,
@@ -505,7 +504,7 @@ class Defender:
                     defended=True,
                 )
                 if len(successful_defense_examples) < max_saved_examples:
-                    self._collect_dp_examples(
+                    DiffusionPurifier.collect_examples(
                         unsuccessful_defense_examples,
                         unsuccessful_mask,
                         max_saved_examples,
@@ -529,7 +528,7 @@ class Defender:
             if not examples_to_save:
                 examples_to_save = unsuccessful_defense_examples[:max_saved_examples]
                 example_source = 'unsuccessful_defenses'
-            saved_example_info = self._save_dp_examples(
+            saved_example_info = DiffusionPurifier.save_examples(
                 examples_to_save,
                 save_examples_dir,
                 example_source,
@@ -565,165 +564,10 @@ class Defender:
             'stochastic_reverse_process': bool(stochastic),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
-            'trigger_coverage_ratio': self._trigger_coverage_ratio(
+            'trigger_coverage_ratio': trigger_coverage_ratio(
                 learned_trigger['trigger_boxes'],
                 image_height=self.dataset.image_size[1] if getattr(self.dataset, 'image_size', None) else None,
                 image_width=self.dataset.image_size[0] if getattr(self.dataset, 'image_size', None) else None,
             ),
             'saved_diffusion_purification_examples': saved_example_info,
         }
-
-    @staticmethod
-    def _collect_dp_examples(example_list, selection_mask, max_examples, clean_inputs,
-                             dp_clean_inputs, poisoned_inputs, dp_poisoned_inputs,
-                             targets, clean_preds, dp_clean_preds,
-                             poisoned_preds, dp_poisoned_preds, defended):
-        if len(example_list) >= max_examples:
-            return
-        for idx in torch.where(selection_mask.cpu())[0].tolist():
-            if len(example_list) >= max_examples:
-                break
-            example_list.append({
-                'clean': clean_inputs[idx],
-                'clean_dp': dp_clean_inputs[idx],
-                'adversarial': poisoned_inputs[idx],
-                'adversarial_dp': dp_poisoned_inputs[idx],
-                'target': float(targets.view(-1)[idx].item()),
-                'clean_pred': float(clean_preds.view(-1)[idx].item()),
-                'clean_dp_pred': float(dp_clean_preds.view(-1)[idx].item()),
-                'adversarial_pred': float(poisoned_preds.view(-1)[idx].item()),
-                'adversarial_dp_pred': float(dp_poisoned_preds.view(-1)[idx].item()),
-                'defended': bool(defended),
-            })
-
-    @staticmethod
-    def _save_dp_examples(examples, output_dir, example_source):
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        saved_paths = []
-        for idx, example in enumerate(examples, start=1):
-            save_path = output_path / f'diffusion_purification_{example_source}_{idx:02d}.png'
-            Defender._save_dp_comparison(example, save_path)
-            saved_paths.append(str(save_path))
-        return {
-            'output_dir': str(output_path),
-            'selection': example_source,
-            'saved_images': len(saved_paths),
-            'paths': saved_paths,
-        }
-
-    @staticmethod
-    def _save_dp_comparison(example, save_path):
-        panels = [
-            ('Clean', example['clean'], example['clean_pred']),
-            ('Clean + DP', example['clean_dp'], example['clean_dp_pred']),
-            ('|Clean DP diff| x5', Defender._difference_image(example['clean'], example['clean_dp'], scale=5.0), None),
-            ('Adversarial', example['adversarial'], example['adversarial_pred']),
-            ('Adversarial + DP', example['adversarial_dp'], example['adversarial_dp_pred']),
-            ('|Adv DP diff| x5', Defender._difference_image(example['adversarial'], example['adversarial_dp'], scale=5.0), None),
-        ]
-        images = [Defender._tensor_to_pil_image(tensor) for _, tensor, _ in panels]
-        widths, heights = zip(*(image.size for image in images))
-        label_height = 42
-        canvas = Image.new('RGB', (sum(widths), max(heights) + label_height), color='white')
-        draw = ImageDraw.Draw(canvas)
-        x_offset = 0
-        for (title, _, pred), image in zip(panels, images):
-            canvas.paste(image, (x_offset, label_height))
-            pred_text = '' if pred is None else f'\ntrue={example["target"]:.0f}, pred={pred:.0f}'
-            draw.text(
-                (x_offset + 4, 4),
-                f'{title}{pred_text}',
-                fill='black',
-            )
-            x_offset += image.size[0]
-        canvas.save(save_path)
-
-    @staticmethod
-    def _collect_fd_examples(example_list, selection_mask, max_examples, clean_inputs,
-                             fd_clean_inputs, poisoned_inputs, fd_poisoned_inputs,
-                             targets, clean_preds, fd_clean_preds,
-                             poisoned_preds, fd_poisoned_preds, defended):
-        if len(example_list) >= max_examples:
-            return
-        for idx in torch.where(selection_mask.cpu())[0].tolist():
-            if len(example_list) >= max_examples:
-                break
-            example_list.append({
-                'clean': clean_inputs[idx],
-                'clean_fd': fd_clean_inputs[idx],
-                'adversarial': poisoned_inputs[idx],
-                'adversarial_fd': fd_poisoned_inputs[idx],
-                'target': float(targets.view(-1)[idx].item()),
-                'clean_pred': float(clean_preds.view(-1)[idx].item()),
-                'clean_fd_pred': float(fd_clean_preds.view(-1)[idx].item()),
-                'adversarial_pred': float(poisoned_preds.view(-1)[idx].item()),
-                'adversarial_fd_pred': float(fd_poisoned_preds.view(-1)[idx].item()),
-                'defended': bool(defended),
-            })
-
-    @staticmethod
-    def _save_fd_examples(examples, output_dir, example_source):
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        saved_paths = []
-        for idx, example in enumerate(examples, start=1):
-            save_path = output_path / f'feature_distillation_{example_source}_{idx:02d}.png'
-            Defender._save_fd_comparison(example, save_path)
-            saved_paths.append(str(save_path))
-        return {
-            'output_dir': str(output_path),
-            'selection': example_source,
-            'saved_images': len(saved_paths),
-            'paths': saved_paths,
-        }
-
-    @staticmethod
-    def _save_fd_comparison(example, save_path):
-        panels = [
-            ('Clean', example['clean'], example['clean_pred']),
-            ('Clean + FD', example['clean_fd'], example['clean_fd_pred']),
-            ('|Clean FD diff| x5', Defender._difference_image(example['clean'], example['clean_fd'], scale=5.0), None),
-            ('Adversarial', example['adversarial'], example['adversarial_pred']),
-            ('Adversarial + FD', example['adversarial_fd'], example['adversarial_fd_pred']),
-            ('|Adv FD diff| x5', Defender._difference_image(example['adversarial'], example['adversarial_fd'], scale=5.0), None),
-        ]
-        images = [Defender._tensor_to_pil_image(tensor) for _, tensor, _ in panels]
-        widths, heights = zip(*(image.size for image in images))
-        label_height = 42
-        canvas = Image.new('RGB', (sum(widths), max(heights) + label_height), color='white')
-        draw = ImageDraw.Draw(canvas)
-        x_offset = 0
-        for (title, _, pred), image in zip(panels, images):
-            canvas.paste(image, (x_offset, label_height))
-            pred_text = '' if pred is None else f'\ntrue={example["target"]:.0f}, pred={pred:.0f}'
-            draw.text(
-                (x_offset + 4, 4),
-                f'{title}{pred_text}',
-                fill='black',
-            )
-            x_offset += image.size[0]
-        canvas.save(save_path)
-
-    @staticmethod
-    def _tensor_to_pil_image(image_tensor):
-        image_uint8 = image_tensor.detach().cpu().clamp(0.0, 1.0).mul(255.0).byte()
-        image_uint8 = image_uint8.permute(1, 2, 0).contiguous()
-        height, width = image_uint8.shape[:2]
-        return Image.frombytes('RGB', (width, height), bytes(image_uint8.view(-1).tolist()))
-
-    @staticmethod
-    def _difference_image(before, after, scale=5.0):
-        return (after.detach().cpu() - before.detach().cpu()).abs().mul(float(scale)).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _trigger_coverage_ratio(trigger_boxes, image_height=None, image_width=None):
-        if image_height is None or image_width is None:
-            return None
-        image_area = float(image_height * image_width)
-        if image_area <= 0:
-            return None
-        covered_area = 0.0
-        for box in AdversarialAttack._normalize_trigger_boxes(trigger_boxes):
-            covered_area += max(0, int(box['width'])) * max(0, int(box['height']))
-        return min(1.0, covered_area / image_area)

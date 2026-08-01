@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .defense_visualization import collect_defense_examples, difference_image, save_defense_examples
+
 
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim: int):
@@ -236,3 +238,37 @@ class DiffusionPurifier(nn.Module):
         path = Path(checkpoint_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.checkpoint_dict(extra), path)
+
+    @staticmethod
+    def collect_examples(example_list, selection_mask, max_examples, clean_inputs,
+                         dp_clean_inputs, poisoned_inputs, dp_poisoned_inputs,
+                         targets, clean_preds, dp_clean_preds,
+                         poisoned_preds, dp_poisoned_preds, defended):
+        collect_defense_examples(
+            example_list, selection_mask, max_examples, clean_inputs,
+            dp_clean_inputs, poisoned_inputs, dp_poisoned_inputs,
+            targets, clean_preds, dp_clean_preds, poisoned_preds, dp_poisoned_preds,
+            defended, 'clean_dp', 'adversarial_dp', 'clean_dp_pred',
+            'adversarial_dp_pred',
+        )
+
+    @staticmethod
+    def save_examples(examples, output_dir, example_source):
+        return save_defense_examples(
+            examples,
+            output_dir,
+            example_source,
+            'diffusion_purification',
+            DiffusionPurifier._comparison_panels,
+        )
+
+    @staticmethod
+    def _comparison_panels(example):
+        return [
+            ('Clean', example['clean'], example['clean_pred']),
+            ('Clean + DP', example['clean_dp'], example['clean_dp_pred']),
+            ('|Clean DP diff| x5', difference_image(example['clean'], example['clean_dp'], scale=5.0), None),
+            ('Adversarial', example['adversarial'], example['adversarial_pred']),
+            ('Adversarial + DP', example['adversarial_dp'], example['adversarial_dp_pred']),
+            ('|Adv DP diff| x5', difference_image(example['adversarial'], example['adversarial_dp'], scale=5.0), None),
+        ]

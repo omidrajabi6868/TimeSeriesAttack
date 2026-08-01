@@ -3,7 +3,12 @@ import math
 import torch
 import torch.nn.functional as F
 
-from .DiffusionPurification import DiffusionPurifier
+from .defense_visualization import (
+    collect_defense_examples,
+    difference_image,
+    save_defense_examples,
+    trigger_coverage_ratio,
+)
 
 
 class FeatureDistillation(torch.nn.Module):
@@ -201,3 +206,39 @@ class FeatureDistillation(torch.nn.Module):
             [49, 64, 78, 87, 103, 121, 120, 101],
             [72, 92, 95, 98, 112, 100, 103, 99],
         ], dtype=torch.float32)
+
+    @staticmethod
+    def collect_examples(example_list, selection_mask, max_examples, clean_inputs,
+                         fd_clean_inputs, poisoned_inputs, fd_poisoned_inputs,
+                         targets, clean_preds, fd_clean_preds,
+                         poisoned_preds, fd_poisoned_preds, defended):
+        collect_defense_examples(
+            example_list, selection_mask, max_examples, clean_inputs,
+            fd_clean_inputs, poisoned_inputs, fd_poisoned_inputs,
+            targets, clean_preds, fd_clean_preds, poisoned_preds, fd_poisoned_preds,
+            defended, 'clean_fd', 'adversarial_fd', 'clean_fd_pred',
+            'adversarial_fd_pred',
+        )
+
+    @staticmethod
+    def save_examples(examples, output_dir, example_source):
+        return save_defense_examples(
+            examples,
+            output_dir,
+            example_source,
+            'feature_distillation',
+            FeatureDistillation._comparison_panels,
+        )
+
+    @staticmethod
+    def _comparison_panels(example):
+        return [
+            ('Clean', example['clean'], example['clean_pred']),
+            ('Clean + FD', example['clean_fd'], example['clean_fd_pred']),
+            ('|Clean FD diff| x5', difference_image(example['clean'], example['clean_fd'], scale=5.0), None),
+            ('Adversarial', example['adversarial'], example['adversarial_pred']),
+            ('Adversarial + FD', example['adversarial_fd'], example['adversarial_fd_pred']),
+            ('|Adv FD diff| x5', difference_image(example['adversarial'], example['adversarial_fd'], scale=5.0), None),
+        ]
+
+    trigger_coverage_ratio = staticmethod(trigger_coverage_ratio)
