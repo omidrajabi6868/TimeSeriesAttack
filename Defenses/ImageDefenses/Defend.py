@@ -1,8 +1,10 @@
 from typing import Optional, Sequence
 
+import torch.nn.functional as F
 import torch
 from .InputPurification import FeatureDistillation
 from .DiffusionPurification import DiffusionPurifier
+from .FeatureSqueezing import JointFeatureSqueezingDetector, BitDepthReduction, MedianSmoothing, NonLocalMeansSmoothing
 from .defense_visualization import trigger_coverage_ratio
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
@@ -339,7 +341,6 @@ class Defender:
             'saved_feature_distillation_examples': saved_example_info,
         }
 
-
     def diffusion_purification(self,
                             trigger_path,
                             diffusion_checkpoint_path,
@@ -571,3 +572,85 @@ class Defender:
             ),
             'saved_diffusion_purification_examples': saved_example_info,
         }
+
+    def feature_squeezing(self,
+                        trigger_path,
+                        source_filter='bad',
+                        how_to_attach='blend',
+                        sqz_threshold=0.08,
+                        save_examples_dir=None,
+                        max_saved_examples=5):
+
+        learned_trigger = AdversarialAttack.load_trigger(trigger_path)
+        target_label = float(learned_trigger['target_label'])
+
+        print("\n--- Initializing Detector & Running Evaluation ---")
+
+        squeezers = [
+            BitDepthReduction(bit_depth=1),
+            MedianSmoothing(kernel_size=2),
+            NonLocalMeansSmoothing()
+        ]
+        self.model.eval()
+        detector = JointFeatureSqueezingDetector(model=self.model, squeezers=squeezers, threshold=sqz_threshold).to(self.device)
+
+        detector.eval()
+
+        total_clean, false_positives = 0, 0
+        total_adv, true_positives = 0, 0
+
+        for inputs, targets in self.val_loader:
+            inputs = inputs.to(self.device)
+            targets = targets.float().to(self.device)
+            flat_targets = targets.view(-1)
+
+            if source_filter == 'bad':
+                source_mask = (flat_targets == 0)
+            elif source_filter == 'good':
+                source_mask = (flat_targets == 1)
+            else:
+                source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+
+            if source_mask.sum().item() == 0:
+                continue
+
+            source_inputs = inputs[source_mask]
+            source_targets = targets[source_mask]
+
+            with torch.no_grad():
+                out_clean = detector(source_inputs)
+            false_positives += out_clean["is_adversarial"].sum().item()
+            total_clean += source_inputs.size(0)
+
+            adv_images = AdversarialAttack._inject_trigger(
+                source_inputs.clone(),
+                learned_trigger['trigger_boxes'],
+                trigger_value=None,
+                trigger_patch=learned_trigger['patch'],
+                trigger_mask=learned_trigger['mask'],
+                edge_softness=learned_trigger['softness'],
+                how_to_attach=how_to_attach
+            )
+
+            # Only test detection on attacks that successfully fooled the model
+            with torch.no_grad():
+                adv_preds = (self.model(adv_images) > 0).float().view(-1)
+                successful_attacks = (adv_preds == target_label)
+
+            if successful_attacks.sum() > 0:
+                valid_adv_images = adv_images[successful_attacks]
+                out_adv = detector(valid_adv_images)
+                true_positives += out_adv["is_adversarial"].sum().item()
+                total_adv += valid_adv_images.size(0)
+        
+        # Calculate final percentages
+        fpr = (false_positives / total_clean) * 100.0
+        detection_rate = (true_positives / total_adv) * 100.0 if total_adv > 0 else 0.0
+
+        print("-" * 50)
+        print(f"Total Clean Test Samples Analyzed : {total_clean}")
+        print(f"Successful Adversarial Examples   : {total_adv}")
+        print("-" * 50)
+        print(f"False Positive Rate (FPR)         : {fpr:.2f}%  (Target: Low)")
+        print(f"Adversarial Detection Rate (TPR)  : {detection_rate:.2f}%  (Target: High)")
+        print("-" * 50)

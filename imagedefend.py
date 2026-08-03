@@ -3,7 +3,7 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'diffusion_purification'
+    defend_name = 'feature_squeezing'
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
@@ -50,7 +50,7 @@ def main():
     if defend_name == "diffusion_purification":
         print("Diffusion Purification")
         print(defender.diffusion_purification(
-                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger",
+                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
                 diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
                 source_filter='bad',
                 how_to_attach='blend',
@@ -62,6 +62,18 @@ def main():
                 max_saved_examples=5
             )
         )
+    
+    if defend_name == "feature_squeezing":
+        print('Feature Squeezing')
+        print(defender.feature_squeezing(trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
+                source_filter="bad",
+                how_to_attach="blend",
+                sqz_threshold=0.8,
+                save_examples_dir="backups/feature_squeezing",
+                max_saved_examples=5
+            )
+        )
+
 
 if __name__=='__main__':
     main()

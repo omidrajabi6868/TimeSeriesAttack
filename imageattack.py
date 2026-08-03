@@ -90,10 +90,10 @@ def main():
         patch_size = (608, 256)
         how_to_attach = 'blend'
         patch_attack = PatchAttck(patch_size =patch_size, model=classification.model)
-        steps = 500
-        learning_rate = 0.05
-        mask_learning_rate = 0.05
-        mask_l1_weight = 100
+        steps = 1000
+        learning_rate = 0.001
+        mask_learning_rate = 0.001
+        mask_l1_weight = 1000
         patch_l2_weight = 1000
         trigger_preview_dir=f'backups/{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
         print(trigger_preview_dir)
