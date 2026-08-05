@@ -188,6 +188,7 @@ class AdversarialAttack:
                                 patch_update_method='momentum_sign',
                                 momentum_decay=1.0,
                                 gradient_norm_epsilon=1e-12,
+                                epsilon=1.0,
                                 log_interval=1,
                                 trigger_preview_interval=10,
                                 trigger_preview_dir='backups/adversarial_trigger_previews',
@@ -301,6 +302,9 @@ class AdversarialAttack:
         alpha = float(learning_rate)
         mu = float(momentum_decay)
         grad_norm_epsilon = float(gradient_norm_epsilon)
+        epsilon = float(epsilon)
+        if epsilon < 0 or epsilon > 1:
+            raise ValueError('epsilon must be between 0 and 1 for normalized input-space perturbations.')
 
         current_softness = float(max(min_edge_softness, initial_edge_softness))
 
@@ -360,7 +364,7 @@ class AdversarialAttack:
             step_mask_reg_losses = []
             step_softness_reg_losses = []
             step_samples = 0
-            previous_patch = torch.tanh(trigger_delta).detach().clone()
+            previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
 
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
@@ -382,7 +386,7 @@ class AdversarialAttack:
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
                     if mask_logits is not None else None
                 )
-                bounded_trigger_patch = torch.tanh(trigger_delta)
+                bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
                 training_trigger_boxes = (
                     self._random_trigger_boxes(
                         batch_size=selected_inputs.shape[0],
@@ -479,7 +483,7 @@ class AdversarialAttack:
             step_patch_reg_loss = (sum(step_patch_reg_losses) / step_samples) if step_samples else 0.0
             step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
             step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
-            current_patch_for_metrics = torch.tanh(trigger_delta).detach()
+            current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
             current_mask_for_metrics = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
                 if mask_logits is not None else None
@@ -524,7 +528,7 @@ class AdversarialAttack:
                 train_metrics = self.evaluate_attack_success(
                     test_loader=data_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=torch.tanh(trigger_delta).detach(),
+                    trigger_patch=(epsilon * torch.tanh(trigger_delta)).detach(),
                     trigger_mask=(
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
                         if mask_logits is not None else None
@@ -538,7 +542,7 @@ class AdversarialAttack:
 
             if validation_loader is not None:
 
-                current_patch = torch.tanh(trigger_delta).detach()
+                current_patch = (epsilon * torch.tanh(trigger_delta)).detach()
                 current_mask = (
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
                     if mask_logits is not None else None
@@ -623,7 +627,7 @@ class AdversarialAttack:
                         )
                     )
                     if is_smaller_success or is_better_tie:
-                        smallest_success_patch = torch.tanh(trigger_delta).detach().cpu().clone()
+                        smallest_success_patch = (epsilon * torch.tanh(trigger_delta)).detach().cpu().clone()
                         smallest_success_mask = (
                             self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
                             if mask_logits is not None else None
@@ -701,12 +705,16 @@ class AdversarialAttack:
                             'compression_phase_active': bool(compression_phase_active),
                         })
                         resized_patch = torch.nn.functional.interpolate(
-                            torch.tanh(trigger_delta).detach(),
+                            (epsilon * torch.tanh(trigger_delta)).detach(),
                             size=(next_height, next_width),
                             mode='bilinear',
                             align_corners=False,
                         )
-                        trigger_delta = torch.atanh(torch.clamp(resized_patch, -0.999999, 0.999999)).detach()
+                        if epsilon > 0:
+                            resized_unscaled_patch = resized_patch / epsilon
+                        else:
+                            resized_unscaled_patch = torch.zeros_like(resized_patch)
+                        trigger_delta = torch.atanh(torch.clamp(resized_unscaled_patch, -0.999999, 0.999999)).detach()
                         trigger_delta.requires_grad_()
                         width, height = next_width, next_height
                         print(
@@ -755,7 +763,7 @@ class AdversarialAttack:
                         size_step_count = 0
                         size_no_improve_steps = 0
                         best_size_asr = float('-inf')
-                        current_patch_for_metrics = torch.tanh(trigger_delta).detach()
+                        current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
                         current_mask_for_metrics = (
                             self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
                             if mask_logits is not None else None
@@ -832,7 +840,7 @@ class AdversarialAttack:
             selected_step = best_step
             selection = 'best_validation_loss'
         else:
-            learned_patch = torch.tanh(trigger_delta).detach().cpu()
+            learned_patch = (epsilon * torch.tanh(trigger_delta)).detach().cpu()
             learned_mask = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
                 if mask_logits is not None else None
@@ -849,6 +857,7 @@ class AdversarialAttack:
             'target_label': float(target_label),
             'source_filter': source_filter,
             'patch_update_method': patch_update_method,
+            'epsilon': float(epsilon),
             'softness': {
                 'initial_edge_softness': float(initial_edge_softness),
                 'final_edge_softness': float(current_softness),
