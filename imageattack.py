@@ -85,7 +85,6 @@ def main():
                                                     how_to_attach=how_to_attach,
                                                     patch_count=patch_count,
                                                     patch_update_method=patch_update_method,
-                                                    gradient_norm_epsilon=1,
                                                     epsilon=epsilon)
             else:
                 learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')

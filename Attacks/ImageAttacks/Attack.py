@@ -73,7 +73,6 @@ class Attck(AdversarialAttack):
             patch_l2_weight=patch_l2_weight,
             softness_alignment_weight=1,
             patch_update_method=patch_update_method,
-            gradient_norm_epsilon=gradient_norm_epsilon,
             epsilon=epsilon,
             log_interval=1,
             trigger_preview_interval=10,
