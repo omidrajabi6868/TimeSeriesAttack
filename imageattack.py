@@ -58,8 +58,8 @@ def main():
         how_to_attach = 'blend'
         attack = Attck(patch_size=patch_size, model=classification.model)
         steps = 1000
-        learning_rate = 0.1
-        mask_learning_rate = 0.01
+        learning_rate = 0.05
+        mask_learning_rate = 0.001
         mask_l1_weight = 1e+4
         patch_l2_weight = 1e+4
         patch_update_method = "pgd_sign"
