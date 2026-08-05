@@ -95,7 +95,8 @@ def main():
             f'{learned_trigger["selection"]}, '
             f'step={learned_trigger["selected_step"]}, '
             f'best_val_loss={learned_trigger["best_validation_loss"]}, '
-            f'best_val_asr={learned_trigger["best_validation_asr"]}'
+            f'best_val_asr={learned_trigger["best_validation_asr"]}, '
+            f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
         )
         saved_trigger_path = attack.save_trigger(
             trigger=learned_trigger,

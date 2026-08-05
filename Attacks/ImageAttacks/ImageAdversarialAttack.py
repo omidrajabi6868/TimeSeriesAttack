@@ -91,6 +91,8 @@ class AdversarialAttack:
                 'target_label': float(trigger.get('target_label', 0.0)),
                 'source_filter': trigger.get('source_filter', 'bad'),
                 'epsilon': float(trigger.get('epsilon', 0.0)),
+                'effective_epsilon': float(trigger.get('effective_epsilon', trigger.get('epsilon', 0.0))),
+                'patch_norms': trigger.get('patch_norms', {}),
                 'softness': trigger.get('softness', {}),
                 'progressive_resize': trigger.get('progressive_resize', {}),
                 'patch_update_method': trigger.get('patch_update_method'),
@@ -150,6 +152,8 @@ class AdversarialAttack:
             'target_label': float(trigger_payload.get('target_label', 0.0)),
             'source_filter': trigger_payload.get('source_filter', 'bad'),
             'epsilon': float(trigger_payload.get('epsilon', 0.0)),
+            'effective_epsilon': float(trigger_payload.get('effective_epsilon', trigger_payload.get('epsilon', 0.0))),
+            'patch_norms': trigger_payload.get('patch_norms', {}),
             'softness': trigger_payload.get('softness', {}),
             'progressive_resize': trigger_payload.get('progressive_resize', {}),
             'patch_update_method': trigger_payload.get('patch_update_method'),
@@ -496,11 +500,17 @@ class AdversarialAttack:
                 mask_l2_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=2).item())
                 mask_linf_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=float('inf')).item())
                 mask_mean = float(current_mask_for_metrics.mean().item())
+                effective_patch_for_metrics = current_patch_for_metrics * current_mask_for_metrics
             else:
                 mask_l1_norm = 0.0
                 mask_l2_norm = 0.0
                 mask_linf_norm = 0.0
                 mask_mean = 0.0
+                effective_patch_for_metrics = current_patch_for_metrics
+            effective_patch_linf_norm = float(torch.norm(
+                effective_patch_for_metrics.reshape(-1),
+                p=float('inf'),
+            ).item())
             step_history = {
                 'step': step_idx + 1,
                 'loss': step_loss,
@@ -513,6 +523,8 @@ class AdversarialAttack:
                 'patch_l1_norm': patch_l1_norm,
                 'patch_l2_norm': patch_l2_norm,
                 'patch_linf_norm': patch_linf_norm,
+                'effective_patch_linf_norm': effective_patch_linf_norm,
+                'inferred_epsilon': effective_patch_linf_norm,
                 'mask_l1_norm': mask_l1_norm,
                 'mask_l2_norm': mask_l2_norm,
                 'mask_linf_norm': mask_linf_norm,
@@ -840,6 +852,15 @@ class AdversarialAttack:
             selected_step = steps
             selection = 'last_step'
 
+        learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
+        learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
+        learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        learned_effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        learned_effective_epsilon = float(torch.norm(
+            learned_effective_patch.reshape(-1),
+            p=float('inf'),
+        ).item())
+
         return {
             'patch': learned_patch,
             'mask': learned_mask,
@@ -849,6 +870,14 @@ class AdversarialAttack:
             'target_label': float(target_label),
             'source_filter': source_filter,
             'patch_update_method': patch_update_method,
+            'epsilon': learned_patch_linf_norm,
+            'effective_epsilon': learned_effective_epsilon,
+            'patch_norms': {
+                'l1': learned_patch_l1_norm,
+                'l2': learned_patch_l2_norm,
+                'linf': learned_patch_linf_norm,
+                'effective_linf': learned_effective_epsilon,
+            },
             'softness': {
                 'initial_edge_softness': float(initial_edge_softness),
                 'final_edge_softness': float(current_softness),
