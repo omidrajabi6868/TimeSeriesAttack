@@ -1322,6 +1322,26 @@ class AdversarialAttack:
         return torch.clamp(base_mask + (1.0 - base_mask) * gain, 0.0, 1.0)
 
     @staticmethod
+    def _boxes_overlap(box_a, box_b):
+        ax1, ay1 = int(box_a['x']), int(box_a['y'])
+        ax2, ay2 = ax1 + int(box_a['width']), ay1 + int(box_a['height'])
+        bx1, by1 = int(box_b['x']), int(box_b['y'])
+        bx2, by2 = bx1 + int(box_b['width']), by1 + int(box_b['height'])
+        return (ax1 < bx2) and (ax2 > bx1) and (ay1 < by2) and (ay2 > by1)
+
+    @staticmethod
+    def _select_non_overlapping_boxes(candidates, max_count):
+        selected = []
+        for candidate in candidates:
+            overlaps_existing = any(self._boxes_overlap(candidate, chosen) for chosen in selected)
+            if overlaps_existing:
+                continue
+            selected.append(candidate)
+            if len(selected) >= max_count:
+                break
+        return selected
+        
+    @staticmethod
     def _inject_trigger(
         inputs,
         trigger_box,
@@ -1463,3 +1483,4 @@ class AdversarialAttack:
 
             poisoned_inputs[:, :, y:y + height, x:x + width] = blended_region
         return poisoned_inputs
+

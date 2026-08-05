@@ -68,7 +68,7 @@ def main():
         print(defender.feature_squeezing(trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
                 source_filter="bad",
                 how_to_attach="blend",
-                sqz_threshold=0.8,
+                sqz_threshold=0.08,
                 save_examples_dir="backups/feature_squeezing",
                 max_saved_examples=5
             )
