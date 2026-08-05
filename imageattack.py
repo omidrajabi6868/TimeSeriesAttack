@@ -10,16 +10,8 @@ from Network.ImageVAE import ImageVAE
 
 
 def main():
-    task = 'gradient_based_white_box_attack'
+    task = 'learn_fixed_size_patch_no_mask_optimization'
     training = True
-    mask_optimization = True
-    # train_adversarial_patch = True
-    # adversarial_patch_count = 1
-
-    # train_backdoor_model = False
-    # train_vae_model = False
-
-    # backdoor_checkpoint_path = 'backups/backdoor_checkpoints/best_backdoor_checkpoint.pth'
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
@@ -52,83 +44,82 @@ def main():
     #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
     # )
 
-    if task == 'gradient_based_white_box_attack':
-        patch_count = 1
-        patch_size = (608, 256)
-        how_to_attach = 'blend'
-        attack = Attck(patch_size=patch_size, model=classification.model)
-        steps = 1000
-        learning_rate = 0.05
-        mask_learning_rate = 0.001
-        mask_l1_weight = 1e+4
-        patch_l2_weight = 1e+4
-        patch_update_method = "pgd_sign"
-        epsilon = 1.0
-        trigger_preview_dir=f'backups/{patch_update_method}_{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
-        print(trigger_preview_dir)
+    patch_count = 1
+    patch_size = (608, 256)
+    how_to_attach = 'blend'
+    attack = Attck(patch_size=patch_size, model=classification.model)
+    steps = 1000
+    learning_rate = 0.05
+    optimize_mask = False
+    mask_learning_rate = 0.001
+    mask_l1_weight = 0
+    patch_l2_weight = 0
+    patch_update_method = "adam"
+    epsilon = 0.03
+    trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
+    print(trigger_preview_dir)
 
-        if mask_optimization:
-            if training:
-                learned_trigger = attack.learn_fixed_size_patch_with_mask_optimization(dataset=dataset,
-                                                    data_loader=train_loader,
-                                                    val_loader=val_loader,
-                                                    target_label=1,
-                                                    source_filter='bad',
-                                                    steps=steps,
-                                                    learning_rate=learning_rate,
-                                                    mask_learning_rate=mask_learning_rate,
-                                                    mask_l1_weight=mask_l1_weight,
-                                                    patch_l2_weight=patch_l2_weight,
-                                                    trigger_preview_dir=trigger_preview_dir,
-                                                    trigger_preview_loader=test_loader,
-                                                    trigger_preview_max_images=1,
-                                                    how_to_attach=how_to_attach,
-                                                    patch_count=patch_count,
-                                                    patch_update_method=patch_update_method,
-                                                    epsilon=epsilon)
-            else:
-                learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
-                print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
+    if training:
+        learned_trigger = attack.learn_fixed_size_patch(dataset=dataset,
+                                            data_loader=train_loader,
+                                            val_loader=val_loader,
+                                            target_label=1,
+                                            source_filter='bad',
+                                            steps=steps,
+                                            learning_rate=learning_rate,
+                                            mask_learning_rate=mask_learning_rate,
+                                            optimize_mask=optimize_mask,
+                                            mask_l1_weight=mask_l1_weight,
+                                            patch_l2_weight=patch_l2_weight,
+                                            trigger_preview_dir=trigger_preview_dir,
+                                            trigger_preview_loader=test_loader,
+                                            trigger_preview_max_images=1,
+                                            how_to_attach=how_to_attach,
+                                            patch_count=patch_count,
+                                            patch_update_method=patch_update_method,
+                                            epsilon=epsilon)
+    else:
+        learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
+        print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
 
+    print(
+        'adversarial_patch_selection: '
+        f'{learned_trigger["selection"]}, '
+        f'step={learned_trigger["selected_step"]}, '
+        f'best_val_loss={learned_trigger["best_validation_loss"]}, '
+        f'best_val_asr={learned_trigger["best_validation_asr"]}, '
+        f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
+    )
+    saved_trigger_path = attack.save_trigger(
+        trigger=learned_trigger,
+        output_path=f'{trigger_preview_dir}/saved_trigger',
+    )
 
-        print(
-            'adversarial_patch_selection: '
-            f'{learned_trigger["selection"]}, '
-            f'step={learned_trigger["selected_step"]}, '
-            f'best_val_loss={learned_trigger["best_validation_loss"]}, '
-            f'best_val_asr={learned_trigger["best_validation_asr"]}, '
-            f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
-        )
-        saved_trigger_path = attack.save_trigger(
-            trigger=learned_trigger,
-            output_path=f'{trigger_preview_dir}/saved_trigger',
-        )
+    print(f'saved_adversarial_trigger: {saved_trigger_path}')
+    print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
 
-        print(f'saved_adversarial_trigger: {saved_trigger_path}')
-        print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
+    learned_adversarial_eval = attack.evaluate_attack_success(
+        test_loader=test_loader,
+        trigger_box=learned_trigger['trigger_boxes'],
+        trigger_patch=learned_trigger['patch'],
+        trigger_mask=learned_trigger.get('mask'),
+        target_label=1.0,
+        source_only_bad=True,
+        how_to_attach=how_to_attach
+    )
+    print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
 
-        learned_adversarial_eval = attack.evaluate_attack_success(
-            test_loader=test_loader,
-            trigger_box=learned_trigger['trigger_boxes'],
-            trigger_patch=learned_trigger['patch'],
-            trigger_mask=learned_trigger.get('mask'),
-            target_label=1.0,
-            source_only_bad=True,
-            how_to_attach=how_to_attach
-        )
-        print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
-
-        dataset.save_trigger_visualizations(
-            output_dir=f'{trigger_preview_dir}/trigger_visualization',
-            num_examples=20,
-            trigger_box=learned_trigger['trigger_boxes'],
-            trigger_delta=learned_trigger['patch'],
-            model=classification.model,
-            target_label=1.0,
-            source_filter='bad',
-            only_successful_poisoned=True,
-        )
-        print('Saved trigger visualizations to trigger_visualization/')
+    dataset.save_trigger_visualizations(
+        output_dir=f'{trigger_preview_dir}/trigger_visualization',
+        num_examples=20,
+        trigger_box=learned_trigger['trigger_boxes'],
+        trigger_delta=learned_trigger['patch'],
+        model=classification.model,
+        target_label=1.0,
+        source_filter='bad',
+        only_successful_poisoned=True,
+    )
+    print('Saved trigger visualizations to trigger_visualization/')
     
 
     # if task == 'backdoor_attack':
