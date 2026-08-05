@@ -63,7 +63,8 @@ def main():
         mask_l1_weight = 1e+4
         patch_l2_weight = 1e+4
         patch_update_method = "pgd_sign"
-        trigger_preview_dir=f'backups/{patch_update_method}_{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
+        epsilon = 1.0
+        trigger_preview_dir=f'backups/{patch_update_method}_{task}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
         print(trigger_preview_dir)
 
         if mask_optimization:
@@ -84,7 +85,8 @@ def main():
                                                     how_to_attach=how_to_attach,
                                                     patch_count=patch_count,
                                                     patch_update_method=patch_update_method,
-                                                    gradient_norm_epsilon=1)
+                                                    gradient_norm_epsilon=1,
+                                                    epsilon=epsilon)
             else:
                 learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
                 print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')

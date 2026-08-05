@@ -34,7 +34,8 @@ class Attck(AdversarialAttack):
                                                     how_to_attach,
                                                     patch_count, 
                                                     patch_update_method,
-                                                    gradient_norm_epsilon):
+                                                    gradient_norm_epsilon,
+                                                    epsilon=1.0):
        
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=self.patch_size,
@@ -73,6 +74,7 @@ class Attck(AdversarialAttack):
             softness_alignment_weight=1,
             patch_update_method=patch_update_method,
             gradient_norm_epsilon=gradient_norm_epsilon,
+            epsilon=epsilon,
             log_interval=1,
             trigger_preview_interval=10,
             trigger_preview_dir=trigger_preview_dir,
