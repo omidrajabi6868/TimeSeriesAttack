@@ -41,7 +41,7 @@ class AdversarialAttack:
     
     def _build_cost_function(self, name):
         if name == 'classification':
-            self.cost_function = ClassificatioObjective()
+            self.cost_function = ClassificationObjective()
         elif name == 'feature_base':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4)
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
@@ -298,7 +298,7 @@ class AdversarialAttack:
             patch_update_method = 'pgd_sign'
         elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
             patch_update_method = 'deepfool_uap'
-        elif patch_update_method in  ('gd_uap', 'gd'):
+        elif patch_update_method in ('gd_uap', 'gd'):
             patch_update_method = 'gd_uap'
 
         valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap'}
@@ -406,7 +406,7 @@ class AdversarialAttack:
 
         if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap'):
             self._build_cost_function('classification')
-        elif patch_update_method in ('gd_uap'):
+        elif patch_update_method == 'gd_uap':
             self._build_cost_function('feature_base')
 
         for step_idx in range(steps):
@@ -464,13 +464,17 @@ class AdversarialAttack:
                     edge_softness=current_softness,
                     how_to_attach=how_to_attach
                 )
-                if patch_update_method in ('gd_uap'):
+                if patch_update_method == 'gd_uap':
                     self.feature_extractor.clear()
 
-                outputs = self.model(poisoned_inputs)
-                target_tensor = torch.full_like(outputs, float(target_label))
+                model_outputs = self.model(poisoned_inputs)
+                objective_outputs = (
+                    self.feature_extractor.activations
+                    if patch_update_method == 'gd_uap' else model_outputs
+                )
+                target_tensor = torch.full_like(model_outputs, float(target_label))
 
-                attack_loss = self.cost_function(outputs=outputs, targets=target_tensor)
+                attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor)
 
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
 
@@ -508,6 +512,8 @@ class AdversarialAttack:
                         if patch_grad is not None:
                             if patch_update_method == 'pgd_sign':
                                 trigger_delta.add_(-alpha * patch_grad.sign())
+                            elif patch_update_method == 'gd_uap':
+                                trigger_delta.add_(-alpha * patch_grad)
                             elif patch_update_method == 'momentum_sign':
                                 grad_l1_norm = patch_grad.norm(p=1)
                                 if torch.isfinite(grad_l1_norm) and grad_l1_norm.item() > grad_norm_epsilon:
@@ -527,7 +533,7 @@ class AdversarialAttack:
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
 
-                batch_samples = int(outputs.shape[0])
+                batch_samples = int(model_outputs.shape[0])
                 step_losses.append(float(loss.item()) * batch_samples)
                 step_attack_losses.append(float(attack_loss.item()) * batch_samples)
                 step_patch_reg_losses.append(float(patch_reg.item()) * batch_samples)
@@ -1474,11 +1480,17 @@ class AdversarialAttack:
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach
                 )
-                outputs = self.model(poisoned_inputs)
-                target_tensor = torch.full_like(outputs, float(target_label))
-                attack_loss = self.cost_function(outputs, target_tensor)
+                if hasattr(self, 'feature_extractor'):
+                    self.feature_extractor.clear()
+                model_outputs = self.model(poisoned_inputs)
+                objective_outputs = (
+                    self.feature_extractor.activations
+                    if isinstance(self.cost_function, FeaturBaseObjective) else model_outputs
+                )
+                target_tensor = torch.full_like(model_outputs, float(target_label))
+                attack_loss = self.cost_function(objective_outputs, target_tensor)
                 loss = float(attack_loss.item()) + regularization_loss
-                batch_size = int(outputs.shape[0])
+                batch_size = int(model_outputs.shape[0])
                 losses.append(loss * batch_size)
                 attack_losses.append(float(attack_loss.item()) * batch_size)
                 total += batch_size
