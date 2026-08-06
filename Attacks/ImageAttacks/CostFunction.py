@@ -26,10 +26,17 @@ class FeaturBaseObjective(AdversarialObjective):
 
     def forward(self, outputs=None, targets=None):
         features = self.feature_extractor.activations
-        loss = 0.0
+        if not features:
+            raise RuntimeError(
+                'Feature-based objective did not receive any model activations. '
+                'Run the hooked model before computing this loss.'
+            )
+
+        loss = None
         for feat in features:
             norm = torch.norm(feat, p=2)
-            loss -= torch.log(norm + self.eps)
+            layer_loss = -torch.log(norm + self.eps)
+            loss = layer_loss if loss is None else loss + layer_loss
         return loss
 
 class FeatureExtractor:

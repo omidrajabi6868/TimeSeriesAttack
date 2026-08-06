@@ -41,7 +41,7 @@ class AdversarialAttack:
     
     def _build_cost_function(self, name):
         if name == 'classification':
-            self.cost_function = ClassificatioObjective()
+            self.cost_function = ClassificationObjective()
         elif name == 'feature_base':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4)
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
@@ -298,7 +298,7 @@ class AdversarialAttack:
             patch_update_method = 'pgd_sign'
         elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
             patch_update_method = 'deepfool_uap'
-        elif patch_update_method in  ('gd_uap', 'gd'):
+        elif patch_update_method in ('gd_uap', 'gd'):
             patch_update_method = 'gd_uap'
 
         valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap'}
@@ -406,7 +406,7 @@ class AdversarialAttack:
 
         if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap'):
             self._build_cost_function('classification')
-        elif patch_update_method in ('gd_uap'):
+        elif patch_update_method == 'gd_uap':
             self._build_cost_function('feature_base')
 
         for step_idx in range(steps):
@@ -464,7 +464,7 @@ class AdversarialAttack:
                     edge_softness=current_softness,
                     how_to_attach=how_to_attach
                 )
-                if patch_update_method in ('gd_uap'):
+                if patch_update_method == 'gd_uap':
                     self.feature_extractor.clear()
 
                 outputs = self.model(poisoned_inputs)
@@ -508,6 +508,8 @@ class AdversarialAttack:
                         if patch_grad is not None:
                             if patch_update_method == 'pgd_sign':
                                 trigger_delta.add_(-alpha * patch_grad.sign())
+                            elif patch_update_method == 'gd_uap':
+                                trigger_delta.add_(-alpha * patch_grad)
                             elif patch_update_method == 'momentum_sign':
                                 grad_l1_norm = patch_grad.norm(p=1)
                                 if torch.isfinite(grad_l1_norm) and grad_l1_norm.item() > grad_norm_epsilon:
@@ -1474,6 +1476,8 @@ class AdversarialAttack:
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach
                 )
+                if hasattr(self, 'feature_extractor'):
+                    self.feature_extractor.clear()
                 outputs = self.model(poisoned_inputs)
                 target_tensor = torch.full_like(outputs, float(target_label))
                 attack_loss = self.cost_function(outputs, target_tensor)
