@@ -467,10 +467,14 @@ class AdversarialAttack:
                 if patch_update_method == 'gd_uap':
                     self.feature_extractor.clear()
 
-                outputs = self.model(poisoned_inputs)
-                target_tensor = torch.full_like(outputs, float(target_label))
+                model_outputs = self.model(poisoned_inputs)
+                objective_outputs = (
+                    self.feature_extractor.activations
+                    if patch_update_method == 'gd_uap' else model_outputs
+                )
+                target_tensor = torch.full_like(model_outputs, float(target_label))
 
-                attack_loss = self.cost_function(outputs=outputs, targets=target_tensor)
+                attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor)
 
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
 
@@ -529,7 +533,7 @@ class AdversarialAttack:
                 if mask_optimizer is not None and mask_training_active:
                     mask_optimizer.step()
 
-                batch_samples = int(outputs.shape[0])
+                batch_samples = int(model_outputs.shape[0])
                 step_losses.append(float(loss.item()) * batch_samples)
                 step_attack_losses.append(float(attack_loss.item()) * batch_samples)
                 step_patch_reg_losses.append(float(patch_reg.item()) * batch_samples)
@@ -1478,11 +1482,15 @@ class AdversarialAttack:
                 )
                 if hasattr(self, 'feature_extractor'):
                     self.feature_extractor.clear()
-                outputs = self.model(poisoned_inputs)
-                target_tensor = torch.full_like(outputs, float(target_label))
-                attack_loss = self.cost_function(outputs, target_tensor)
+                model_outputs = self.model(poisoned_inputs)
+                objective_outputs = (
+                    self.feature_extractor.activations
+                    if isinstance(self.cost_function, FeaturBaseObjective) else model_outputs
+                )
+                target_tensor = torch.full_like(model_outputs, float(target_label))
+                attack_loss = self.cost_function(objective_outputs, target_tensor)
                 loss = float(attack_loss.item()) + regularization_loss
-                batch_size = int(outputs.shape[0])
+                batch_size = int(model_outputs.shape[0])
                 losses.append(loss * batch_size)
                 attack_losses.append(float(attack_loss.item()) * batch_size)
                 total += batch_size

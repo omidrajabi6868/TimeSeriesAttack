@@ -19,17 +19,21 @@ class ClassificationObjective(AdversarialObjective):
 
 
 class FeaturBaseObjective(AdversarialObjective):
-    def __init__(self, feature_extractor, eps=1e-8):
+    def __init__(self, feature_extractor=None, eps=1e-8):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.eps = eps
 
     def forward(self, outputs=None, targets=None):
-        features = self.feature_extractor.activations
+        features = outputs
+        if features is None and self.feature_extractor is not None:
+            features = self.feature_extractor.activations
+        if torch.is_tensor(features):
+            features = [features]
         if not features:
             raise RuntimeError(
                 'Feature-based objective did not receive any model activations. '
-                'Run the hooked model before computing this loss.'
+                'Pass hooked features as outputs or run the hooked model before computing this loss.'
             )
 
         loss = None
