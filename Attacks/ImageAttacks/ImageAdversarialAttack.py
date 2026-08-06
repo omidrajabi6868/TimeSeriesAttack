@@ -7,6 +7,7 @@ from PIL import Image
 from typing import Callable, Optional, Sequence
 from pathlib import Path
 from Network import ClassificationModels
+from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor
 
 
 class AdversarialAttack:
@@ -37,11 +38,15 @@ class AdversarialAttack:
             if len(self.gpu_ids) > 1:
                 print(f'Using DataParallel for adversarial attack on GPUs: {self.gpu_ids}')
                 self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
-        self._build_cost_function()
     
-    def _build_cost_function(self):
-        self.cost_function = torch.nn.BCEWithLogitsLoss()
-        return self.cost_function
+    def _build_cost_function(self, name):
+        if name == 'classification':
+            self.cost_function = ClassificatioObjective()
+        elif name == 'feature_base':
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4)
+            self.cost_function = FeaturBaseObjective(self.feature_extractor)
+        else:
+            assert name not in ['classification', 'feature_base'], "This cost is not defined."
 
     @staticmethod
     def _default_trigger_history_path(output_path):
@@ -293,8 +298,10 @@ class AdversarialAttack:
             patch_update_method = 'pgd_sign'
         elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
             patch_update_method = 'deepfool_uap'
+        elif patch_update_method in  ('gd_uap', 'gd'):
+            patch_update_method = 'gd_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -397,6 +404,11 @@ class AdversarialAttack:
         size_no_improve_steps = 0
         best_size_asr = float('-inf')
 
+        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap'):
+            self._build_cost_function('classification')
+        elif patch_update_method in ('gd_uap'):
+            self._build_cost_function('feature_base')
+
         for step_idx in range(steps):
             size_step_count += 1
             step_losses = []
@@ -452,10 +464,14 @@ class AdversarialAttack:
                     edge_softness=current_softness,
                     how_to_attach=how_to_attach
                 )
+                if patch_update_method in ('gd_uap'):
+                    self.feature_extractor.clear()
 
                 outputs = self.model(poisoned_inputs)
                 target_tensor = torch.full_like(outputs, float(target_label))
-                attack_loss = self.cost_function(outputs, target_tensor)
+
+                attack_loss = self.cost_function(outputs=outputs, targets=target_tensor)
+
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
 
                 if mask_logits is not None:
