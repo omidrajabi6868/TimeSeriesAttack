@@ -36,11 +36,22 @@ class FeaturBaseObjective(AdversarialObjective):
                 'Pass hooked features as outputs or run the hooked model before computing this loss.'
             )
 
-        loss = None
+        loss_device = None
+        if torch.is_tensor(targets):
+            loss_device = targets.device
+        else:
+            for feat in features:
+                if torch.is_tensor(feat):
+                    loss_device = feat.device
+                    break
+        if loss_device is None:
+            raise RuntimeError('Feature-based objective received no tensor activations.')
+
+        loss = torch.zeros((), device=loss_device)
         for feat in features:
             norm = torch.norm(feat, p=2)
-            layer_loss = -torch.log(norm + self.eps)
-            loss = layer_loss if loss is None else loss + layer_loss
+            layer_loss = -torch.log(norm + self.eps).to(loss_device)
+            loss = loss + layer_loss
         return loss
 
 class FeatureExtractor:
