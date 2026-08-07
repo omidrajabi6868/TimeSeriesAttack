@@ -55,14 +55,19 @@ class FeaturBaseObjective(AdversarialObjective):
         return loss
 
 class FeatureExtractor:
-    def __init__(self, model, n_last_layers=4):
+    def __init__(self, model, n_last_layers=4, layer_types=(nn.Conv2d,)):
         self.activations = []
         self.hooks = []
 
         layers = [
             m for m in model.modules()
-            if isinstance(m, (nn.Conv2d, nn.Linear))
+            if isinstance(m, layer_types)
         ]
+        if not layers:
+            layers = [
+                m for m in model.modules()
+                if isinstance(m, (nn.Conv2d, nn.Linear))
+            ]
 
         for layer in layers[-n_last_layers:]:
             self.hooks.append(
