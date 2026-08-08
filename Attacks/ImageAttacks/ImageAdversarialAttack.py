@@ -43,7 +43,7 @@ class AdversarialAttack:
         if name == 'classification':
             self.cost_function = ClassificationObjective()
         elif name == 'feature_base':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4)
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=10)
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         else:
             assert name not in ['classification', 'feature_base'], "This cost is not defined."

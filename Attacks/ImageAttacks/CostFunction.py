@@ -55,7 +55,7 @@ class FeaturBaseObjective(AdversarialObjective):
         return loss
 
 class FeatureExtractor:
-    def __init__(self, model, n_last_layers=4, layer_types=(nn.Conv2d,)):
+    def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,)):
         self.activations = []
         self.hooks = []
 
