@@ -35,7 +35,8 @@ class Attck(AdversarialAttack):
                             how_to_attach,
                             patch_count, 
                             patch_update_method,
-                            epsilon=1.0):
+                            epsilon,
+                            bandwidth):
 
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=self.patch_size,
@@ -82,4 +83,5 @@ class Attck(AdversarialAttack):
             progressive_resize=False,
             randomize_training_location=False,
             enable_compression_phase=False,
-            how_to_attach=how_to_attach)
+            how_to_attach=how_to_attach,
+            bandwidth=bandwidth)

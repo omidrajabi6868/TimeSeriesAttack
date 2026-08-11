@@ -9,6 +9,7 @@ from pathlib import Path
 from Network import ClassificationModels
 from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor
 from Network.UNet import ParameterRender
+from Attacks.ImageAttacks.Fourier import FourierFilter
 
 
 class AdversarialAttack:
@@ -216,7 +217,8 @@ class AdversarialAttack:
                                 resize_hysteresis=2.0,
                                 compression_asr_threshold=None,
                                 enable_compression_phase=True,
-                                how_to_attach='blend'):
+                                how_to_attach='blend',
+                                bandwidth=60):
         self.model.eval()
         progressive_resize_enabled = bool(progressive_resize)
 
@@ -303,8 +305,10 @@ class AdversarialAttack:
             patch_update_method = 'gd_uap'
         elif patch_update_method in ('gap_uap', 'gap'):
             patch_update_method = 'gap_uap'
+        elif patch_update_method in ('hp_uap', 'hp'):
+            patch_update_method = 'hp_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -351,8 +355,10 @@ class AdversarialAttack:
             )
 
         patch_optimizer = None
-        if patch_update_method == 'adam':
+        if patch_update_method in ('adam', 'hp_uap'):
             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+            if patch_update_method == 'hp_uap':
+                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
         
         if patch_update_method == 'gap_uap':
             generator = ParameterRender().to(self.device)
@@ -411,7 +417,7 @@ class AdversarialAttack:
         size_no_improve_steps = 0
         best_size_asr = float('-inf')
 
-        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap'):
+        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap', 'hp_uap'):
             self._build_cost_function('classification')
         elif patch_update_method == 'gd_uap':
             self._build_cost_function('feature_base')
@@ -449,6 +455,8 @@ class AdversarialAttack:
                 if patch_update_method == 'gap_uap':
                     generator.train()
                     bounded_trigger_patch =  epsilon * torch.tanh(generator(trigger_delta))
+                elif patch_update_method == 'hp_uap':
+                    bounded_trigger_patch = epsilon * torch.tanh(hp_filtering(trigger_delta))
                 else:
                     bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
 
@@ -516,7 +524,7 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
 
-                if patch_update_method in ('adam', 'gap_uap'):
+                if patch_update_method in ('adam', 'gap_uap', 'hp_uap'):
                     patch_optimizer.step()
                 else:
                     with torch.no_grad():
@@ -558,7 +566,13 @@ class AdversarialAttack:
             step_patch_reg_loss = (sum(step_patch_reg_losses) / step_samples) if step_samples else 0.0
             step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
             step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
-            current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
+            if patch_update_method == 'gap_uap':
+                current_patch_for_metrics = (epsilon * torch.tanh(generator(trigger_delta))).detach()
+            elif patch_update_method == 'hp_uap':
+                current_patch_for_metrics = (epsilon * torch.tanh(hp_filtering(trigger_delta))).detach()
+            else:
+                current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
+
             current_mask_for_metrics = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
                 if mask_logits is not None else None
@@ -611,7 +625,7 @@ class AdversarialAttack:
                 train_metrics = self.evaluate_attack_success(
                     test_loader=data_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=(epsilon * torch.tanh(trigger_delta)).detach(),
+                    trigger_patch=current_patch_for_metrics,
                     trigger_mask=(
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
                         if mask_logits is not None else None
@@ -625,10 +639,7 @@ class AdversarialAttack:
             with torch.no_grad():
                 if validation_loader is not None:
 
-                    if patch_update_method == 'gap_uap':
-                        current_patch = (epsilon * generator(trigger_delta)).detach()
-                    else:
-                        current_patch = (epsilon * torch.tanh(trigger_delta)).detach()
+                    current_patch = current_patch_for_metrics
 
                     current_mask = (
                         self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
@@ -792,7 +803,7 @@ class AdversarialAttack:
                                 'compression_phase_active': bool(compression_phase_active),
                             })
                             resized_patch = torch.nn.functional.interpolate(
-                                (epsilon * torch.tanh(trigger_delta)).detach(),
+                                current_patch_for_metrics,
                                 size=(next_height, next_width),
                                 mode='bilinear',
                                 align_corners=False,
@@ -850,7 +861,6 @@ class AdversarialAttack:
                             size_step_count = 0
                             size_no_improve_steps = 0
                             best_size_asr = float('-inf')
-                            current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
                             current_mask_for_metrics = (
                                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
                                 if mask_logits is not None else None
@@ -927,7 +937,7 @@ class AdversarialAttack:
             selected_step = best_step
             selection = 'best_validation_loss'
         else:
-            learned_patch = (epsilon * torch.tanh(trigger_delta)).detach().cpu()
+            learned_patch = current_patch_for_metrics.cpu()
             learned_mask = (
                 self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
                 if mask_logits is not None else None

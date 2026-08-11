@@ -49,13 +49,14 @@ def main():
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
     steps = 100
-    learning_rate = 0.1
+    learning_rate = 0.05
     optimize_mask = False
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
-    patch_update_method = "gd_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap']
-    epsilon = 0.1
+    patch_update_method = "hp_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap']
+    epsilon = 0.03
+    bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)
 
@@ -77,7 +78,8 @@ def main():
                                             how_to_attach=how_to_attach,
                                             patch_count=patch_count,
                                             patch_update_method=patch_update_method,
-                                            epsilon=epsilon)
+                                            epsilon=epsilon,
+                                            bandwidth=bandwidth)
     else:
         learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
         print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
