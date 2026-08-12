@@ -51,14 +51,20 @@ class FeaturBaseObjective(AdversarialObjective):
         if targets is not None:
             loss = torch.zeros((), device=loss_device)
             for adv_feat, clean_feat in zip(adv_features, targets):
+                if not torch.is_tensor(adv_feat) or not torch.is_tensor(clean_feat):
+                    continue
+                if clean_feat.device != adv_feat.device:
+                    clean_feat = clean_feat.to(adv_feat.device)
                 layer_loss = F.cosine_similarity(clean_feat, adv_feat, dim=1).mean()
-                loss = loss + layer_loss
+                loss = loss + layer_loss.to(loss_device)
         else:
             loss = torch.zeros((), device=loss_device)
             for feat in adv_features:
+                if not torch.is_tensor(feat):
+                    continue
                 norm = torch.norm(feat, p=2)
-                layer_loss = -torch.log(norm + self.eps).to(loss_device)
-                loss = loss + layer_loss
+                layer_loss = -torch.log(norm + self.eps)
+                loss = loss + layer_loss.to(loss_device)
         return loss
 
 

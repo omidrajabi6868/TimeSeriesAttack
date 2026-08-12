@@ -511,7 +511,7 @@ class AdversarialAttack:
                     if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
                 )
 
-                attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor)
+                attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
 
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
 
@@ -1529,7 +1529,7 @@ class AdversarialAttack:
                     if isinstance(self.cost_function, FeaturBaseObjective) else model_outputs
                 )
                 target_tensor = torch.full_like(model_outputs, float(target_label))
-                attack_loss = self.cost_function(objective_outputs, target_tensor)
+                attack_loss = self.cost_function(objective_outputs, target_tensor).to(self.device)
                 loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(model_outputs.shape[0])
                 losses.append(loss * batch_size)
