@@ -44,11 +44,14 @@ class AdversarialAttack:
     def _build_cost_function(self, name):
         if name == 'classification':
             self.cost_function = ClassificationObjective()
-        elif name == 'feature_base':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=10)
+        elif name == 'gd_uap':
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Conv2d,))
+            self.cost_function = FeaturBaseObjective(self.feature_extractor)
+        elif name == 'fg_uap':
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         else:
-            assert name not in ['classification', 'feature_base'], "This cost is not defined."
+            assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
 
     @staticmethod
     def _default_trigger_history_path(output_path):
@@ -307,8 +310,10 @@ class AdversarialAttack:
             patch_update_method = 'gap_uap'
         elif patch_update_method in ('hp_uap', 'hp'):
             patch_update_method = 'hp_uap'
+        elif patch_update_method in ('fg_uap', 'fg'):
+            patch_update_method = 'fg_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -355,7 +360,7 @@ class AdversarialAttack:
             )
 
         patch_optimizer = None
-        if patch_update_method in ('adam', 'hp_uap'):
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap'):
             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
             if patch_update_method == 'hp_uap':
                 hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
@@ -420,7 +425,9 @@ class AdversarialAttack:
         if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap', 'hp_uap'):
             self._build_cost_function('classification')
         elif patch_update_method == 'gd_uap':
-            self._build_cost_function('feature_base')
+            self._build_cost_function('gd_uap')
+        elif patch_update_method == 'fg_uap':
+            self._build_cost_function('fg_uap')
 
         for step_idx in range(steps):
             size_step_count += 1
@@ -476,6 +483,17 @@ class AdversarialAttack:
                     training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
                     training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
 
+                if patch_update_method == 'gd_uap':
+                    self.feature_extractor.clear()
+                    target_tensor = None
+                elif patch_update_method == 'fg_uap':
+                    self.feature_extractor.clear()
+                    self.model(selected_inputs)
+                    target_tensor = self.feature_extractor.activations
+                else:
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
+                
+
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
                     training_trigger_boxes,
@@ -484,15 +502,14 @@ class AdversarialAttack:
                     edge_softness=current_softness,
                     how_to_attach=how_to_attach
                 )
-                if patch_update_method == 'gd_uap':
-                    self.feature_extractor.clear()
+
+                self.feature_extractor.clear()
 
                 model_outputs = self.model(poisoned_inputs)
                 objective_outputs = (
                     self.feature_extractor.activations
-                    if patch_update_method == 'gd_uap' else model_outputs
+                    if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
                 )
-                target_tensor = torch.full_like(model_outputs, float(target_label))
 
                 attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor)
 
@@ -524,7 +541,7 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
 
-                if patch_update_method in ('adam', 'gap_uap', 'hp_uap'):
+                if patch_update_method in ('adam', 'gap_uap', 'hp_uap', 'gd_uap'):
                     patch_optimizer.step()
                 else:
                     with torch.no_grad():
@@ -532,8 +549,6 @@ class AdversarialAttack:
                         if patch_grad is not None:
                             if patch_update_method == 'pgd_sign':
                                 trigger_delta.add_(-alpha * patch_grad.sign())
-                            elif patch_update_method == 'gd_uap':
-                                trigger_delta.add_(-alpha * patch_grad)
                             elif patch_update_method == 'momentum_sign':
                                 grad_l1_norm = patch_grad.norm(p=1)
                                 if torch.isfinite(grad_l1_norm) and grad_l1_norm.item() > grad_norm_epsilon:
