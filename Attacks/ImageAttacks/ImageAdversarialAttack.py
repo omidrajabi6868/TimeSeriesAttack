@@ -488,8 +488,9 @@ class AdversarialAttack:
                     target_tensor = None
                 elif patch_update_method == 'fg_uap':
                     self.feature_extractor.clear()
-                    self.model(selected_inputs)
-                    target_tensor = self.feature_extractor.activations
+                    with torch.no_grad():
+                        self.model(selected_inputs)
+                    target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
                 else:
                     target_tensor = torch.full_like(model_outputs, float(target_label))
                 

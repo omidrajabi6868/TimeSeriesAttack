@@ -20,6 +20,18 @@ class ClassificationObjective(AdversarialObjective):
 
 
 class FeaturBaseObjective(AdversarialObjective):
+    @staticmethod
+    def detach_targets(features):
+        """Return a stable, non-differentiable snapshot of hooked features."""
+        if features is None:
+            return None
+        if torch.is_tensor(features):
+            return features.detach().clone()
+        return [
+            feature.detach().clone() if torch.is_tensor(feature) else feature
+            for feature in features
+        ]
+
     def __init__(self, feature_extractor=None, eps=1e-8):
         super().__init__()
         self.feature_extractor = feature_extractor
@@ -83,7 +95,14 @@ class FeatureExtractor:
                 if isinstance(m, (nn.Conv2d, nn.Linear))
             ]
 
-        for layer in layers[-n_last_layers:-2]:
+        selected_layers = layers[-n_last_layers:] if n_last_layers else layers
+        if not selected_layers:
+            raise RuntimeError(
+                f'FeatureExtractor found {len(layers)} candidate layers but selected none. '
+                'Use a positive n_last_layers value or a model with supported layers.'
+            )
+
+        for layer in selected_layers:
             self.hooks.append(
                 layer.register_forward_hook(self._hook)
             )
