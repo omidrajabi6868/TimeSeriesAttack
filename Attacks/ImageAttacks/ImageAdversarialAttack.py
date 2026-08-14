@@ -514,13 +514,15 @@ class AdversarialAttack:
                     how_to_attach=how_to_attach
                 )
 
-                self.feature_extractor.clear()
+                feature_extractor = getattr(self, 'feature_extractor', None)
+                if feature_extractor is not None:
+                    feature_extractor.clear()
 
                 model_outputs = self.model(poisoned_inputs)
                 if patch_update_method not in ('gd_uap', 'fg_uap'):
                     target_tensor = torch.full_like(model_outputs, float(target_label))
                 objective_outputs = (
-                    self.feature_extractor.activations
+                    feature_extractor.activations
                     if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
                 )
 
