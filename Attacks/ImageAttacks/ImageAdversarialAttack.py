@@ -48,7 +48,12 @@ class AdversarialAttack:
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Conv2d,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,))
+            self.feature_extractor = FeatureExtractor(
+                self.model,
+                n_last_layers=4,
+                layer_types=(torch.nn.Linear,),
+                exclude_last_layers=1,
+            )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         else:
             assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
@@ -488,8 +493,9 @@ class AdversarialAttack:
                     target_tensor = None
                 elif patch_update_method == 'fg_uap':
                     self.feature_extractor.clear()
-                    self.model(selected_inputs)
-                    target_tensor = self.feature_extractor.activations
+                    with torch.no_grad():
+                        self.model(selected_inputs)
+                    target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
                 else:
                     target_tensor = torch.full_like(model_outputs, float(target_label))
                 
