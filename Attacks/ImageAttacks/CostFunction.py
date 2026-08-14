@@ -83,7 +83,7 @@ class FeatureExtractor:
                 if isinstance(m, (nn.Conv2d, nn.Linear))
             ]
 
-        for layer in layers[-n_last_layers:-1]:
+        for layer in layers[-n_last_layers:-2]:
             self.hooks.append(
                 layer.register_forward_hook(self._hook)
             )
