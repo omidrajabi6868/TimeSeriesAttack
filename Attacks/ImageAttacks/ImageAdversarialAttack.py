@@ -541,7 +541,7 @@ class AdversarialAttack:
                     mask_optimizer.zero_grad()
                 loss.backward()
 
-                if patch_update_method in ('adam', 'gap_uap', 'hp_uap', 'gd_uap'):
+                if patch_update_method in ('adam', 'gap_uap', 'hp_uap', 'gd_uap', 'fg_uap'):
                     patch_optimizer.step()
                 else:
                     with torch.no_grad():
