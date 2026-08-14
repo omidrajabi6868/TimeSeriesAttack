@@ -41,7 +41,15 @@ class AdversarialAttack:
                 print(f'Using DataParallel for adversarial attack on GPUs: {self.gpu_ids}')
                 self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
     
+    def _remove_feature_extractor(self):
+        feature_extractor = getattr(self, 'feature_extractor', None)
+        if feature_extractor is not None:
+            feature_extractor.clear()
+            feature_extractor.remove()
+            self.feature_extractor = None
+
     def _build_cost_function(self, name):
+        self._remove_feature_extractor()
         if name == 'classification':
             self.cost_function = ClassificationObjective()
         elif name == 'gd_uap':
@@ -974,6 +982,8 @@ class AdversarialAttack:
             learned_effective_patch.reshape(-1),
             p=float('inf'),
         ).item())
+
+        self._remove_feature_extractor()
 
         return {
             'patch': learned_patch,
