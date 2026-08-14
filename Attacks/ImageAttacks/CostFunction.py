@@ -39,16 +39,22 @@ class FeaturBaseObjective(AdversarialObjective):
 
     @staticmethod
     def _align_feature_pair(clean_feat, adv_feat):
-        """Flatten and batch-align a pair of feature tensors for cosine loss."""
+        """Flatten feature tensors and align only an uneven batch dimension."""
         if clean_feat.ndim > 2:
             clean_feat = clean_feat.flatten(start_dim=1)
         if adv_feat.ndim > 2:
             adv_feat = adv_feat.flatten(start_dim=1)
+        if clean_feat.ndim != 2 or adv_feat.ndim != 2:
+            raise RuntimeError('Feature-based objective expects 2D feature activations after flattening.')
+        if clean_feat.shape[1] != adv_feat.shape[1]:
+            raise RuntimeError(
+                'Feature-based objective received incompatible feature dimensions: '
+                f'{clean_feat.shape[1]} and {adv_feat.shape[1]}.'
+            )
         batch_size = min(clean_feat.shape[0], adv_feat.shape[0])
-        feature_size = min(clean_feat.shape[1], adv_feat.shape[1])
-        if batch_size <= 0 or feature_size <= 0:
+        if batch_size <= 0:
             raise RuntimeError('Feature-based objective received empty activations.')
-        return clean_feat[:batch_size, :feature_size], adv_feat[:batch_size, :feature_size]
+        return clean_feat[:batch_size], adv_feat[:batch_size]
 
     def forward(self, outputs=None, targets=None):
         adv_features = outputs
@@ -98,6 +104,7 @@ class FeatureExtractor:
     def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,), exclude_last_layers=0):
         self._activation_records = []
         self.hooks = []
+        self.output_device = self._infer_output_device(model)
 
         layers = [
             m for m in model.modules()
@@ -125,18 +132,33 @@ class FeatureExtractor:
                 layer.register_forward_hook(self._make_hook(layer_idx))
             )
 
+    @staticmethod
+    def _infer_output_device(model):
+        if isinstance(model, nn.DataParallel) and model.device_ids:
+            return torch.device('cuda', model.device_ids[0])
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            return None
+
     @property
     def activations(self):
         grouped = []
         for layer_idx in sorted({idx for idx, _ in self._activation_records}):
             layer_outputs = [
-                out for idx, out in self._activation_records
+                self._activation_to_output_device(out)
+                for idx, out in self._activation_records
                 if idx == layer_idx and torch.is_tensor(out)
             ]
             if not layer_outputs:
                 continue
             grouped.append(torch.cat(layer_outputs, dim=0) if len(layer_outputs) > 1 else layer_outputs[0])
         return grouped
+
+    def _activation_to_output_device(self, activation):
+        if self.output_device is None or activation.device == self.output_device:
+            return activation
+        return activation.to(self.output_device)
 
     def _make_hook(self, layer_idx):
         def hook(module, inp, out):
