@@ -81,7 +81,7 @@ class FeaturBaseObjective(AdversarialObjective):
 
 
 class FeatureExtractor:
-    def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,)):
+    def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,), exclude_last_layers=0):
         self.activations = []
         self.hooks = []
 
@@ -95,11 +95,15 @@ class FeatureExtractor:
                 if isinstance(m, (nn.Conv2d, nn.Linear))
             ]
 
-        selected_layers = layers[-n_last_layers:] if n_last_layers else layers
+        if exclude_last_layers < 0:
+            raise ValueError('exclude_last_layers must be non-negative.')
+        selectable_layers = layers[:-exclude_last_layers] if exclude_last_layers else layers
+        selected_layers = selectable_layers[-n_last_layers:] if n_last_layers else selectable_layers
         if not selected_layers:
             raise RuntimeError(
-                f'FeatureExtractor found {len(layers)} candidate layers but selected none. '
-                'Use a positive n_last_layers value or a model with supported layers.'
+                f'FeatureExtractor found {len(layers)} candidate layers, but selected none after '
+                f'excluding the last {exclude_last_layers}. Use a smaller exclude_last_layers, '
+                'a positive n_last_layers value, or a model with supported layers.'
             )
 
         for layer in selected_layers:

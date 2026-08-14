@@ -48,7 +48,12 @@ class AdversarialAttack:
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Conv2d,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,))
+            self.feature_extractor = FeatureExtractor(
+                self.model,
+                n_last_layers=4,
+                layer_types=(torch.nn.Linear,),
+                exclude_last_layers=1,
+            )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         else:
             assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
