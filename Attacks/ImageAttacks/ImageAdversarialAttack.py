@@ -1508,6 +1508,10 @@ class AdversarialAttack:
                 )
 
         regularization_loss = patch_reg + mask_reg + softness_reg
+        cost_function = getattr(self, 'cost_function', None)
+        if cost_function is None:
+            cost_function = ClassificationObjective()
+        use_feature_objective = isinstance(cost_function, FeaturBaseObjective)
 
         with torch.no_grad():
             for inputs, targets in data_loader:
@@ -1536,15 +1540,17 @@ class AdversarialAttack:
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach
                 )
-                if hasattr(self, 'feature_extractor'):
-                    self.feature_extractor.clear()
+                feature_extractor = getattr(self, 'feature_extractor', None)
+                if feature_extractor is None and use_feature_objective:
+                    feature_extractor = getattr(cost_function, 'feature_extractor', None)
+                if feature_extractor is not None:
+                    feature_extractor.clear()
                 model_outputs = self.model(poisoned_inputs)
-                objective_outputs = (
-                    self.feature_extractor.activations
-                    if isinstance(self.cost_function, FeaturBaseObjective) else model_outputs
-                )
-                target_tensor = torch.full_like(model_outputs, float(target_label))
-                attack_loss = self.cost_function(objective_outputs, target_tensor).to(self.device)
+                if use_feature_objective and feature_extractor is None:
+                    raise RuntimeError('Feature objective evaluation requires a feature extractor.')
+                objective_outputs = feature_extractor.activations if use_feature_objective else model_outputs
+                target_tensor = None if use_feature_objective else torch.full_like(model_outputs, float(target_label))
+                attack_loss = cost_function(objective_outputs, target_tensor).to(self.device)
                 loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(model_outputs.shape[0])
                 losses.append(loss * batch_size)
