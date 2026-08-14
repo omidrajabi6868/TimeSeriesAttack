@@ -496,17 +496,14 @@ class AdversarialAttack:
                     training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
                     training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
 
+                target_tensor = None
                 if patch_update_method == 'gd_uap':
                     self.feature_extractor.clear()
-                    target_tensor = None
                 elif patch_update_method == 'fg_uap':
                     self.feature_extractor.clear()
                     with torch.no_grad():
                         self.model(selected_inputs)
                     target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
-                else:
-                    target_tensor = torch.full_like(model_outputs, float(target_label))
-                
 
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
@@ -520,6 +517,8 @@ class AdversarialAttack:
                 self.feature_extractor.clear()
 
                 model_outputs = self.model(poisoned_inputs)
+                if patch_update_method not in ('gd_uap', 'fg_uap'):
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
                 objective_outputs = (
                     self.feature_extractor.activations
                     if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
