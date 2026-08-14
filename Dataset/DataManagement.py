@@ -411,12 +411,18 @@ class ImageDataset(TorchDataset):
 
     @staticmethod
     def _predict_binary(model, image_np):
-        device = next(model.parameters()).device
-        with torch.no_grad():
-            tensor = torch.from_numpy(image_np.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device)
-            logits = model(tensor)
-            pred = (logits > 0).float().view(-1)
-            return int(pred[0].item())
+        inference_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+        device = next(inference_model.parameters()).device
+        was_training = inference_model.training
+        inference_model.eval()
+        try:
+            with torch.inference_mode():
+                tensor = torch.from_numpy(image_np.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device)
+                logits = inference_model(tensor)
+                pred = (logits > 0).float().view(-1)
+                return int(pred[0].item())
+        finally:
+            inference_model.train(was_training)
 
     def _load_image_np(self, idx):
         image = Image.open(self.image_paths[idx]).convert('RGB')
