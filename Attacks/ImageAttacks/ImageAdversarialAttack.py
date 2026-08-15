@@ -10,6 +10,7 @@ from Network import ClassificationModels
 from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor
 from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
+from Attacks.ImageAttacks.RobustUAP import TransformSampler
 
 
 class AdversarialAttack:
@@ -370,6 +371,24 @@ class AdversarialAttack:
                 how_to_attach=how_to_attach,
                 overshoot=0.02,
                 max_deepfool_iter=50,
+            )
+
+        if patch_update_method == 'robust_uap':
+            return self._learn_robust_uap_trigger(
+                data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
             )
 
         patch_optimizer = None
@@ -1303,6 +1322,191 @@ class AdversarialAttack:
                 direction = 1.0 if int(target_label) == 1 else -1.0
                 patch_update.add_(direction * step)
         return ((1.0 + float(overshoot)) * patch_update).detach()
+
+    def _learn_robust_uap_trigger(self,
+                                    data_loader,
+                                    validation_loader,
+                                    trigger_boxes,
+                                    target_label,
+                                    source_filter,
+                                    steps,
+                                    epsilon,
+                                    log_interval,
+                                    trigger_preview_interval,
+                                    trigger_preview_dir,
+                                    trigger_preview_loader,
+                                    trigger_preview_max_images,
+                                    edge_softness,
+                                    how_to_attach):
+        target_class = int(target_label)
+        if float(target_label) not in (0.0, 1.0):
+            raise ValueError('Targeted UAP currently supports binary target_label values 0 or 1.')
+        channels = 3
+        height = int(trigger_boxes[0]['height'])
+        width = int(trigger_boxes[0]['width'])
+        for box in trigger_boxes[1:]:
+            if int(box['width']) != width or int(box['height']) != height:
+                raise ValueError('All trigger boxes must share size for UAP.')
+
+        universal_patch = torch.zeros(
+            (len(trigger_boxes), channels, height, width),
+            device=self.device,
+        )
+
+        sampler = TransformSampler(height=height, width=width)
+
+        history = []
+        preview_records = []
+        preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
+        preview_max_images = (
+            max(0, int(trigger_preview_max_images))
+            if trigger_preview_max_images is not None else 0
+        )
+        preview_output_dir = Path(trigger_preview_dir) if trigger_preview_dir is not None else None
+        if preview_interval > 0 and preview_output_dir is not None:
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+        preview_data_loader = trigger_preview_loader or validation_loader or data_loader
+
+        best_patch = None
+        best_step = 0
+        best_target_asr = float('-inf')
+        best_val_asr = float('-inf')
+        best_val_loss = float('inf')
+
+        for step_idx in range(int(steps)):
+            for inputs, targets in data_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
+                if source_filter == 'bad':
+                    source_mask = (flat_targets == 0)
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                elif source_filter == 'all':
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+                else:
+                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+
+                for image in inputs[source_mask]:
+                    considered_samples += 1
+                    perturbed = self._inject_trigger(
+                        image.unsqueeze(0),
+                        trigger_boxes,
+                        trigger_patch=universal_patch.detach(),
+                        trigger_mask=None,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach,
+                    )
+                    if self._binary_prediction(perturbed) == target_class:
+                        continue
+
+                    if sample_patch is not None:
+                        universal_patch = torch.clamp(universal_patch + sample_patch, -epsilon, epsilon).detach()
+
+            target_metrics = self.evaluate_attack_success(
+                test_loader=validation_loader or data_loader,
+                trigger_box=trigger_boxes,
+                trigger_patch=universal_patch.detach(),
+                trigger_mask=None,
+                target_label=target_class,
+                source_filter=source_filter,
+                edge_softness=edge_softness,
+                how_to_attach=how_to_attach,
+            )
+            val_metrics = None
+            val_loss_metrics = None
+            if validation_loader is not None:
+                val_metrics = self.evaluate_attack_success(
+                    test_loader=validation_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=universal_patch.detach(),
+                    trigger_mask=None,
+                    target_label=target_class,
+                    source_filter=source_filter,
+                    edge_softness=edge_softness,
+                    how_to_attach=how_to_attach,
+                )
+                val_loss_metrics = self.evaluate_trigger_loss(
+                    data_loader=validation_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=universal_patch.detach(),
+                    trigger_mask=None,
+                    target_label=target_class,
+                    source_filter=source_filter,
+                    edge_softness=edge_softness,
+                    how_to_attach=how_to_attach,
+                )
+
+            target_asr = float(target_metrics['attack_success_rate'])
+            if target_asr > best_target_asr:
+                best_target_asr = target_asr
+                best_patch = universal_patch.detach().cpu().clone()
+                best_step = step_idx + 1
+                if val_metrics is not None:
+                    best_val_asr = float(val_metrics['attack_success_rate'])
+                    best_val_loss = float(val_loss_metrics['loss'])
+
+            step_history = {
+                'step': step_idx + 1,
+                'patch_update_method': 'robust_uap',
+                'targeted_attack_success_rate': target_asr,
+                'patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
+                'effective_patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
+            }
+            if val_metrics is not None:
+                step_history['validation_asr'] = float(val_metrics['attack_success_rate'])
+                step_history['validation_loss'] = float(val_loss_metrics['loss'])
+            history.append(step_history)
+
+            if preview_interval > 0 and preview_output_dir is not None and (step_idx + 1) % preview_interval == 0:
+                step_preview_records = self._save_trigger_preview(
+                    data_loader=preview_data_loader,
+                    output_dir=preview_output_dir,
+                    step=step_idx + 1,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=universal_patch.detach(),
+                    trigger_mask=None,
+                    target_label=target_class,
+                    source_filter=source_filter,
+                    edge_softness=edge_softness,
+                    max_images=preview_max_images,
+                    how_to_attach=how_to_attach,
+                )
+                preview_records.extend(step_preview_records)
+
+            if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
+                print(
+                    f'[Targeted Robust UAP]'
+                    f'target_asr={target_asr:.4f}'
+                )
+
+        learned_patch = best_patch if best_patch is not None else universal_patch.detach().cpu()
+        learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
+        learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
+        learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        return {
+            'patch': learned_patch,
+            'mask': None,
+            'history': history,
+            'trigger_box': trigger_boxes[0],
+            'trigger_boxes': trigger_boxes,
+            'target_label': float(target_class),
+            'source_filter': source_filter,
+            'patch_update_method': 'robust_uap',
+            'epsilon': learned_patch_linf_norm,
+            'effective_epsilon': learned_patch_linf_norm,
+            'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
+            'softness': {'initial_edge_softness': float(edge_softness), 'final_edge_softness': float(edge_softness)},
+            'progressive_resize': {'enabled': False, 'events': []},
+            'trigger_previews': preview_records,
+            'selection': 'best_targeted_attack_success_rate',
+            'selected_step': int(best_step or steps),
+            'best_validation_loss': None if validation_loader is None else float(best_val_loss),
+            'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+            'smallest_success_validation_loss': None,
+            'smallest_success_validation_asr': None,
+            'smallest_success_patch_area': None,
+        }
 
     @staticmethod
     def _image_tensor_to_pil(image_tensor, scale_from_signed=False):
