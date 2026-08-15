@@ -1545,13 +1545,18 @@ class AdversarialAttack:
                 feature_extractor = getattr(self, 'feature_extractor', None)
                 if feature_extractor is None and use_feature_objective:
                     feature_extractor = getattr(cost_function, 'feature_extractor', None)
-                if feature_extractor is not None:
-                    feature_extractor.clear()
-                model_outputs = self.model(poisoned_inputs)
                 if use_feature_objective and feature_extractor is None:
                     raise RuntimeError('Feature objective evaluation requires a feature extractor.')
+                if feature_extractor is not None:
+                    feature_extractor.clear()
+                if use_feature_objective:
+                    self.model(selected_inputs)
+                    target_tensor = cost_function.detach_targets(feature_extractor.activations)
+                    feature_extractor.clear()
+                model_outputs = self.model(poisoned_inputs)
                 objective_outputs = feature_extractor.activations if use_feature_objective else model_outputs
-                target_tensor = None if use_feature_objective else torch.full_like(model_outputs, float(target_label))
+                if not use_feature_objective:
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
                 attack_loss = cost_function(objective_outputs, target_tensor).to(self.device)
                 loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(model_outputs.shape[0])
