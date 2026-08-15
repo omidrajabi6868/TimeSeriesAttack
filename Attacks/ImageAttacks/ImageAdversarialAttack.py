@@ -696,7 +696,8 @@ class AdversarialAttack:
                         mask_l1_weight=mask_l1_weight,
                         patch_l2_weight=patch_l2_weight,
                         softness_alignment_weight=softness_alignment_weight,
-                        how_to_attach=how_to_attach
+                        how_to_attach=how_to_attach,
+                        use_clean_feature_targets=(patch_update_method == 'fg_uap'),
                     )
                     val_asr = float(val_metrics['attack_success_rate'])
                     val_loss = float(val_loss_metrics['loss'])
@@ -1471,7 +1472,8 @@ class AdversarialAttack:
                               mask_l1_weight=0.0,
                               patch_l2_weight=0.0,
                               softness_alignment_weight=0.0,
-                              how_to_attach='blend'):
+                              how_to_attach='blend',
+                              use_clean_feature_targets=False):
         self.model.eval()
         losses = []
         attack_losses = []
@@ -1545,13 +1547,20 @@ class AdversarialAttack:
                 feature_extractor = getattr(self, 'feature_extractor', None)
                 if feature_extractor is None and use_feature_objective:
                     feature_extractor = getattr(cost_function, 'feature_extractor', None)
-                if feature_extractor is not None:
-                    feature_extractor.clear()
-                model_outputs = self.model(poisoned_inputs)
                 if use_feature_objective and feature_extractor is None:
                     raise RuntimeError('Feature objective evaluation requires a feature extractor.')
+                if feature_extractor is not None:
+                    feature_extractor.clear()
+                if use_feature_objective and use_clean_feature_targets:
+                    self.model(selected_inputs)
+                    target_tensor = cost_function.detach_targets(feature_extractor.activations)
+                    feature_extractor.clear()
+                else:
+                    target_tensor = None
+                model_outputs = self.model(poisoned_inputs)
                 objective_outputs = feature_extractor.activations if use_feature_objective else model_outputs
-                target_tensor = None if use_feature_objective else torch.full_like(model_outputs, float(target_label))
+                if not use_feature_objective:
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
                 attack_loss = cost_function(objective_outputs, target_tensor).to(self.device)
                 loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(model_outputs.shape[0])
