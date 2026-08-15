@@ -11,6 +11,7 @@ from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBas
 from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
 from Attacks.ImageAttacks.RobustUAP import TransformSampler
+from torch.utils.data import TensorDataset, DataLoader
 
 
 class AdversarialAttack:
@@ -326,8 +327,10 @@ class AdversarialAttack:
             patch_update_method = 'hp_uap'
         elif patch_update_method in ('fg_uap', 'fg'):
             patch_update_method = 'fg_uap'
+        elif patch_update_method in ('robust', 'robust_uap'):
+            patch_update_method = 'robust_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -373,11 +376,22 @@ class AdversarialAttack:
                 max_deepfool_iter=50,
             )
 
+        patch_optimizer = None
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap'):
+            patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+            if patch_update_method == 'hp_uap':
+                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
+        
+        if patch_update_method == 'gap_uap':
+            generator = ParameterRender().to(self.device)
+            patch_optimizer = torch.optim.Adam(generator.parameters(), lr=learning_rate) 
+
         if patch_update_method == 'robust_uap':
             return self._learn_robust_uap_trigger(
                 data_loader=data_loader,
                 validation_loader=validation_loader,
                 trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
                 target_label=target_label,
                 source_filter=source_filter,
                 steps=steps,
@@ -389,17 +403,8 @@ class AdversarialAttack:
                 trigger_preview_max_images=trigger_preview_max_images,
                 edge_softness=current_softness,
                 how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer
             )
-
-        patch_optimizer = None
-        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap'):
-            patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
-            if patch_update_method == 'hp_uap':
-                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
-        
-        if patch_update_method == 'gap_uap':
-            generator = ParameterRender().to(self.device)
-            patch_optimizer = torch.optim.Adam(generator.parameters(), lr=learning_rate) 
 
         patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
         alpha = float(learning_rate)
@@ -1327,6 +1332,7 @@ class AdversarialAttack:
                                     data_loader,
                                     validation_loader,
                                     trigger_boxes,
+                                    trigger_delta,
                                     target_label,
                                     source_filter,
                                     steps,
@@ -1337,7 +1343,8 @@ class AdversarialAttack:
                                     trigger_preview_loader,
                                     trigger_preview_max_images,
                                     edge_softness,
-                                    how_to_attach):
+                                    how_to_attach,
+                                    patch_optimizer):
         target_class = int(target_label)
         if float(target_label) not in (0.0, 1.0):
             raise ValueError('Targeted UAP currently supports binary target_label values 0 or 1.')
@@ -1347,11 +1354,6 @@ class AdversarialAttack:
         for box in trigger_boxes[1:]:
             if int(box['width']) != width or int(box['height']) != height:
                 raise ValueError('All trigger boxes must share size for UAP.')
-
-        universal_patch = torch.zeros(
-            (len(trigger_boxes), channels, height, width),
-            device=self.device,
-        )
 
         sampler = TransformSampler(height=height, width=width)
 
@@ -1367,46 +1369,88 @@ class AdversarialAttack:
             preview_output_dir.mkdir(parents=True, exist_ok=True)
         preview_data_loader = trigger_preview_loader or validation_loader or data_loader
 
+        self._build_cost_function('classification')
+
         best_patch = None
         best_step = 0
         best_target_asr = float('-inf')
         best_val_asr = float('-inf')
         best_val_loss = float('inf')
+        step_samples = 0
 
         for step_idx in range(int(steps)):
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
                 flat_targets = targets.view(-1)
+
                 if source_filter == 'bad':
                     source_mask = (flat_targets == 0)
                 elif source_filter == 'good':
                     source_mask = (flat_targets == 1)
-                elif source_filter == 'all':
-                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
                 else:
-                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
-                for image in inputs[source_mask]:
-                    considered_samples += 1
-                    perturbed = self._inject_trigger(
-                        image.unsqueeze(0),
-                        trigger_boxes,
-                        trigger_patch=universal_patch.detach(),
-                        trigger_mask=None,
-                        edge_softness=edge_softness,
-                        how_to_attach=how_to_attach,
-                    )
-                    if self._binary_prediction(perturbed) == target_class:
+                if source_mask.sum().item() == 0:
+                    continue
+
+                selected_inputs = inputs[source_mask].clone()
+                selected_targets = targets[source_mask].clone()
+
+                success = 0
+                with torch.no_grad():
+                    for augmentation in sampler.sample(10):
+                        data = TensorDataset(selected_inputs.detach(), selected_targets.detach())
+                        loader = DataLoader(data, batch_size=32, shuffle=True)
+                        metrics = self.evaluate_attack_success(
+                            test_loader=loader,
+                            trigger_box=trigger_boxes,
+                            trigger_patch=epsilon * torch.tanh(augmentation(trigger_delta)).detach(),
+                            trigger_mask=None,
+                            target_label=target_class,
+                            source_filter=source_filter,
+                            edge_softness=edge_softness,
+                            how_to_attach=how_to_attach,
+                        )
+
+                        if metrics['attack_success_rate'] > 70:
+                            success += 1
+                    
+                    if (success/10) > 80:
                         continue
 
-                    if sample_patch is not None:
-                        universal_patch = torch.clamp(universal_patch + sample_patch, -epsilon, epsilon).detach()
+                patch_optimizer.zero_grad()
 
+                aug_loss = 0
+                for augmentation in sampler.sample(10):
+                    bounded_trigger_patch = epsilon * torch.tanh(augmentation(trigger_delta))
+                    poisoned_inputs = self._inject_trigger(
+                        selected_inputs,
+                        trigger_boxes,
+                        trigger_patch=bounded_trigger_patch,
+                        trigger_mask=None,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach
+                    )
+                    objective_outputs = self.model(poisoned_inputs)
+                    target_tensor = torch.full_like(objective_outputs, float(target_label))
+
+                    aug_loss += self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
+                
+                loss = aug_loss/10.0
+                loss.backward()
+                patch_optimizer.step()
+
+                batch_samples = int(objective_outputs.shape[0])
+                step_losses.append(float(loss.item()) * batch_samples)
+                step_samples += batch_samples
+
+
+            universal_patch = (epsilon * torch.tanh(trigger_delta)).detach()
             target_metrics = self.evaluate_attack_success(
                 test_loader=validation_loader or data_loader,
                 trigger_box=trigger_boxes,
-                trigger_patch=universal_patch.detach(),
+                trigger_patch=universal_patch,
                 trigger_mask=None,
                 target_label=target_class,
                 source_filter=source_filter,
@@ -1419,7 +1463,7 @@ class AdversarialAttack:
                 val_metrics = self.evaluate_attack_success(
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=universal_patch.detach(),
+                    trigger_patch=universal_patch,
                     trigger_mask=None,
                     target_label=target_class,
                     source_filter=source_filter,
@@ -1429,7 +1473,7 @@ class AdversarialAttack:
                 val_loss_metrics = self.evaluate_trigger_loss(
                     data_loader=validation_loader,
                     trigger_box=trigger_boxes,
-                    trigger_patch=universal_patch.detach(),
+                    trigger_patch=universal_patch,
                     trigger_mask=None,
                     target_label=target_class,
                     source_filter=source_filter,
