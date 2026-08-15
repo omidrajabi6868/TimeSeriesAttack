@@ -10,7 +10,7 @@ from Network import ClassificationModels
 from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor
 from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
-from Attacks.ImageAttacks.RobustUAP import TransformSampler
+from Attacks.ImageAttacks.RobustUAP import RobustUAPConfig, TransformSampler, estimate_robustness, project_lp_ball
 from torch.utils.data import TensorDataset, DataLoader
 
 
@@ -1347,15 +1347,19 @@ class AdversarialAttack:
                                     patch_optimizer):
         target_class = int(target_label)
         if float(target_label) not in (0.0, 1.0):
-            raise ValueError('Targeted UAP currently supports binary target_label values 0 or 1.')
-        channels = 3
+            raise ValueError('Targeted RobustUAP currently supports binary target_label values 0 or 1.')
         height = int(trigger_boxes[0]['height'])
         width = int(trigger_boxes[0]['width'])
         for box in trigger_boxes[1:]:
             if int(box['width']) != width or int(box['height']) != height:
-                raise ValueError('All trigger boxes must share size for UAP.')
+                raise ValueError('All trigger boxes must share size for RobustUAP.')
 
+        robust_config = RobustUAPConfig(
+            alpha=float(getattr(patch_optimizer, 'param_groups', [{'lr': 0.01}])[0].get('lr', 0.01))
+            if patch_optimizer is not None else 0.01,
+        )
         sampler = TransformSampler(height=height, width=width)
+        num_transform_samples = robust_config.num_transform_samples
 
         history = []
         preview_records = []
@@ -1371,14 +1375,19 @@ class AdversarialAttack:
 
         self._build_cost_function('classification')
 
+        universal_patch = project_lp_ball(epsilon * torch.tanh(trigger_delta.detach()), epsilon, robust_config.norm).detach()
         best_patch = None
         best_step = 0
         best_target_asr = float('-inf')
         best_val_asr = float('-inf')
         best_val_loss = float('inf')
-        step_samples = 0
 
         for step_idx in range(int(steps)):
+            step_losses = []
+            step_samples = 0
+            inner_updates = 0
+            batch_robustness_values = []
+
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
@@ -1395,58 +1404,86 @@ class AdversarialAttack:
                     continue
 
                 selected_inputs = inputs[source_mask].clone()
-                selected_targets = targets[source_mask].clone()
+                batch_robustness = estimate_robustness(
+                    model=self.model,
+                    inject_trigger=self._inject_trigger,
+                    inputs=selected_inputs,
+                    trigger_boxes=trigger_boxes,
+                    universal_patch=universal_patch,
+                    sampler=sampler,
+                    num_transform_samples=num_transform_samples,
+                    gamma=robust_config.gamma,
+                    target_label=target_class,
+                    edge_softness=edge_softness,
+                    how_to_attach=how_to_attach,
+                )
+                batch_robustness_values.append(float(batch_robustness))
+                if batch_robustness >= robust_config.zeta:
+                    continue
 
-                success = 0
-                with torch.no_grad():
-                    for augmentation in sampler.sample(10):
-                        data = TensorDataset(selected_inputs.detach(), selected_targets.detach())
-                        loader = DataLoader(data, batch_size=32, shuffle=True)
-                        metrics = self.evaluate_attack_success(
-                            test_loader=loader,
-                            trigger_box=trigger_boxes,
-                            trigger_patch=epsilon * torch.tanh(augmentation(trigger_delta)).detach(),
+                patch_update = torch.zeros_like(universal_patch, device=self.device)
+                loss = None
+                for _ in range(int(robust_config.max_inner_steps)):
+                    patch_update = patch_update.detach().requires_grad_(True)
+                    candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
+                    aug_loss = 0.0
+                    for augmentation in sampler.sample(num_transform_samples):
+                        transformed_patch = augmentation(candidate_patch)
+                        poisoned_inputs = self._inject_trigger(
+                            selected_inputs,
+                            trigger_boxes,
+                            trigger_patch=transformed_patch,
                             trigger_mask=None,
-                            target_label=target_class,
-                            source_filter=source_filter,
                             edge_softness=edge_softness,
                             how_to_attach=how_to_attach,
                         )
+                        objective_outputs = self.model(poisoned_inputs)
+                        target_tensor = torch.full_like(objective_outputs, float(target_label))
+                        aug_loss = aug_loss + self.cost_function(
+                            outputs=objective_outputs,
+                            targets=target_tensor,
+                        ).to(self.device)
 
-                        if metrics['attack_success_rate'] > 70:
-                            success += 1
-                    
-                    if (success/10) > 80:
-                        continue
+                    loss = aug_loss / float(num_transform_samples)
+                    self.model.zero_grad(set_to_none=True)
+                    loss.backward()
+                    if patch_update.grad is None:
+                        break
+                    with torch.no_grad():
+                        signed_step = robust_config.alpha * patch_update.grad.sign()
+                        patch_update = project_lp_ball(
+                            patch_update - signed_step,
+                            epsilon,
+                            robust_config.norm,
+                        )
+                        candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
+                    inner_updates += 1
 
-                patch_optimizer.zero_grad()
-
-                aug_loss = 0
-                for augmentation in sampler.sample(10):
-                    bounded_trigger_patch = epsilon * torch.tanh(augmentation(trigger_delta))
-                    poisoned_inputs = self._inject_trigger(
-                        selected_inputs,
-                        trigger_boxes,
-                        trigger_patch=bounded_trigger_patch,
-                        trigger_mask=None,
+                    batch_robustness = estimate_robustness(
+                        model=self.model,
+                        inject_trigger=self._inject_trigger,
+                        inputs=selected_inputs,
+                        trigger_boxes=trigger_boxes,
+                        universal_patch=candidate_patch.detach(),
+                        sampler=sampler,
+                        num_transform_samples=num_transform_samples,
+                        gamma=robust_config.gamma,
+                        target_label=target_class,
                         edge_softness=edge_softness,
-                        how_to_attach=how_to_attach
+                        how_to_attach=how_to_attach,
                     )
-                    objective_outputs = self.model(poisoned_inputs)
-                    target_tensor = torch.full_like(objective_outputs, float(target_label))
+                    batch_robustness_values.append(float(batch_robustness))
+                    if batch_robustness >= robust_config.zeta:
+                        break
 
-                    aug_loss += self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
-                
-                loss = aug_loss/10.0
-                loss.backward()
-                patch_optimizer.step()
+                with torch.no_grad():
+                    universal_patch = project_lp_ball(universal_patch + patch_update.detach(), epsilon, robust_config.norm).detach()
 
-                batch_samples = int(objective_outputs.shape[0])
-                step_losses.append(float(loss.item()) * batch_samples)
+                batch_samples = int(selected_inputs.shape[0])
+                if loss is not None:
+                    step_losses.append(float(loss.item()) * batch_samples)
                 step_samples += batch_samples
 
-
-            universal_patch = (epsilon * torch.tanh(trigger_delta)).detach()
             target_metrics = self.evaluate_attack_success(
                 test_loader=validation_loader or data_loader,
                 trigger_box=trigger_boxes,
@@ -1490,10 +1527,19 @@ class AdversarialAttack:
                     best_val_asr = float(val_metrics['attack_success_rate'])
                     best_val_loss = float(val_loss_metrics['loss'])
 
+            step_loss = (sum(step_losses) / step_samples) if step_samples else 0.0
             step_history = {
                 'step': step_idx + 1,
                 'patch_update_method': 'robust_uap',
                 'targeted_attack_success_rate': target_asr,
+                'loss': step_loss,
+                'robustness': (sum(batch_robustness_values) / len(batch_robustness_values)) if batch_robustness_values else 0.0,
+                'robustness_gamma': float(robust_config.gamma),
+                'robustness_zeta': float(robust_config.zeta),
+                'robustness_psi': float(robust_config.psi),
+                'robustness_phi': float(robust_config.phi),
+                'transform_samples': int(num_transform_samples),
+                'inner_updates': int(inner_updates),
                 'patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
                 'effective_patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
             }
@@ -1520,8 +1566,10 @@ class AdversarialAttack:
 
             if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
                 print(
-                    f'[Targeted Robust UAP]'
-                    f'target_asr={target_asr:.4f}'
+                    f'[Targeted Robust UAP] '
+                    f'target_asr={target_asr:.4f}, '
+                    f'robustness={step_history["robustness"]:.4f}, '
+                    f'inner_updates={inner_updates}'
                 )
 
         learned_patch = best_patch if best_patch is not None else universal_patch.detach().cpu()
@@ -1542,6 +1590,16 @@ class AdversarialAttack:
             'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
             'softness': {'initial_edge_softness': float(edge_softness), 'final_edge_softness': float(edge_softness)},
             'progressive_resize': {'enabled': False, 'events': []},
+            'robust_uap': {
+                'gamma': float(robust_config.gamma),
+                'zeta': float(robust_config.zeta),
+                'psi': float(robust_config.psi),
+                'phi': float(robust_config.phi),
+                'alpha': float(robust_config.alpha),
+                'max_inner_steps': int(robust_config.max_inner_steps),
+                'transform_samples': int(num_transform_samples),
+                'norm': robust_config.norm,
+            },
             'trigger_previews': preview_records,
             'selection': 'best_targeted_attack_success_rate',
             'selected_step': int(best_step or steps),
