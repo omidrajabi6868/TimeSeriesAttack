@@ -17,6 +17,7 @@ class RobustUAPConfig:
     zeta: float = 0.8
     alpha: float = 0.01
     max_inner_steps: int = 10
+    max_batch_size: int = 64
     norm: str = 'linf'
 
     @property
@@ -138,21 +139,32 @@ def estimate_robustness(
     target_label,
     edge_softness,
     how_to_attach,
+    max_batch_size=None,
 ):
     """Estimate how often transformed UAP neighbors remain successful."""
     robust_successes = 0
+    batch_size = inputs.shape[0]
+    max_batch_size = batch_size if max_batch_size is None else max(1, int(max_batch_size))
     with torch.no_grad():
         for augmentation in sampler.sample(num_transform_samples):
             transformed_patch = augmentation(universal_patch)
-            poisoned_inputs = inject_trigger(
-                inputs,
-                trigger_boxes,
-                trigger_patch=transformed_patch,
-                trigger_mask=None,
-                edge_softness=edge_softness,
-                how_to_attach=how_to_attach,
-            )
-            outputs = model(poisoned_inputs)
-            if _targeted_binary_success(outputs, target_label) >= float(gamma):
+            successes = 0.0
+            total = 0
+            for batch_start in range(0, batch_size, max_batch_size):
+                input_batch = inputs[batch_start:batch_start + max_batch_size]
+                poisoned_inputs = inject_trigger(
+                    input_batch,
+                    trigger_boxes,
+                    trigger_patch=transformed_patch,
+                    trigger_mask=None,
+                    edge_softness=edge_softness,
+                    how_to_attach=how_to_attach,
+                )
+                outputs = model(poisoned_inputs)
+                predictions = (outputs > 0).float().view(-1)
+                targets = torch.full_like(predictions, float(target_label))
+                successes += predictions.eq(targets).float().sum().item()
+                total += int(predictions.numel())
+            if total > 0 and successes / float(total) >= float(gamma):
                 robust_successes += 1
     return robust_successes / float(max(1, int(num_transform_samples)))
