@@ -1416,6 +1416,7 @@ class AdversarialAttack:
                     target_label=target_class,
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach,
+                    max_batch_size=robust_config.max_batch_size,
                 )
                 batch_robustness_values.append(float(batch_robustness))
                 if batch_robustness >= robust_config.zeta:
@@ -1426,27 +1427,36 @@ class AdversarialAttack:
                 for _ in range(int(robust_config.max_inner_steps)):
                     patch_update = patch_update.detach().requires_grad_(True)
                     candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
-                    aug_loss = 0.0
-                    for augmentation in sampler.sample(num_transform_samples):
-                        transformed_patch = augmentation(candidate_patch)
-                        poisoned_inputs = self._inject_trigger(
-                            selected_inputs,
-                            trigger_boxes,
-                            trigger_patch=transformed_patch,
-                            trigger_mask=None,
-                            edge_softness=edge_softness,
-                            how_to_attach=how_to_attach,
-                        )
-                        objective_outputs = self.model(poisoned_inputs)
-                        target_tensor = torch.full_like(objective_outputs, float(target_label))
-                        aug_loss = aug_loss + self.cost_function(
-                            outputs=objective_outputs,
-                            targets=target_tensor,
-                        ).to(self.device)
-
-                    loss = aug_loss / float(num_transform_samples)
+                    loss_value = 0.0
                     self.model.zero_grad(set_to_none=True)
-                    loss.backward()
+                    for augmentation in sampler.sample(num_transform_samples):
+                        for batch_start in range(0, selected_inputs.shape[0], robust_config.max_batch_size):
+                            candidate_patch = project_lp_ball(
+                                universal_patch.detach() + patch_update,
+                                epsilon,
+                                robust_config.norm,
+                            )
+                            transformed_patch = augmentation(candidate_patch)
+                            input_batch = selected_inputs[batch_start:batch_start + robust_config.max_batch_size]
+                            poisoned_inputs = self._inject_trigger(
+                                input_batch,
+                                trigger_boxes,
+                                trigger_patch=transformed_patch,
+                                trigger_mask=None,
+                                edge_softness=edge_softness,
+                                how_to_attach=how_to_attach,
+                            )
+                            objective_outputs = self.model(poisoned_inputs)
+                            target_tensor = torch.full_like(objective_outputs, float(target_label))
+                            batch_loss = self.cost_function(
+                                outputs=objective_outputs,
+                                targets=target_tensor,
+                            ).to(self.device)
+                            batch_weight = float(input_batch.shape[0]) / float(selected_inputs.shape[0])
+                            scaled_loss = batch_loss * batch_weight / float(num_transform_samples)
+                            scaled_loss.backward()
+                            loss_value += float(scaled_loss.detach().item())
+                    loss = torch.tensor(loss_value, device=self.device)
                     if patch_update.grad is None:
                         break
                     with torch.no_grad():
@@ -1471,6 +1481,7 @@ class AdversarialAttack:
                         target_label=target_class,
                         edge_softness=edge_softness,
                         how_to_attach=how_to_attach,
+                        max_batch_size=robust_config.max_batch_size,
                     )
                     batch_robustness_values.append(float(batch_robustness))
                     if batch_robustness >= robust_config.zeta:
@@ -1597,6 +1608,7 @@ class AdversarialAttack:
                 'phi': float(robust_config.phi),
                 'alpha': float(robust_config.alpha),
                 'max_inner_steps': int(robust_config.max_inner_steps),
+                'max_batch_size': int(robust_config.max_batch_size),
                 'transform_samples': int(num_transform_samples),
                 'norm': robust_config.norm,
             },
