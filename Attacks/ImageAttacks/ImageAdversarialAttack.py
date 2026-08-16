@@ -90,6 +90,13 @@ class AdversarialAttack:
         return value
 
     @staticmethod
+    def _masked_batch(tensor, mask):
+        """Return a filtered batch without copying when the mask selects every sample."""
+        if bool(mask.all().item()):
+            return tensor
+        return tensor[mask]
+
+    @staticmethod
     def save_trigger(trigger, output_path, history_path=None):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -491,7 +498,7 @@ class AdversarialAttack:
                 if source_mask.sum().item() == 0:
                     continue
 
-                selected_inputs = inputs[source_mask].clone()
+                selected_inputs = self._masked_batch(inputs, source_mask)
                 blend_mask = (
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
                     if mask_logits is not None else None
@@ -1150,7 +1157,7 @@ class AdversarialAttack:
                 else:
                     raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
 
-                for image in inputs[source_mask]:
+                for image in self._masked_batch(inputs, source_mask):
                     considered_samples += 1
                     perturbed = self._inject_trigger(
                         image.unsqueeze(0),
@@ -1403,7 +1410,7 @@ class AdversarialAttack:
                 if source_mask.sum().item() == 0:
                     continue
 
-                selected_inputs = inputs[source_mask].clone()
+                selected_inputs = self._masked_batch(inputs, source_mask)
                 batch_robustness = estimate_robustness(
                     model=self.model,
                     inject_trigger=self._inject_trigger,
@@ -1670,10 +1677,10 @@ class AdversarialAttack:
                 if source_mask.sum().item() == 0:
                     continue
 
-                source_inputs = inputs[source_mask].clone()
-                source_targets = targets[source_mask].view(-1)
+                source_inputs = self._masked_batch(inputs, source_mask)
+                source_targets = self._masked_batch(targets, source_mask).view(-1)
                 poisoned_inputs = self._inject_trigger(
-                    source_inputs.clone(),
+                    source_inputs,
                     trigger_boxes,
                     trigger_patch=trigger_patch,
                     trigger_mask=trigger_mask,
@@ -1841,7 +1848,7 @@ class AdversarialAttack:
                 if source_mask.sum().item() == 0:
                     continue
 
-                selected_inputs = inputs[source_mask].clone()
+                selected_inputs = self._masked_batch(inputs, source_mask)
                 poisoned_inputs = self._inject_trigger(
                     selected_inputs,
                     trigger_box,
@@ -1926,8 +1933,8 @@ class AdversarialAttack:
                 if source_mask.sum().item() == 0:
                     continue
 
-                source_inputs = inputs[source_mask]
-                source_targets = targets[source_mask]
+                source_inputs = self._masked_batch(inputs, source_mask)
+                source_targets = self._masked_batch(targets, source_mask)
 
                 clean_outputs = self.model(source_inputs)
                 clean_preds = (clean_outputs > 0).float().view(-1)
@@ -1936,7 +1943,7 @@ class AdversarialAttack:
                 clean_correct_and_not_target += int((clean_preds != float(target_label)).sum().item())
 
                 poisoned_inputs = self._inject_trigger(
-                    source_inputs.clone(),
+                    source_inputs,
                     trigger_box,
                     trigger_value=trigger_value,
                     trigger_patch=trigger_patch,
