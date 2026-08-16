@@ -1430,9 +1430,13 @@ class AdversarialAttack:
                     loss_value = 0.0
                     self.model.zero_grad(set_to_none=True)
                     for augmentation in sampler.sample(num_transform_samples):
-                        candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
-                        transformed_patch = augmentation(candidate_patch)
                         for batch_start in range(0, selected_inputs.shape[0], robust_config.max_batch_size):
+                            candidate_patch = project_lp_ball(
+                                universal_patch.detach() + patch_update,
+                                epsilon,
+                                robust_config.norm,
+                            )
+                            transformed_patch = augmentation(candidate_patch)
                             input_batch = selected_inputs[batch_start:batch_start + robust_config.max_batch_size]
                             poisoned_inputs = self._inject_trigger(
                                 input_batch,
