@@ -1419,11 +1419,16 @@ class AdversarialAttack:
                     max_batch_size=robust_config.max_batch_size,
                 )
                 batch_robustness_values.append(float(batch_robustness))
+
+                # Keep a default no-op update for batches that are already robust or
+                # configurations that request zero inner optimization steps. This
+                # prevents the robust UAP path from referencing ``patch_update``
+                # before it has been initialized.
+                patch_update = torch.zeros_like(universal_patch, device=self.device)
+                loss = None
                 if batch_robustness >= robust_config.zeta:
                     continue
 
-                patch_update = torch.zeros_like(universal_patch, device=self.device)
-                loss = None
                 for _ in range(int(robust_config.max_inner_steps)):
                     patch_update = patch_update.detach().requires_grad_(True)
                     candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
