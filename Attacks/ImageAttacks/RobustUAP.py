@@ -11,8 +11,8 @@ import torchvision.transforms as transforms
 class RobustUAPConfig:
     """Hyperparameters from the RobustUAP robustness-estimation loop."""
 
-    psi: float = 0.25
-    phi: float = 0.1
+    psi: float = 0.2
+    phi: float = 0.05
     gamma: float = 0.7
     zeta: float = 0.8
     alpha: float = 0.01
