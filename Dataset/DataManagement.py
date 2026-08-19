@@ -8,6 +8,7 @@ import torch
 import pandas as pd
 import numpy as np
 import os
+import copy
 
  
 class ImageDataset(TorchDataset):
@@ -52,7 +53,8 @@ class ImageDataset(TorchDataset):
                               stratify_by_bad_sample=True,
                               pin_memory=None,
                               persistent_workers=None,
-                              prefetch_factor=2):
+                              prefetch_factor=2,
+                              eval_transform=None):
         if not torch.isclose(torch.tensor(train_ratio + val_ratio + test_ratio), torch.tensor(1.0)):
             raise ValueError('train_ratio, val_ratio and test_ratio must sum to 1.')
 
@@ -74,8 +76,18 @@ class ImageDataset(TorchDataset):
             )
 
         train_set = Subset(self, train_indices)
-        val_set = Subset(self, val_indices)
-        test_set = Subset(self, test_indices)
+
+        # A Subset delegates __getitem__ to its parent dataset.  Reusing `self`
+        # here would therefore apply stochastic training augmentation during
+        # validation and testing too.  Keep the same samples and labels, but use
+        # a shallow dataset copy so callers can supply a deterministic transform
+        # for model selection and final evaluation.
+        evaluation_dataset = self
+        if eval_transform is not None:
+            evaluation_dataset = copy.copy(self)
+            evaluation_dataset.transform = eval_transform
+        val_set = Subset(evaluation_dataset, val_indices)
+        test_set = Subset(evaluation_dataset, test_indices)
 
         if num_workers is None:
             cpu_count = os.cpu_count() or 1
@@ -128,6 +140,17 @@ class ImageDataset(TorchDataset):
             transforms.RandomApply([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1)], p=0.5),
             transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
             # transforms.RandomAffine(degrees=5, translate=(0.03, 0.03), scale=(0.97, 1.03), shear=2),
+            transforms.Resize((height, width)),
+            transforms.ToTensor(),
+        ])
+
+    @staticmethod
+    def default_eval_transform(image_size):
+        if image_size is None:
+            raise ValueError('image_size must be provided to build the evaluation transform.')
+
+        width, height = image_size
+        return transforms.Compose([
             transforms.Resize((height, width)),
             transforms.ToTensor(),
         ])

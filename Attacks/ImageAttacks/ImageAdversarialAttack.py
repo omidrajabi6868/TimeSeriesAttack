@@ -121,8 +121,10 @@ class AdversarialAttack:
                 'softness': trigger.get('softness', {}),
                 'progressive_resize': trigger.get('progressive_resize', {}),
                 'patch_update_method': trigger.get('patch_update_method'),
+                'how_to_attach': trigger.get('how_to_attach', 'blend'),
                 'selection': trigger.get('selection'),
                 'selected_step': trigger.get('selected_step'),
+                'selected_validation_asr': trigger.get('selected_validation_asr'),
                 'best_validation_loss': trigger.get('best_validation_loss'),
                 'best_validation_asr': trigger.get('best_validation_asr'),
                 'smallest_success_validation_loss': trigger.get('smallest_success_validation_loss'),
@@ -138,6 +140,7 @@ class AdversarialAttack:
             'history': trigger.get('history', []),
             'selection': trigger.get('selection'),
             'selected_step': trigger.get('selected_step'),
+            'selected_validation_asr': trigger.get('selected_validation_asr'),
             'best_validation_loss': trigger.get('best_validation_loss'),
             'best_validation_asr': trigger.get('best_validation_asr'),
             'smallest_success_validation_loss': trigger.get('smallest_success_validation_loss'),
@@ -182,8 +185,10 @@ class AdversarialAttack:
             'softness': trigger_payload.get('softness', {}),
             'progressive_resize': trigger_payload.get('progressive_resize', {}),
             'patch_update_method': trigger_payload.get('patch_update_method'),
+            'how_to_attach': trigger_payload.get('how_to_attach', 'blend'),
             'selection': trigger_payload.get('selection'),
             'selected_step': trigger_payload.get('selected_step'),
+            'selected_validation_asr': trigger_payload.get('selected_validation_asr'),
             'best_validation_loss': trigger_payload.get('best_validation_loss'),
             'best_validation_asr': trigger_payload.get('best_validation_asr'),
             'smallest_success_validation_loss': trigger_payload.get('smallest_success_validation_loss'),
@@ -469,6 +474,7 @@ class AdversarialAttack:
         best_step = 0
         best_val_loss = float('inf')
         best_val_asr = float('-inf')
+        best_softness = None
         smallest_success_patch = None
         smallest_success_mask = None
         smallest_success_boxes = None
@@ -476,6 +482,7 @@ class AdversarialAttack:
         smallest_success_asr = float('-inf')
         smallest_success_val_loss = float('inf')
         smallest_success_area = float('inf')
+        smallest_success_softness = None
         resize_events = []
         no_improve_steps = 0
         size_step_count = 0
@@ -769,6 +776,7 @@ class AdversarialAttack:
                         best_mask = current_mask.cpu().clone() if current_mask is not None else None
                         best_trigger_boxes = [dict(box) for box in trigger_boxes]
                         best_step = step_idx + 1
+                        best_softness = float(current_softness)
                         no_improve_steps = 0
                     else:
                         no_improve_steps += 1
@@ -803,16 +811,22 @@ class AdversarialAttack:
                             )
                         )
                         if is_smaller_success or is_better_tie:
-                            smallest_success_patch = (epsilon * torch.tanh(trigger_delta)).detach().cpu().clone()
+                            # Save exactly the tensors that produced `val_asr`.
+                            # Reconstructing from trigger_delta is not equivalent
+                            # for methods that render/filter it (GAP-UAP and
+                            # HP-UAP), and caused the returned trigger to differ
+                            # from the one accepted during validation.
+                            smallest_success_patch = current_patch.detach().cpu().clone()
                             smallest_success_mask = (
-                                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu().clone()
-                                if mask_logits is not None else None
+                                current_mask.detach().cpu().clone()
+                                if current_mask is not None else None
                             )
                             smallest_success_boxes = [dict(box) for box in trigger_boxes]
                             smallest_success_step = step_idx + 1
                             smallest_success_asr = val_asr
                             smallest_success_val_loss = val_loss
                             smallest_success_area = current_area
+                            smallest_success_softness = float(current_softness)
                         step_history['size_decision'] = 'accepted'
 
                     if (
@@ -1008,12 +1022,16 @@ class AdversarialAttack:
             trigger_boxes = smallest_success_boxes
             selected_step = smallest_success_step
             selection = 'smallest_successful_patch'
+            selected_validation_asr = smallest_success_asr
+            selected_edge_softness = smallest_success_softness
         elif best_patch is not None:
             learned_patch = best_patch
             learned_mask = best_mask
             trigger_boxes = best_trigger_boxes
             selected_step = best_step
             selection = 'best_validation_loss'
+            selected_validation_asr = best_val_asr
+            selected_edge_softness = best_softness
         else:
             learned_patch = current_patch_for_metrics.cpu()
             learned_mask = (
@@ -1022,6 +1040,8 @@ class AdversarialAttack:
             )
             selected_step = steps
             selection = 'last_step'
+            selected_validation_asr = None
+            selected_edge_softness = float(current_softness)
 
         learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
         learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
@@ -1043,6 +1063,7 @@ class AdversarialAttack:
             'target_label': float(target_label),
             'source_filter': source_filter,
             'patch_update_method': patch_update_method,
+            'how_to_attach': how_to_attach,
             'epsilon': learned_patch_linf_norm,
             'effective_epsilon': learned_effective_epsilon,
             'patch_norms': {
@@ -1058,6 +1079,7 @@ class AdversarialAttack:
                 'softness_decay': float(softness_decay),
                 'softness_patience': int(softness_patience),
                 'asr_hardening_threshold': float(asr_hardening_threshold),
+                'selected_edge_softness': selected_edge_softness,
             },
             'progressive_resize': {
                 'enabled': bool(progressive_resize_enabled),
@@ -1083,6 +1105,9 @@ class AdversarialAttack:
             'trigger_previews': preview_records,
             'selection': selection,
             'selected_step': int(selected_step),
+            'selected_validation_asr': (
+                None if selected_validation_asr is None else float(selected_validation_asr)
+            ),
             'best_validation_loss': None if validation_loader is None else float(best_val_loss),
             'best_validation_asr': None if validation_loader is None else float(best_val_asr),
             'smallest_success_validation_loss': (
@@ -1291,6 +1316,7 @@ class AdversarialAttack:
             'target_label': float(target_class),
             'source_filter': source_filter,
             'patch_update_method': 'deepfool_uap',
+            'how_to_attach': how_to_attach,
             'epsilon': learned_patch_linf_norm,
             'effective_epsilon': learned_patch_linf_norm,
             'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
@@ -1624,6 +1650,7 @@ class AdversarialAttack:
             'target_label': float(target_class),
             'source_filter': source_filter,
             'patch_update_method': 'robust_uap',
+            'how_to_attach': how_to_attach,
             'epsilon': learned_patch_linf_norm,
             'effective_epsilon': learned_patch_linf_norm,
             'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
@@ -1884,6 +1911,7 @@ class AdversarialAttack:
             "target_label": float(target_class),
             "source_filter": source_filter,
             "patch_update_method": "psp_uap",
+            "how_to_attach": how_to_attach,
             "epsilon": learned_patch_linf_norm,
             "effective_epsilon": learned_patch_linf_norm,
             "patch_norms": {
