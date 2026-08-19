@@ -10,7 +10,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=128,
+        batch_size=64,
         stratify_by_bad_sample=True,
     )
 
@@ -38,7 +38,7 @@ def main():
     classification = ClassificationBase(
         model_name='SwinT', 
         optimizer_name='Adam', 
-        checkpoint_dir='backups'
+        checkpoint_dir='backups/original_model'
     )
 
     classification.train_model(
