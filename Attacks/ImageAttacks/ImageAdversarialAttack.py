@@ -1,6 +1,5 @@
 import json
 import math
-from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -1819,6 +1818,7 @@ class AdversarialAttack:
 
                 val_metrics = None
 
+
                 if validation_loader is not None:
                     val_metrics = (
                         self.evaluate_attack_success(
@@ -1842,13 +1842,13 @@ class AdversarialAttack:
                     if val_metrics is not None:
                         best_val_asr = float(
                             val_metrics["attack_success_rate"])
-                    print(
-                        "[Targeted PSP-UAP] "
-                        f"step={step_idx + 1} "
-                        f"loss={step_loss:.6f} "
-                        f"target_asr={target_asr:.4f} "
-                        f"linf={patch_linf:.6f}"
-                    )
+                print(
+                    "[Targeted PSP-UAP] "
+                    f"step={step_idx + 1} "
+                    f"loss={step_loss:.6f} "
+                    f"target_asr={target_asr:.4f} "
+                    f"linf={patch_linf:.6f}"
+                )
 
         if best_patch is not None:
             learned_patch = best_patch
@@ -1859,10 +1859,6 @@ class AdversarialAttack:
         learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1),p=1,).item())
         learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2,).item())
         learned_patch_linf_norm = float(learned_patch.reshape(-1).abs().max().item())
-
-        # Training is complete; do not leave convolution hooks retaining
-        # activations during the caller's final evaluation or visualization.
-        self._remove_feature_extractor()
 
         return {
             "patch": learned_patch,
@@ -2193,37 +2189,23 @@ class AdversarialAttack:
         attack_success = 0
         clean_correct = 0
         clean_correct_and_not_target = 0
-        conditional_attack_success = 0
 
-        effective_source_filter = source_filter
-        if effective_source_filter is None:
-            effective_source_filter = 'bad' if source_only_bad else 'all'
-        if effective_source_filter not in {'bad', 'good', 'all'}:
-            raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
-
-        feature_extractor = getattr(self, 'feature_extractor', None)
-        capture_context = (
-            feature_extractor.suspend_capture()
-            if feature_extractor is not None
-            else nullcontext()
-        )
-
-        # Feature-based UAP methods leave forward hooks installed for the next
-        # optimization step.  ASR evaluation only needs logits, so collecting
-        # every convolutional activation here needlessly retains a loader-sized
-        # set of feature maps and can cause PSP-UAP-specific CUDA OOM failures.
-        with torch.no_grad(), capture_context:
+        with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
                 flat_targets = targets.view(-1)
 
-                if effective_source_filter == 'bad':
+                if source_filter is None:
+                    source_filter = 'bad' if source_only_bad else 'all'
+                if source_filter == 'bad':
                     source_mask = (flat_targets == 0)
-                elif effective_source_filter == 'good':
+                elif source_filter == 'good':
                     source_mask = (flat_targets == 1)
-                else:
+                elif source_filter == 'all':
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+                else:
+                    raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
 
                 if source_mask.sum().item() == 0:
                     continue
@@ -2235,11 +2217,7 @@ class AdversarialAttack:
                 clean_preds = (clean_outputs > 0).float().view(-1)
                 clean_targets = source_targets.view(-1)
                 clean_correct += int((clean_preds == clean_targets).sum().item())
-                eligible = (
-                    (clean_preds == clean_targets)
-                    & (clean_targets != float(target_label))
-                )
-                clean_correct_and_not_target += int(eligible.sum().item())
+                clean_correct_and_not_target += int((clean_preds != float(target_label)).sum().item())
 
                 poisoned_inputs = self._inject_trigger(
                     source_inputs.clone(),
@@ -2254,9 +2232,7 @@ class AdversarialAttack:
                 poisoned_preds = (poisoned_outputs > 0).float()
 
                 expanded_target = target_tensor.expand(poisoned_preds.shape[0], -1)
-                successful = (poisoned_preds == expanded_target).view(-1)
-                attack_success += int(successful.sum().item())
-                conditional_attack_success += int((successful & eligible).sum().item())
+                attack_success += int((poisoned_preds == expanded_target).sum().item())
                 total += int(poisoned_preds.shape[0])
 
         return {
@@ -2265,12 +2241,12 @@ class AdversarialAttack:
             'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
             'clean_not_target_count': clean_correct_and_not_target,
             'conditional_attack_success_rate': (
-                (conditional_attack_success / clean_correct_and_not_target) * 100
+                (attack_success / clean_correct_and_not_target) * 100
                 if clean_correct_and_not_target else 0.0
             ),
             'target_label': float(target_label),
             'trigger_box': trigger_box,
-            'source_filter': effective_source_filter,
+            'source_filter': source_filter if source_filter is not None else ('bad' if source_only_bad else 'all'),
         }
 
     @staticmethod
