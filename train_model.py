@@ -36,7 +36,7 @@ def main():
     print(f'train_pos_weight_for_BCE: {pos_weight:.6f}')
 
     classification = ClassificationBase(
-        model_name='ResNet18', 
+        model_name='SwinT', 
         optimizer_name='Adam', 
         checkpoint_dir='backups'
     )
