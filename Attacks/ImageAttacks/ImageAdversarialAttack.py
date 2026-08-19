@@ -57,6 +57,7 @@ class AdversarialAttack:
             self.cost_function = ClassificationObjective()
         elif name == 'gd_uap':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=100, layer_types=(torch.nn.Conv2d,))
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=100, layer_types=(torch.nn.Conv2d,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,),exclude_last_layers=1)
