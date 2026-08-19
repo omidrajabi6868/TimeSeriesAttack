@@ -16,10 +16,12 @@ def main():
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
+    eval_transform = ImageDataset.default_eval_transform(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
         batch_size=512,
         stratify_by_bad_sample=True,
+        eval_transform=eval_transform,
     )
 
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -96,17 +98,37 @@ def main():
         'adversarial_patch_selection: '
         f'{learned_trigger["selection"]}, '
         f'step={learned_trigger["selected_step"]}, '
-        f'best_val_asr={learned_trigger["best_validation_asr"]}, '
+        f'selected_val_asr={learned_trigger.get("selected_validation_asr")}, '
+        f'best_loss_val_asr={learned_trigger["best_validation_asr"]}, '
         f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
     )
+
+    selected_validation_eval = attack.evaluate_attack_success(
+        test_loader=val_loader,
+        trigger_box=learned_trigger['trigger_boxes'],
+        trigger_patch=learned_trigger['patch'],
+        trigger_mask=learned_trigger.get('mask'),
+        target_label=learned_trigger['target_label'],
+        source_filter=learned_trigger['source_filter'],
+        edge_softness=learned_trigger.get('softness', {}).get(
+            'selected_edge_softness',
+            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
+        ),
+        how_to_attach=how_to_attach,
+    )
+    print(f'selected_trigger_validation_eval: {selected_validation_eval}')
 
     learned_adversarial_eval = attack.evaluate_attack_success(
         test_loader=test_loader,
         trigger_box=learned_trigger['trigger_boxes'],
         trigger_patch=learned_trigger['patch'],
         trigger_mask=learned_trigger.get('mask'),
-        target_label=1.0,
-        source_only_bad=True,
+        target_label=learned_trigger['target_label'],
+        source_filter=learned_trigger['source_filter'],
+        edge_softness=learned_trigger.get('softness', {}).get(
+            'selected_edge_softness',
+            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
+        ),
         how_to_attach=how_to_attach
     )
     print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
