@@ -392,7 +392,19 @@ class AdversarialAttack:
         
         if patch_update_method == 'gap_uap':
             generator = ParameterRender().to(self.device)
-            patch_optimizer = torch.optim.Adam(generator.parameters(), lr=learning_rate) 
+            # Keep a direct, trainable path from the latent perturbation to the
+            # rendered perturbation.  Optimizing only the deep renderer made the
+            # targeted BCE gradient pass through every U-Net block before it
+            # could change the patch and commonly left GAP-UAP near its random
+            # initialization.  The residual parameterization is still rendered
+            # by GAP, while guaranteeing a well-conditioned identity path.
+            patch_optimizer = torch.optim.Adam(
+                [trigger_delta, *generator.parameters()],
+                lr=learning_rate,
+            )
+
+            def render_gap_patch():
+                return epsilon * torch.tanh(trigger_delta + generator(trigger_delta))
 
         if patch_update_method == 'robust_uap':
             return self._learn_robust_uap_trigger(
@@ -504,7 +516,12 @@ class AdversarialAttack:
             step_mask_reg_losses = []
             step_softness_reg_losses = []
             step_samples = 0
-            previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
+            if patch_update_method == 'gap_uap':
+                generator.eval()
+                with torch.no_grad():
+                    previous_patch = render_gap_patch().detach().clone()
+            else:
+                previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
 
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
@@ -528,7 +545,7 @@ class AdversarialAttack:
                 )
                 if patch_update_method == 'gap_uap':
                     generator.train()
-                    bounded_trigger_patch =  epsilon * torch.tanh(generator(trigger_delta))
+                    bounded_trigger_patch = render_gap_patch()
                 elif patch_update_method == 'hp_uap':
                     bounded_trigger_patch = epsilon * torch.tanh(hp_filtering(trigger_delta))
                 else:
@@ -651,7 +668,11 @@ class AdversarialAttack:
             step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
             step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
             if patch_update_method == 'gap_uap':
-                current_patch_for_metrics = (epsilon * torch.tanh(generator(trigger_delta))).detach()
+                # Materialize GAP in evaluation mode so BatchNorm uses the same
+                # running statistics for validation, selection, and export.
+                generator.eval()
+                with torch.no_grad():
+                    current_patch_for_metrics = render_gap_patch().detach()
             elif patch_update_method == 'hp_uap':
                 current_patch_for_metrics = (epsilon * torch.tanh(hp_filtering(trigger_delta))).detach()
             else:
