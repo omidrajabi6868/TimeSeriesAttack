@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -250,6 +252,18 @@ class PSPUAPObjective(AdversarialObjective):
                 "student and teacher logits: "
                 f"{student.shape} vs {teacher.shape}"
             )
+
+        # The reference implementation operates on multi-class logits.  A
+        # single sigmoid/BCE logit would otherwise make log_softmax identically
+        # zero and, consequently, every KL weight infinite.  Represent the
+        # same Bernoulli model as two logits so PSP reweighting also works for
+        # binary classifiers used by this project.
+        if student.ndim == 1:
+            student = student.unsqueeze(-1)
+            teacher = teacher.unsqueeze(-1)
+        if student.shape[-1] == 1:
+            student = torch.cat((torch.zeros_like(student), student), dim=-1)
+            teacher = torch.cat((torch.zeros_like(teacher), teacher), dim=-1)
 
         T = float(temperature)
 
@@ -658,8 +672,6 @@ class PSPUAPObjective(AdversarialObjective):
             # Minimize negative activation objective
             # -------------------------------------------------
 
-            layer_loss = layer_loss
-
             if loss is None:
                 loss = layer_loss
             else:
@@ -671,12 +683,15 @@ class PSPUAPObjective(AdversarialObjective):
                 "activations."
             )
 
-        return loss
+        # Optimizers minimize this objective, whereas PSP-UAP maximizes the
+        # summed log activation energy.
+        return -loss
 
 class FeatureExtractor:
     def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,), exclude_last_layers=0):
         self._activation_records = []
         self.hooks = []
+        self.capture_enabled = True
         self.output_device = self._infer_output_device(model)
 
         layers = [
@@ -735,11 +750,29 @@ class FeatureExtractor:
 
     def _make_hook(self, layer_idx):
         def hook(module, inp, out):
-            self._activation_records.append((layer_idx, out))
+            if self.capture_enabled:
+                self._activation_records.append((layer_idx, out))
         return hook
 
     def clear(self):
         self._activation_records.clear()
+
+    @contextmanager
+    def suspend_capture(self):
+        """Temporarily disable hooks without removing them.
+
+        PSP-UAP hooks every convolutional layer while optimizing the UAP.  The
+        hooks are not needed for ASR evaluation and retaining those feature
+        maps can use far more memory than the model forward itself.
+        """
+        was_enabled = self.capture_enabled
+        self.clear()
+        self.capture_enabled = False
+        try:
+            yield
+        finally:
+            self.clear()
+            self.capture_enabled = was_enabled
 
     def remove(self):
         for h in self.hooks:
