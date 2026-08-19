@@ -55,7 +55,13 @@ def main():
         )
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
-    print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
+    print(
+        f'test_loss: {test_metrics["loss"]}, '
+        f'test_accuracy: {test_metrics["accuracy"]}, '
+        f'test_precision: {test_metrics["precision"]}, '
+        f'test_recall: {test_metrics["recall"]}, '
+        f'test_f1: {test_metrics["f1"]}'
+    )
     print(
         'test_good_accuracy: '
         f'{test_metrics["good_accuracy"]}, '
