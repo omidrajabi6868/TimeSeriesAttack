@@ -49,6 +49,12 @@ class ClassificationBase:
             self.model = ClassificationModels.ResNet('101', 1).model
         elif self.model_name == "AlexNet":
             self.model = ClassificationModels.AlexNet('', 1).model
+        elif self.model_name == 'MobileNetV3Small':
+            self.model = ClassificationModels.MobileNetV3Small(1).model
+        elif self.model_name == 'EfficientNetB0':
+            self.model = ClassificationModels.EfficientNetB0(1).model
+        elif self.model_name == 'SwinT':
+            self.model = ClassificationModels.SwinT(1).model
         else:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 

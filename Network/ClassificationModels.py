@@ -1,6 +1,6 @@
 import torch
 from torchvision import models
-from typing import List
+
 
 class ResNet:
     def __init__(self, name: str ='18', num_classes: int=2):
@@ -29,3 +29,37 @@ class AlexNet:
         self.name = name
         in_features = self.model.classifier[6].in_features
         self.model.classifier[6] = torch.nn.Linear(in_features, num_classes)
+
+
+class MobileNetV3Small:
+    """A compact MobileNetV3 initialized with ImageNet weights."""
+
+    def __init__(self, num_classes: int = 2):
+        self.model = models.mobilenet_v3_small(
+            weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
+        )
+        self.num_classes = num_classes
+        in_features = self.model.classifier[3].in_features
+        self.model.classifier[3] = torch.nn.Linear(in_features, num_classes)
+
+
+class EfficientNetB0:
+    """The smallest EfficientNet variant initialized with ImageNet weights."""
+
+    def __init__(self, num_classes: int = 2):
+        self.model = models.efficientnet_b0(
+            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+        )
+        self.num_classes = num_classes
+        in_features = self.model.classifier[1].in_features
+        self.model.classifier[1] = torch.nn.Linear(in_features, num_classes)
+
+
+class SwinT:
+    """A compact hierarchical vision transformer with ImageNet weights."""
+
+    def __init__(self, num_classes: int = 2):
+        self.model = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
+        self.num_classes = num_classes
+        in_features = self.model.head.in_features
+        self.model.head = torch.nn.Linear(in_features, num_classes)
