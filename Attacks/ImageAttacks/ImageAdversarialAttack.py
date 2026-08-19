@@ -64,7 +64,12 @@ class AdversarialAttack:
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'psp_uap':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=0, layer_types=(torch.nn.Conv2d,))
-            self.cost_function = PSPUAPObjective(feature_extractor=self.feature_extractor, p_active=True, re_weight=True)
+            self.cost_function = PSPUAPObjective(
+                feature_extractor=self.feature_extractor,
+                p_active=True,
+                re_weight=True,
+                maximize_activations=False,
+            )
         else:
             assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
 
@@ -2254,6 +2259,9 @@ class AdversarialAttack:
         clean_correct = 0
         clean_correct_and_not_target = 0
         conditional_attack_success = 0
+        prediction_changes = 0
+        clean_prediction_not_target = 0
+        targeted_prediction_changes = 0
 
         effective_source_filter = source_filter
         if effective_source_filter is None:
@@ -2310,6 +2318,19 @@ class AdversarialAttack:
                 )
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
+                flat_poisoned_preds = poisoned_preds.view(-1)
+
+                # Feature-only UAP objectives are not explicitly targeted.
+                # Report whether they actually alter the decision separately
+                # from target-label ASR.  In a binary classifier every changed
+                # decision is necessarily a flip to the other class.
+                changed = flat_poisoned_preds != clean_preds
+                prediction_changes += int(changed.sum().item())
+                clean_not_target = clean_preds != float(target_label)
+                clean_prediction_not_target += int(clean_not_target.sum().item())
+                targeted_prediction_changes += int(
+                    (changed & clean_not_target & (flat_poisoned_preds == float(target_label))).sum().item()
+                )
 
                 expanded_target = target_tensor.expand(poisoned_preds.shape[0], -1)
                 successful = (poisoned_preds == expanded_target).view(-1)
@@ -2321,6 +2342,14 @@ class AdversarialAttack:
             'samples_evaluated': total,
             'clean_source_accuracy': (clean_correct / total) * 100 if total else 0.0,
             'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
+            'prediction_change_rate': (
+                (prediction_changes / total) * 100 if total else 0.0
+            ),
+            'clean_prediction_not_target_count': clean_prediction_not_target,
+            'targeted_prediction_change_rate': (
+                (targeted_prediction_changes / clean_prediction_not_target) * 100
+                if clean_prediction_not_target else 0.0
+            ),
             'clean_not_target_count': clean_correct_and_not_target,
             'conditional_attack_success_rate': (
                 (conditional_attack_success / clean_correct_and_not_target) * 100
