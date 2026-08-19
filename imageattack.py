@@ -33,31 +33,37 @@ def main():
     classification = ClassificationBase(
         model_name='AlexNet', 
         optimizer_name='Adam', 
-        checkpoint_dir='backups',
+        checkpoint_dir='backups/original_model',
     )
 
-    classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
+    classification.load_checkpoint("backups/original_model/alex_net.pth")
 
-    # test_metrics = classification.evaluate_model(test_loader=test_loader)
-    # print(f'test_loss: {test_metrics["loss"]}, test_accuracy: {test_metrics["accuracy"]}')
-    # print(
-    #     'test_good_accuracy: '
-    #     f'{test_metrics["good_accuracy"]}, '
-    #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
-    # )
+    test_metrics = classification.evaluate_model(test_loader=test_loader)
+    print(
+        f'test_loss: {test_metrics["loss"]}, '
+        f'test_accuracy: {test_metrics["accuracy"]}, '
+        f'test_precision: {test_metrics["precision"]}, '
+        f'test_recall: {test_metrics["recall"]}, '
+        f'test_f1: {test_metrics["f1"]}'
+    )
+    print(
+        'test_good_accuracy: '
+        f'{test_metrics["good_accuracy"]}, '
+        f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
+    )
 
     patch_count = 1
     patch_size = (608, 256)
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
     steps = 1000
-    learning_rate = 0.1
+    learning_rate = 0.05
     optimize_mask = False
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
     patch_update_method = "psp_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
-    epsilon = 0.05
+    epsilon = 0.08
     bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)

@@ -36,7 +36,7 @@ def main():
     print(f'train_pos_weight_for_BCE: {pos_weight:.6f}')
 
     classification = ClassificationBase(
-        model_name='SwinT', 
+        model_name='ResNet34', 
         optimizer_name='Adam', 
         checkpoint_dir='backups/original_model'
     )
@@ -53,6 +53,8 @@ def main():
             noise_regularization_weight=0.05,
             input_shape=(3, image_size[1], image_size[0]),
         )
+    
+    classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
     print(
