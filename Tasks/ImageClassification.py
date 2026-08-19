@@ -226,7 +226,7 @@ class ClassificationBase:
             'val_precision', 'val_recall', 'val_f1',
         ):
             history.setdefault(metric_name, [])
-        print('Training starts ...')
+        print('{self.model_name} Training starts ...')
         for epoch in range(start_epoch, epoch_num):
             train_loss = []
             self.model.train()
