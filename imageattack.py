@@ -50,7 +50,7 @@ def main():
     patch_size = (608, 256)
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
-    steps = 100
+    steps = 1000
     learning_rate = 0.001
     optimize_mask = False
     mask_learning_rate = 0.001

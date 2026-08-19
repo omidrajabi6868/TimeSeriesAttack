@@ -683,9 +683,7 @@ class PSPUAPObjective(AdversarialObjective):
                 "activations."
             )
 
-        # Optimizers minimize this objective, whereas PSP-UAP maximizes the
-        # summed log activation energy.
-        return -loss
+        return loss
 
 class FeatureExtractor:
     def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,), exclude_last_layers=0):
