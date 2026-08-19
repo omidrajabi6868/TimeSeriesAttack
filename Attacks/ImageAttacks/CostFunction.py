@@ -168,6 +168,11 @@ class PSPUAPObjective(AdversarialObjective):
     detach_weights:
         Detach PSP weights before multiplying activations.
         This matches the official implementation.
+
+    maximize_activations:
+        Select the sign of the feature objective. False returns the positive
+        log-activation score so gradient descent minimizes activations; True
+        returns its negative so gradient descent maximizes activations.
     """
 
     def __init__(
@@ -179,6 +184,7 @@ class PSPUAPObjective(AdversarialObjective):
         re_weight=False,
         temperature=1.0,
         detach_weights=True,
+        maximize_activations=False,
     ):
         super().__init__()
 
@@ -192,6 +198,9 @@ class PSPUAPObjective(AdversarialObjective):
         self.re_weight = re_weight
         self.temperature = temperature
         self.detach_weights = detach_weights
+        # Keep activation minimization as this project's intentional default,
+        # while making the experiment direction explicit and reproducible.
+        self.maximize_activations = bool(maximize_activations)
 
     # =========================================================
     # KL divergence used by official PSP-UAP implementation
@@ -669,13 +678,16 @@ class PSPUAPObjective(AdversarialObjective):
                 )
 
             # -------------------------------------------------
-            # Minimize negative activation objective
+            # Select the activation direction used by gradient descent.
             # -------------------------------------------------
 
+            signed_layer_loss = (
+                -layer_loss if self.maximize_activations else layer_loss
+            )
             if loss is None:
-                loss = layer_loss
+                loss = signed_layer_loss
             else:
-                loss = loss + layer_loss
+                loss = loss + signed_layer_loss
 
         if loss is None:
             raise RuntimeError(

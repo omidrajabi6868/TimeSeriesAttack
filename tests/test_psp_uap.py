@@ -8,6 +8,20 @@ from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler
 
 
 class PSPUAPTests(unittest.TestCase):
+    def test_objective_supports_both_activation_directions(self):
+        minimizing_feature = torch.tensor([[[[2.0]]]], requires_grad=True)
+        maximizing_feature = torch.tensor([[[[2.0]]]], requires_grad=True)
+
+        PSPUAPObjective(maximize_activations=False)(
+            outputs=[minimizing_feature]
+        ).backward()
+        PSPUAPObjective(maximize_activations=True)(
+            outputs=[maximizing_feature]
+        ).backward()
+
+        self.assertGreater(minimizing_feature.grad.item(), 0.0)
+        self.assertLess(maximizing_feature.grad.item(), 0.0)
+
     def test_sampler_uses_requested_copy_count_and_keeps_delta_gradient(self):
         torch.manual_seed(0)
         delta = torch.zeros(1, 3, 16, 16, requires_grad=True)
