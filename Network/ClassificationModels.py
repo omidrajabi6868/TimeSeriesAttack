@@ -3,7 +3,7 @@ from torchvision import models
 from typing import List
 
 class ResNet:
-    def __init__(self, name: str ='50', num_classes: int=2):
+    def __init__(self, name: str ='18', num_classes: int=2):
         
         if name == '18':
             self.model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)

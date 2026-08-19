@@ -50,14 +50,14 @@ def main():
     patch_size = (608, 256)
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
-    steps = 100
+    steps = 1000
     learning_rate = 0.1
     optimize_mask = False
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
     patch_update_method = "psp_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
-    epsilon = 0.03
+    epsilon = 0.05
     bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)
