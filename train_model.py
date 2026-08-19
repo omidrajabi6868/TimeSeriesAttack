@@ -10,7 +10,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=64,
+        batch_size=32,
         stratify_by_bad_sample=True,
     )
 
@@ -36,7 +36,7 @@ def main():
     print(f'train_pos_weight_for_BCE: {pos_weight:.6f}')
 
     classification = ClassificationBase(
-        model_name='ResNet34', 
+        model_name='AlexNet', 
         optimizer_name='Adam', 
         checkpoint_dir='backups/original_model'
     )
@@ -45,16 +45,16 @@ def main():
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=10,
+            epoch_num=5,
             resume=False,
             resume_from='backups/original_model/last_checkpoint.pth',
             pos_weight=pos_weight,
-            noise_probability_check=True,
+            noise_probability_check=False,
             noise_regularization_weight=0.05,
             input_shape=(3, image_size[1], image_size[0]),
         )
     
-    classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
+    classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
     print(

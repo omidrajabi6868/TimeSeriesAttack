@@ -11,7 +11,7 @@ from Network.ImageVAE import ImageVAE
 
 def main():
     task = 'learn_fixed_size_patch_no_mask_optimization'
-    training = True
+    training = False
 
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
@@ -19,7 +19,7 @@ def main():
     eval_transform = ImageDataset.default_eval_transform(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=512,
+        batch_size=64,
         stratify_by_bad_sample=True,
         eval_transform=eval_transform,
     )
@@ -36,7 +36,7 @@ def main():
         checkpoint_dir='backups/original_model',
     )
 
-    classification.load_checkpoint("backups/original_model/alex_net.pth")
+    classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
     print(
@@ -56,14 +56,14 @@ def main():
     patch_size = (608, 256)
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
-    steps = 1000
+    steps = 100
     learning_rate = 0.05
     optimize_mask = False
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
-    patch_update_method = "psp_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
-    epsilon = 0.08
+    patch_update_method = "mi_fgsm"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
+    epsilon = 0.03
     bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)
