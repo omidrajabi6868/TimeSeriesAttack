@@ -4,6 +4,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+from Network.ClassificationMetrics import binary_classification_metrics
 from PIL import Image
 from typing import Callable, Optional, Sequence
 from pathlib import Path
@@ -2262,6 +2263,8 @@ class AdversarialAttack:
         prediction_changes = 0
         clean_prediction_not_target = 0
         targeted_prediction_changes = 0
+        clean_tp = clean_tn = clean_fp = clean_fn = 0
+        attacked_tp = attacked_tn = attacked_fp = attacked_fn = 0
 
         effective_source_filter = source_filter
         if effective_source_filter is None:
@@ -2301,6 +2304,10 @@ class AdversarialAttack:
                 clean_preds = (clean_outputs > 0).float().view(-1)
                 clean_targets = source_targets.view(-1)
                 clean_correct += int((clean_preds == clean_targets).sum().item())
+                clean_tp += int(((clean_preds == 1) & (clean_targets == 1)).sum().item())
+                clean_tn += int(((clean_preds == 0) & (clean_targets == 0)).sum().item())
+                clean_fp += int(((clean_preds == 1) & (clean_targets == 0)).sum().item())
+                clean_fn += int(((clean_preds == 0) & (clean_targets == 1)).sum().item())
                 eligible = (
                     (clean_preds == clean_targets)
                     & (clean_targets != float(target_label))
@@ -2319,6 +2326,10 @@ class AdversarialAttack:
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
                 flat_poisoned_preds = poisoned_preds.view(-1)
+                attacked_tp += int(((flat_poisoned_preds == 1) & (clean_targets == 1)).sum().item())
+                attacked_tn += int(((flat_poisoned_preds == 0) & (clean_targets == 0)).sum().item())
+                attacked_fp += int(((flat_poisoned_preds == 1) & (clean_targets == 0)).sum().item())
+                attacked_fn += int(((flat_poisoned_preds == 0) & (clean_targets == 1)).sum().item())
 
                 # Feature-only UAP objectives are not explicitly targeted.
                 # Report whether they actually alter the decision separately
@@ -2338,9 +2349,25 @@ class AdversarialAttack:
                 conditional_attack_success += int((successful & eligible).sum().item())
                 total += int(poisoned_preds.shape[0])
 
+        before_attack = binary_classification_metrics(
+            clean_tp, clean_tn, clean_fp, clean_fn
+        )
+        after_attack = binary_classification_metrics(
+            attacked_tp, attacked_tn, attacked_fp, attacked_fn
+        )
         return {
             'samples_evaluated': total,
-            'clean_source_accuracy': (clean_correct / total) * 100 if total else 0.0,
+            'before_attack_metrics': before_attack,
+            'after_attack_metrics': after_attack,
+            'clean_source_accuracy': before_attack['accuracy'],
+            'before_attack_accuracy': before_attack['accuracy'],
+            'before_attack_precision': before_attack['precision'],
+            'before_attack_recall': before_attack['recall'],
+            'before_attack_f1': before_attack['f1'],
+            'after_attack_accuracy': after_attack['accuracy'],
+            'after_attack_precision': after_attack['precision'],
+            'after_attack_recall': after_attack['recall'],
+            'after_attack_f1': after_attack['f1'],
             'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
             'prediction_change_rate': (
                 (prediction_changes / total) * 100 if total else 0.0

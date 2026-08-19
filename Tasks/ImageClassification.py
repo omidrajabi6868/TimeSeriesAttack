@@ -8,6 +8,7 @@ import numpy as np
 from torch.utils.data import WeightedRandomSampler
 
 from Network import ClassificationModels
+from Network.ClassificationMetrics import binary_classification_metrics
 
 
 def _strip_module_prefix(state_dict: dict) -> dict:
@@ -49,6 +50,12 @@ class ClassificationBase:
             self.model = ClassificationModels.ResNet('101', 1).model
         elif self.model_name == "AlexNet":
             self.model = ClassificationModels.AlexNet('', 1).model
+        elif self.model_name == 'MobileNetV3Small':
+            self.model = ClassificationModels.MobileNetV3Small(1).model
+        elif self.model_name == 'EfficientNetB0':
+            self.model = ClassificationModels.EfficientNetB0(1).model
+        elif self.model_name == 'SwinT':
+            self.model = ClassificationModels.SwinT(1).model
         else:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 
@@ -197,6 +204,12 @@ class ClassificationBase:
             'val_loss': [],
             'train_accuracy': [],
             'val_accuracy': [],
+            'train_precision': [],
+            'train_recall': [],
+            'train_f1': [],
+            'val_precision': [],
+            'val_recall': [],
+            'val_f1': [],
         }
 
         start_epoch = 0
@@ -206,12 +219,20 @@ class ClassificationBase:
             start_epoch, best_val_loss, loaded_history = self.load_checkpoint(resume_from, load_optimizer=True)
             if loaded_history is not None:
                 history = loaded_history
+        # Older checkpoints only contain loss and accuracy history. Keep them
+        # resumable while recording the new metrics from the next epoch.
+        for metric_name in (
+            'train_precision', 'train_recall', 'train_f1',
+            'val_precision', 'val_recall', 'val_f1',
+        ):
+            history.setdefault(metric_name, [])
         print('Training starts ...')
         for epoch in range(start_epoch, epoch_num):
             train_loss = []
             self.model.train()
             total_num = 0
             correct = 0
+            tp = tn = fp = fn = 0
             noise_probabilities = []
             noise_reg_losses = []
             for inputs, targets in train_loader:
@@ -239,6 +260,10 @@ class ClassificationBase:
                 preds = (outputs > 0).float()
 
                 correct += (preds == targets).sum().item()
+                tp += int(((preds == 1) & (targets == 1)).sum().item())
+                tn += int(((preds == 0) & (targets == 0)).sum().item())
+                fp += int(((preds == 1) & (targets == 0)).sum().item())
+                fn += int(((preds == 0) & (targets == 1)).sum().item())
                 total_num += int(inputs.shape[0])
 
                 if noise_probability_check:
@@ -251,7 +276,14 @@ class ClassificationBase:
             
             avg_train_loss = mean(train_loss) if train_loss else 0.0
             train_acc = (correct / total_num) * 100 if total_num else 0.0
-            print(f'Epoch {epoch + 1}: train_loss={avg_train_loss:.5f}, train_accuracy={train_acc:.2f}')
+            train_metrics = binary_classification_metrics(tp, tn, fp, fn)
+            print(
+                f'Epoch {epoch + 1}: train_loss={avg_train_loss:.5f}, '
+                f'train_accuracy={train_acc:.2f}, '
+                f'train_precision={train_metrics["precision"]:.2f}, '
+                f'train_recall={train_metrics["recall"]:.2f}, '
+                f'train_f1={train_metrics["f1"]:.2f}'
+            )
 
             if noise_probability_check:
                 pos_mean = float(np.mean(noise_probabilities)) if noise_probabilities else 0.0
@@ -280,13 +312,24 @@ class ClassificationBase:
                 metrics = self.evaluate_model(val_loader)
                 val_loss = metrics['loss']
                 val_acc = metrics['accuracy']
-                print(f'val_loss={val_loss:.5f}, val_accuracy={val_acc:.2f}')
+                print(
+                    f'val_loss={val_loss:.5f}, val_accuracy={val_acc:.2f}, '
+                    f'val_precision={metrics["precision"]:.2f}, '
+                    f'val_recall={metrics["recall"]:.2f}, '
+                    f'val_f1={metrics["f1"]:.2f}'
+                )
 
             history['epoch'].append(epoch + 1)
             history['train_loss'].append(avg_train_loss)
             history['val_loss'].append(val_loss)
             history['train_accuracy'].append(train_acc)
             history['val_accuracy'].append(val_acc)
+            history['train_precision'].append(train_metrics['precision'])
+            history['train_recall'].append(train_metrics['recall'])
+            history['train_f1'].append(train_metrics['f1'])
+            history['val_precision'].append(metrics['precision'])
+            history['val_recall'].append(metrics['recall'])
+            history['val_f1'].append(metrics['f1'])
 
             self._save_history_json(history)
             self._plot_history(history)
@@ -348,6 +391,7 @@ class ClassificationBase:
         g_correct = 0
         bad_total = 0
         bad_correct = 0
+        tp = tn = fp = fn = 0
         for inputs, targets in test_loader:
             inputs = inputs.to(self.device)
             targets = targets.float().unsqueeze(-1).to(self.device)
@@ -359,6 +403,10 @@ class ClassificationBase:
             preds = (outputs > 0).float()
 
             correct += (preds == targets).sum().item()
+            tp += int(((preds == 1) & (targets == 1)).sum().item())
+            tn += int(((preds == 0) & (targets == 0)).sum().item())
+            fp += int(((preds == 1) & (targets == 0)).sum().item())
+            fn += int(((preds == 0) & (targets == 1)).sum().item())
             total_num += int(inputs.shape[0])
 
             per_sample_correct = (preds == targets)
@@ -370,10 +418,10 @@ class ClassificationBase:
             bad_total += int(bad_mask.sum().item())
             bad_correct += int(per_sample_correct[bad_mask].sum().item())
 
-        accuracy = (correct / total_num) * 100 if total_num else 0.0
+        metrics = binary_classification_metrics(tp, tn, fp, fn)
         return {
             'loss': mean(losses) if losses else 0.0,
-            'accuracy': accuracy,
+            **metrics,
             'good_accuracy': (g_correct / g_total) * 100 if g_total else 0.0,
             'bad_accuracy': (bad_correct / bad_total) * 100 if bad_total else 0.0,
             'good_count': g_total,
