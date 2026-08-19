@@ -98,7 +98,8 @@ def main():
         'adversarial_patch_selection: '
         f'{learned_trigger["selection"]}, '
         f'step={learned_trigger["selected_step"]}, '
-        f'best_val_asr={learned_trigger["best_validation_asr"]}, '
+        f'selected_val_asr={learned_trigger.get("selected_validation_asr")}, '
+        f'best_loss_val_asr={learned_trigger["best_validation_asr"]}, '
         f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
     )
 
@@ -109,6 +110,10 @@ def main():
         trigger_mask=learned_trigger.get('mask'),
         target_label=learned_trigger['target_label'],
         source_filter=learned_trigger['source_filter'],
+        edge_softness=learned_trigger.get('softness', {}).get(
+            'selected_edge_softness',
+            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
+        ),
         how_to_attach=how_to_attach,
     )
     print(f'selected_trigger_validation_eval: {selected_validation_eval}')
@@ -120,6 +125,10 @@ def main():
         trigger_mask=learned_trigger.get('mask'),
         target_label=learned_trigger['target_label'],
         source_filter=learned_trigger['source_filter'],
+        edge_softness=learned_trigger.get('softness', {}).get(
+            'selected_edge_softness',
+            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
+        ),
         how_to_attach=how_to_attach
     )
     print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
