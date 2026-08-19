@@ -7,10 +7,11 @@ from PIL import Image
 from typing import Callable, Optional, Sequence
 from pathlib import Path
 from Network import ClassificationModels
-from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor
+from Attacks.ImageAttacks.CostFunction import ClassificationObjective, FeaturBaseObjective, FeatureExtractor, PSPUAPObjective
 from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
 from Attacks.ImageAttacks.RobustUAP import RobustUAPConfig, TransformSampler, estimate_robustness, project_lp_ball
+from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler 
 from torch.utils.data import TensorDataset, DataLoader
 
 
@@ -55,16 +56,14 @@ class AdversarialAttack:
         if name == 'classification':
             self.cost_function = ClassificationObjective()
         elif name == 'gd_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Conv2d,))
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=100, layer_types=(torch.nn.Conv2d,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
-            self.feature_extractor = FeatureExtractor(
-                self.model,
-                n_last_layers=4,
-                layer_types=(torch.nn.Linear,),
-                exclude_last_layers=1,
-            )
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,),exclude_last_layers=1)
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
+        elif name == 'psp_uap':
+            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=0, layer_types=(torch.nn.Conv2d,))
+            self.cost_function = PSPUAPObjective(feature_extractor=self.feature_extractor, p_active=True, re_weight=True)
         else:
             assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
 
@@ -329,8 +328,10 @@ class AdversarialAttack:
             patch_update_method = 'fg_uap'
         elif patch_update_method in ('robust', 'robust_uap'):
             patch_update_method = 'robust_uap'
+        elif patch_update_method in ('psp', 'psp_uap'):
+            patch_update_method = 'psp_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -377,7 +378,7 @@ class AdversarialAttack:
             )
 
         patch_optimizer = None
-        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap'):
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap'):
             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
             if patch_update_method == 'hp_uap':
                 hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
@@ -389,6 +390,25 @@ class AdversarialAttack:
         if patch_update_method == 'robust_uap':
             return self._learn_robust_uap_trigger(
                 data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer
+            )
+
+        if patch_update_method == 'psp_uap':
+            return self._learn_psp_uap_trigger(
                 validation_loader=validation_loader,
                 trigger_boxes=trigger_boxes,
                 trigger_delta=trigger_delta,
@@ -1625,6 +1645,252 @@ class AdversarialAttack:
             'smallest_success_validation_loss': None,
             'smallest_success_validation_asr': None,
             'smallest_success_patch_area': None,
+        }
+
+    def _learn_psp_uap_trigger(self,
+                                validation_loader,
+                                trigger_boxes,
+                                trigger_delta,
+                                target_label,
+                                source_filter,
+                                steps,
+                                epsilon,
+                                log_interval,
+                                trigger_preview_interval,
+                                trigger_preview_dir,
+                                trigger_preview_loader,
+                                trigger_preview_max_images,
+                                edge_softness,
+                                how_to_attach,
+                                patch_optimizer,
+                            ):
+        target_class = int(target_label)
+
+        if float(target_label) not in (0.0, 1.0):
+            raise ValueError(
+                "Targeted PSP-UAP currently supports binary "
+                "target_label values 0 or 1."
+            )
+        height = int(trigger_boxes[0]["height"])
+        width = int(trigger_boxes[0]["width"])
+
+        for box in trigger_boxes[1:]:
+            if (int(box["width"]) != width or int(box["height"]) != height):
+                raise ValueError("All trigger boxes must share size for PSP-UAP.")
+
+        history = []
+        preview_records = []
+
+        preview_interval = (int(trigger_preview_interval) if trigger_preview_interval is not None else 0)
+
+        preview_max_images = (
+            max(0, int(trigger_preview_max_images))
+            if trigger_preview_max_images is not None
+            else 0
+        )
+
+        preview_output_dir = (
+            Path(trigger_preview_dir)
+            if trigger_preview_dir is not None
+            else None
+        )
+
+        if (preview_interval > 0 and preview_output_dir is not None):
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+
+        preview_data_loader = (trigger_preview_loader or validation_loader)
+
+        self._build_cost_function("psp_uap")
+        psp_sampler = PSPTransformSampler(image_size=(height, width), device=self.device)
+
+        if not torch.is_tensor(trigger_delta):
+            raise TypeError(
+                "trigger_delta must be a torch.Tensor."
+            )
+
+        if not trigger_delta.requires_grad:
+            trigger_delta.requires_grad_(True)
+
+        best_patch = None
+        best_step = 0
+
+        best_target_asr = float("-inf")
+        best_val_asr = float("-inf")
+        best_val_loss = float("inf")
+
+        for step_idx in range(int(steps)):
+
+            step_losses = []
+            step_samples = 0
+
+            universal_patch = (epsilon*torch.tanh(trigger_delta))
+
+            semantic_prior, semantic_delta = (
+                psp_sampler.sample(
+                    delta=universal_patch,
+                    num_copies=32,
+                    input_transform=True,
+                )
+            )
+
+            semantic_prior = semantic_prior.to(self.device)
+            semantic_delta = semantic_delta.to(self.device)
+
+            with torch.no_grad():
+                semantic_logits = self.model(semantic_prior)
+
+            self.feature_extractor.clear()
+
+            delta_logits = self.model(semantic_delta)
+
+            adv_features = self.feature_extractor.activations
+
+            batch_loss = self.cost_function(
+                outputs=adv_features,
+                semantic_logits=semantic_logits,
+                delta_logits=delta_logits,
+            )
+
+            patch_optimizer.zero_grad(set_to_none=True)
+
+            batch_loss.backward()
+
+            patch_optimizer.step()
+
+            with torch.no_grad():
+                universal_patch = (epsilon*torch.tanh(trigger_delta))
+
+            batch_loss_value = float(batch_loss.detach().item())
+
+            step_losses.append(batch_loss_value)
+
+            step_samples += int(semantic_prior.shape[0])
+
+            
+            step_loss = (sum(step_losses)/ len(step_losses) if step_losses else 0.0)
+
+            patch_linf = float(universal_patch.detach().reshape(-1).abs().max().item())
+
+            step_history = {
+                "step": step_idx + 1,
+                "patch_update_method": "psp_uap",
+                "loss": step_loss,
+                "patch_linf_norm": patch_linf,
+                "effective_patch_linf_norm": patch_linf,
+            }
+
+            history.append(step_history)
+
+            if (preview_interval > 0 and preview_output_dir is not None and (step_idx + 1) % preview_interval == 0):
+
+                step_preview_records = (
+                    self._save_trigger_preview(
+                        data_loader=preview_data_loader,
+                        output_dir=preview_output_dir,
+                        step=step_idx + 1,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=universal_patch.detach(),
+                        trigger_mask=None,
+                        target_label=target_class,
+                        source_filter=source_filter,
+                        edge_softness=edge_softness,
+                        max_images=preview_max_images,
+                        how_to_attach=how_to_attach,
+                    )
+                )
+
+                preview_records.extend(step_preview_records)
+
+            if (log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0):
+
+                target_metrics = (
+                    self.evaluate_attack_success(
+                        test_loader=validation_loader,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=universal_patch.detach(),
+                        trigger_mask=None,
+                        target_label=target_class,
+                        source_filter=source_filter,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach,
+                    )
+                )
+
+                val_metrics = None
+
+                if validation_loader is not None:
+                    val_metrics = (
+                        self.evaluate_attack_success(
+                            test_loader=validation_loader,
+                            trigger_box=trigger_boxes,
+                            trigger_patch=universal_patch.detach(),
+                            trigger_mask=None,
+                            target_label=target_class,
+                            source_filter=source_filter,
+                            edge_softness=edge_softness,
+                            how_to_attach=how_to_attach,
+                        )
+                    )
+
+                target_asr = float(target_metrics["attack_success_rate"])
+
+                if target_asr > best_target_asr:
+                    best_target_asr = target_asr
+                    best_patch = (universal_patch.detach().cpu().clone())
+                    best_step = step_idx + 1
+                    if val_metrics is not None:
+                        best_val_asr = float(
+                            val_metrics["attack_success_rate"])
+                    print(
+                        "[Targeted PSP-UAP] "
+                        f"step={step_idx + 1} "
+                        f"loss={step_loss:.6f} "
+                        f"target_asr={target_asr:.4f} "
+                        f"linf={patch_linf:.6f}"
+                    )
+
+        if best_patch is not None:
+            learned_patch = best_patch
+        else:
+            with torch.no_grad():
+                learned_patch = (epsilon* torch.tanh(trigger_delta)).detach().cpu()
+
+        learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1),p=1,).item())
+        learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2,).item())
+        learned_patch_linf_norm = float(learned_patch.reshape(-1).abs().max().item())
+
+        return {
+            "patch": learned_patch,
+            "mask": None,
+            "history": history,
+            "trigger_box": trigger_boxes[0],
+            "trigger_boxes": trigger_boxes,
+            "target_label": float(target_class),
+            "source_filter": source_filter,
+            "patch_update_method": "psp_uap",
+            "epsilon": learned_patch_linf_norm,
+            "effective_epsilon": learned_patch_linf_norm,
+            "patch_norms": {
+                "l1": learned_patch_l1_norm,
+                "l2": learned_patch_l2_norm,
+                "linf": learned_patch_linf_norm,
+                "effective_linf": learned_patch_linf_norm,
+            },
+            "softness": {
+                "initial_edge_softness": float(edge_softness),
+                "final_edge_softness": float(edge_softness),
+            },
+            "progressive_resize": {
+                "enabled": False,
+                "events": [],
+            },
+            "trigger_previews": preview_records,
+            "selection": ("best_targeted_attack_success_rate"),
+            "selected_step": int(best_step or steps),
+            "best_validation_asr": (None if validation_loader is None else float(best_val_asr)),
+            "smallest_success_validation_loss": None,
+            "smallest_success_validation_asr": None,
+            "smallest_success_patch_area": None,
         }
 
     @staticmethod

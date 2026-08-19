@@ -54,7 +54,7 @@ def main():
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
-    patch_update_method = "robust_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap']
+    patch_update_method = "psp_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
     epsilon = 0.03
     bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
@@ -83,15 +83,7 @@ def main():
     else:
         learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
         print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
-
-    print(
-        'adversarial_patch_selection: '
-        f'{learned_trigger["selection"]}, '
-        f'step={learned_trigger["selected_step"]}, '
-        f'best_val_loss={learned_trigger["best_validation_loss"]}, '
-        f'best_val_asr={learned_trigger["best_validation_asr"]}, '
-        f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
-    )
+    
     saved_trigger_path = attack.save_trigger(
         trigger=learned_trigger,
         output_path=f'{trigger_preview_dir}/saved_trigger',
@@ -99,6 +91,14 @@ def main():
 
     print(f'saved_adversarial_trigger: {saved_trigger_path}')
     print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
+
+    print(
+        'adversarial_patch_selection: '
+        f'{learned_trigger["selection"]}, '
+        f'step={learned_trigger["selected_step"]}, '
+        f'best_val_asr={learned_trigger["best_validation_asr"]}, '
+        f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
+    )
 
     learned_adversarial_eval = attack.evaluate_attack_success(
         test_loader=test_loader,

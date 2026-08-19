@@ -75,7 +75,7 @@ class Attck(AdversarialAttack):
             softness_alignment_weight=1,
             patch_update_method=patch_update_method,
             epsilon=epsilon,
-            log_interval=1,
+            log_interval=5,
             trigger_preview_interval=10,
             trigger_preview_dir=trigger_preview_dir,
             trigger_preview_loader=trigger_preview_loader,
