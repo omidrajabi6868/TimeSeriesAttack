@@ -103,33 +103,31 @@ def main():
         f'inferred_epsilon={learned_trigger.get("effective_epsilon", learned_trigger.get("epsilon"))}'
     )
 
+    learned_softness = learned_trigger.get('softness', {})
+    selected_edge_softness = learned_softness.get(
+        'selected_edge_softness',
+        learned_softness.get('final_edge_softness', 0.2),
+    )
+    learned_how_to_attach = learned_trigger.get('how_to_attach', how_to_attach)
+    selected_trigger_eval_kwargs = {
+        'trigger_box': learned_trigger['trigger_boxes'],
+        'trigger_patch': learned_trigger['patch'],
+        'trigger_mask': learned_trigger.get('mask'),
+        'target_label': learned_trigger['target_label'],
+        'source_filter': learned_trigger['source_filter'],
+        'edge_softness': selected_edge_softness,
+        'how_to_attach': learned_how_to_attach,
+    }
+
     selected_validation_eval = attack.evaluate_attack_success(
         test_loader=val_loader,
-        trigger_box=learned_trigger['trigger_boxes'],
-        trigger_patch=learned_trigger['patch'],
-        trigger_mask=learned_trigger.get('mask'),
-        target_label=learned_trigger['target_label'],
-        source_filter=learned_trigger['source_filter'],
-        edge_softness=learned_trigger.get('softness', {}).get(
-            'selected_edge_softness',
-            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
-        ),
-        how_to_attach=how_to_attach,
+        **selected_trigger_eval_kwargs,
     )
     print(f'selected_trigger_validation_eval: {selected_validation_eval}')
 
     learned_adversarial_eval = attack.evaluate_attack_success(
         test_loader=test_loader,
-        trigger_box=learned_trigger['trigger_boxes'],
-        trigger_patch=learned_trigger['patch'],
-        trigger_mask=learned_trigger.get('mask'),
-        target_label=learned_trigger['target_label'],
-        source_filter=learned_trigger['source_filter'],
-        edge_softness=learned_trigger.get('softness', {}).get(
-            'selected_edge_softness',
-            learned_trigger.get('softness', {}).get('final_edge_softness', 0.2),
-        ),
-        how_to_attach=how_to_attach
+        **selected_trigger_eval_kwargs,
     )
     print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
 
