@@ -10,7 +10,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=512,
+        batch_size=64,
         stratify_by_bad_sample=True,
     )
 
@@ -36,16 +36,16 @@ def main():
     print(f'train_pos_weight_for_BCE: {pos_weight:.6f}')
 
     classification = ClassificationBase(
-        model_name='ResNet18', 
+        model_name='SwinT', 
         optimizer_name='Adam', 
-        checkpoint_dir='backups'
+        checkpoint_dir='backups/original_model'
     )
 
     classification.train_model(
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=50,
+            epoch_num=10,
             resume=False,
             resume_from='backups/original_model/last_checkpoint.pth',
             pos_weight=pos_weight,

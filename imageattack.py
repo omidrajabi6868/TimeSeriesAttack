@@ -33,7 +33,7 @@ def main():
     classification = ClassificationBase(
         model_name='AlexNet', 
         optimizer_name='Adam', 
-        checkpoint_dir='backups'
+        checkpoint_dir='backups',
     )
 
     classification.load_checkpoint("backups/original_model/best_checkpoint.pth")

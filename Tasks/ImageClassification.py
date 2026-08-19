@@ -339,7 +339,7 @@ class ClassificationBase:
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_ckpt_path = self.checkpoint_dir / 'best_checkpoint.pth'
+                best_ckpt_path = f'{self.checkpoint_dir}/{self.model_name}.pth'
                 self._save_checkpoint(best_ckpt_path, epoch, best_val_loss, history)
 
         return self.model, history
