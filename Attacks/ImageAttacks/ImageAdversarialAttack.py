@@ -242,7 +242,7 @@ class AdversarialAttack:
                                 enable_compression_phase=True,
                                 how_to_attach='blend',
                                 bandwidth=60,
-                                psp_num_copies=10):
+                                psp_num_copies=128):
         self.model.eval()
         progressive_resize_enabled = bool(progressive_resize)
 
