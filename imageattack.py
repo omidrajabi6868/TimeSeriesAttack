@@ -39,6 +39,7 @@ def main():
     classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
     test_metrics = classification.evaluate_model(test_loader=test_loader)
+    print('\n\n')
     print(
         f'test_loss: {test_metrics["loss"]}, '
         f'test_accuracy: {test_metrics["accuracy"]}, '
