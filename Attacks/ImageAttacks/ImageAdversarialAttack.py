@@ -2252,10 +2252,18 @@ class AdversarialAttack:
                                  source_filter=None,
                                  edge_softness=0.2,
                                  how_to_attach='blend'):
+        """Evaluate classification quality globally and attack success on its source class.
+
+        The trigger is attached only to samples selected by ``source_filter``.
+        Before/after classification metrics cover the complete loader, with
+        non-source samples left unchanged, while ASR and prediction-change rates
+        use only the selected source samples as their denominator.
+        """
         self.model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
 
         total = 0
+        source_total = 0
         attack_success = 0
         clean_correct = 0
         clean_correct_and_not_target = 0
@@ -2294,35 +2302,35 @@ class AdversarialAttack:
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
-                if source_mask.sum().item() == 0:
-                    continue
-
-                source_inputs = inputs[source_mask]
-                source_targets = targets[source_mask]
-
-                clean_outputs = self.model(source_inputs)
+                clean_outputs = self.model(inputs)
                 clean_preds = (clean_outputs > 0).float().view(-1)
-                clean_targets = source_targets.view(-1)
-                clean_correct += int((clean_preds == clean_targets).sum().item())
+                clean_targets = flat_targets
                 clean_tp += int(((clean_preds == 1) & (clean_targets == 1)).sum().item())
                 clean_tn += int(((clean_preds == 0) & (clean_targets == 0)).sum().item())
                 clean_fp += int(((clean_preds == 1) & (clean_targets == 0)).sum().item())
                 clean_fn += int(((clean_preds == 0) & (clean_targets == 1)).sum().item())
+                source_clean_preds = clean_preds[source_mask]
+                source_clean_targets = clean_targets[source_mask]
+                clean_correct += int(
+                    (source_clean_preds == source_clean_targets).sum().item()
+                )
                 eligible = (
-                    (clean_preds == clean_targets)
-                    & (clean_targets != float(target_label))
+                    (source_clean_preds == source_clean_targets)
+                    & (source_clean_targets != float(target_label))
                 )
                 clean_correct_and_not_target += int(eligible.sum().item())
 
-                poisoned_inputs = self._inject_trigger(
-                    source_inputs.clone(),
-                    trigger_box,
-                    trigger_value=trigger_value,
-                    trigger_patch=trigger_patch,
-                    trigger_mask=trigger_mask,
-                    edge_softness=edge_softness,
-                    how_to_attach=how_to_attach
-                )
+                poisoned_inputs = inputs.clone()
+                if source_mask.any():
+                    poisoned_inputs[source_mask] = self._inject_trigger(
+                        inputs[source_mask].clone(),
+                        trigger_box,
+                        trigger_value=trigger_value,
+                        trigger_patch=trigger_patch,
+                        trigger_mask=trigger_mask,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach
+                    )
                 poisoned_outputs = self.model(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
                 flat_poisoned_preds = poisoned_preds.view(-1)
@@ -2335,19 +2343,23 @@ class AdversarialAttack:
                 # Report whether they actually alter the decision separately
                 # from target-label ASR.  In a binary classifier every changed
                 # decision is necessarily a flip to the other class.
-                changed = flat_poisoned_preds != clean_preds
+                source_poisoned_preds = flat_poisoned_preds[source_mask]
+                changed = source_poisoned_preds != source_clean_preds
                 prediction_changes += int(changed.sum().item())
-                clean_not_target = clean_preds != float(target_label)
+                clean_not_target = source_clean_preds != float(target_label)
                 clean_prediction_not_target += int(clean_not_target.sum().item())
                 targeted_prediction_changes += int(
-                    (changed & clean_not_target & (flat_poisoned_preds == float(target_label))).sum().item()
+                    (changed & clean_not_target & (source_poisoned_preds == float(target_label))).sum().item()
                 )
 
-                expanded_target = target_tensor.expand(poisoned_preds.shape[0], -1)
-                successful = (poisoned_preds == expanded_target).view(-1)
+                expanded_target = target_tensor.expand(source_poisoned_preds.shape[0], -1)
+                successful = (
+                    source_poisoned_preds.view(-1, 1) == expanded_target
+                ).view(-1)
                 attack_success += int(successful.sum().item())
                 conditional_attack_success += int((successful & eligible).sum().item())
-                total += int(poisoned_preds.shape[0])
+                source_total += int(source_mask.sum().item())
+                total += int(targets.shape[0])
 
         before_attack = binary_classification_metrics(
             clean_tp, clean_tn, clean_fp, clean_fn
@@ -2357,9 +2369,12 @@ class AdversarialAttack:
         )
         return {
             'samples_evaluated': total,
+            'attacked_samples_evaluated': source_total,
             'before_attack_metrics': before_attack,
             'after_attack_metrics': after_attack,
-            'clean_source_accuracy': before_attack['accuracy'],
+            'clean_source_accuracy': (
+                (clean_correct / source_total) * 100 if source_total else 0.0
+            ),
             'before_attack_accuracy': before_attack['accuracy'],
             'before_attack_precision': before_attack['precision'],
             'before_attack_recall': before_attack['recall'],
@@ -2368,9 +2383,11 @@ class AdversarialAttack:
             'after_attack_precision': after_attack['precision'],
             'after_attack_recall': after_attack['recall'],
             'after_attack_f1': after_attack['f1'],
-            'attack_success_rate': (attack_success / total) * 100 if total else 0.0,
+            'attack_success_rate': (
+                (attack_success / source_total) * 100 if source_total else 0.0
+            ),
             'prediction_change_rate': (
-                (prediction_changes / total) * 100 if total else 0.0
+                (prediction_changes / source_total) * 100 if source_total else 0.0
             ),
             'clean_prediction_not_target_count': clean_prediction_not_target,
             'targeted_prediction_change_rate': (
@@ -2385,6 +2402,8 @@ class AdversarialAttack:
             'target_label': float(target_label),
             'trigger_box': trigger_box,
             'source_filter': effective_source_filter,
+            'classification_metrics_scope': 'all',
+            'attack_metrics_scope': effective_source_filter,
         }
 
     @staticmethod
