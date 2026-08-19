@@ -10,7 +10,7 @@ def main():
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=512,
+        batch_size=128,
         stratify_by_bad_sample=True,
     )
 
@@ -45,7 +45,7 @@ def main():
             train_loader,
             val_loader,
             learning_rate=1e-4,
-            epoch_num=50,
+            epoch_num=10,
             resume=False,
             resume_from='backups/original_model/last_checkpoint.pth',
             pos_weight=pos_weight,
