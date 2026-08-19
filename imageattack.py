@@ -50,8 +50,8 @@ def main():
     patch_size = (608, 256)
     how_to_attach = 'blend'
     attack = Attck(patch_size=patch_size, model=classification.model)
-    steps = 1000
-    learning_rate = 0.001
+    steps = 100
+    learning_rate = 0.05
     optimize_mask = False
     mask_learning_rate = 0.001
     mask_l1_weight = 0
@@ -82,17 +82,14 @@ def main():
                                             patch_update_method=patch_update_method,
                                             epsilon=epsilon,
                                             bandwidth=bandwidth)
+
+        saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
+        print(f'saved_adversarial_trigger: {saved_trigger_path}')
+        print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
+        
     else:
         learned_trigger = attack.load_trigger(f'{trigger_preview_dir}/saved_trigger')
         print(f'loaded_adversarial_trigger: {learned_trigger["path"]}')
-    
-    saved_trigger_path = attack.save_trigger(
-        trigger=learned_trigger,
-        output_path=f'{trigger_preview_dir}/saved_trigger',
-    )
-
-    print(f'saved_adversarial_trigger: {saved_trigger_path}')
-    print(f'saved_adversarial_history: {learned_trigger["history_path"]}')
 
     print(
         'adversarial_patch_selection: '
