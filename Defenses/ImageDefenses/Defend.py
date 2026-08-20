@@ -64,6 +64,20 @@ class Defender:
             ),
         }
 
+    @staticmethod
+    def _resolve_trigger_attachment(learned_trigger, how_to_attach):
+        """Use the attachment rule saved with the attack unless overridden."""
+        if how_to_attach is None:
+            return learned_trigger.get('how_to_attach') or 'blend'
+        return how_to_attach
+
+    @staticmethod
+    def _resolve_source_filter(learned_trigger, source_filter):
+        """Use the source class saved with the attack unless overridden."""
+        if source_filter is None:
+            return learned_trigger.get('source_filter') or 'bad'
+        return source_filter
+
     def _unwrap_data_parallel(self, model):
         """Return the underlying module and its DataParallel device IDs.
 
@@ -98,12 +112,14 @@ class Defender:
 
     def feature_distillation(self,
                             trigger_path,
-                            source_filter='bad',
-                            how_to_attach='blend',
+                            source_filter=None,
+                            how_to_attach=None,
                             block=8, QS=50.0, preserve_ratio=0.5, fd_batch_size=32, fd_max_blocks_per_chunk=65536,
                             save_examples_dir=None, max_saved_examples=5):
 
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
+        how_to_attach = self._resolve_trigger_attachment(learned_trigger, how_to_attach)
+        source_filter = self._resolve_source_filter(learned_trigger, source_filter)
         target_label = float(learned_trigger['target_label'])
 
         std_map = FeatureDistillation.compute_dct_statistics(
@@ -373,6 +389,8 @@ class Defender:
             'fd_timing_batch_size': int(fd_batch_size),
             'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
+            'how_to_attach': how_to_attach,
+            'source_filter': source_filter,
             'trigger_box': learned_trigger['trigger_boxes'],
             'trigger_coverage_ratio': trigger_coverage_ratio(
                 learned_trigger['trigger_boxes'],
@@ -394,8 +412,8 @@ class Defender:
     def diffusion_purification(self,
                             trigger_path,
                             diffusion_checkpoint_path,
-                            source_filter='bad',
-                            how_to_attach='blend',
+                            source_filter=None,
+                            how_to_attach=None,
                             diffusion_step=100,
                             reverse_steps=None,
                             stochastic=True,
@@ -409,6 +427,8 @@ class Defender:
         denoising process before the classifier sees the image.
         """
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
+        how_to_attach = self._resolve_trigger_attachment(learned_trigger, how_to_attach)
+        source_filter = self._resolve_source_filter(learned_trigger, source_filter)
         target_label = float(learned_trigger['target_label'])
         purifier = DiffusionPurifier.from_checkpoint(diffusion_checkpoint_path, map_location=self.device).to(self.device)
         purifier.model = self._prepare_data_parallel_model(
@@ -617,6 +637,8 @@ class Defender:
             'stochastic_reverse_process': bool(stochastic),
             'dp_timing_batch_size': int(dp_batch_size),
             'target_label': target_label,
+            'how_to_attach': how_to_attach,
+            'source_filter': source_filter,
             'trigger_box': learned_trigger['trigger_boxes'],
             'trigger_coverage_ratio': trigger_coverage_ratio(
                 learned_trigger['trigger_boxes'],
@@ -642,13 +664,15 @@ class Defender:
 
     def feature_squeezing(self,
                         trigger_path,
-                        source_filter='bad',
-                        how_to_attach='blend',
+                        source_filter=None,
+                        how_to_attach=None,
                         sqz_threshold=0.08,
                         save_examples_dir=None,
                         max_saved_examples=5):
 
         learned_trigger = AdversarialAttack.load_trigger(trigger_path)
+        how_to_attach = self._resolve_trigger_attachment(learned_trigger, how_to_attach)
+        source_filter = self._resolve_source_filter(learned_trigger, source_filter)
         target_label = float(learned_trigger['target_label'])
 
         print("\n--- Initializing Detector & Running Evaluation ---")
@@ -731,6 +755,8 @@ class Defender:
             'successful_adversarial_samples': total_adv,
             'false_positive_rate': fpr,
             'adversarial_detection_rate': detection_rate,
+            'how_to_attach': how_to_attach,
+            'source_filter': source_filter,
         }
         result.update(self._runtime_metrics(clean_detection_runtime, total_clean, 'clean_detection'))
         result.update(self._runtime_metrics(adversarial_detection_runtime, total_adv, 'adversarial_detection'))

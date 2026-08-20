@@ -39,9 +39,7 @@ def main():
     if defend_name == "feature_distillation":
         print("Feature Distillation")
         print(defender.feature_distillation(
-                trigger_path=trigger_path,
-                source_filter='bad',
-                how_to_attach='blend',
+                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger',
                 QS=1,
                 preserve_ratio=0.0,
                 fd_batch_size=16,
@@ -55,8 +53,6 @@ def main():
         print(defender.diffusion_purification(
                 trigger_path=trigger_path,
                 diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
-                source_filter='bad',
-                how_to_attach='blend',
                 diffusion_step=100,
                 reverse_steps=None,
                 stochastic=True,
@@ -68,9 +64,7 @@ def main():
     
     if defend_name == "feature_squeezing":
         print('Feature Squeezing')
-        print(defender.feature_squeezing(trigger_path=trigger_path,
-                source_filter="bad",
-                how_to_attach="blend",
+        print(defender.feature_squeezing(trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
                 sqz_threshold=0.08,
                 save_examples_dir="backups/feature_squeezing",
                 max_saved_examples=5
