@@ -2473,8 +2473,34 @@ class AdversarialAttack:
         return [trigger_box]
 
     @staticmethod
+    def _normalize_edge_softness(edge_softness, default=0.0):
+        """Return the scalar edge softness stored in old or new triggers.
+
+        Older checkpoints stored softness directly as a number, while newer
+        checkpoints store the initial, final, and sometimes selected values in
+        a metadata dictionary. Attacks without softness used hard edges, so an
+        absent value resolves to zero rather than enabling smoothing. Trigger
+        injection accepts either representation so saved triggers can be
+        evaluated without caller-specific unpacking.
+        """
+        if edge_softness is None:
+            return float(default)
+        if isinstance(edge_softness, dict):
+            for key in (
+                'selected_edge_softness',
+                'final_edge_softness',
+                'initial_edge_softness',
+            ):
+                value = edge_softness.get(key)
+                if value is not None:
+                    return float(value)
+            return float(default)
+        return float(edge_softness)
+
+    @staticmethod
     def _build_blend_mask(height, width, channels, device, dtype, edge_softness=0.2):
-        softness = float(max(0.0, min(edge_softness, 0.49)))
+        edge_softness = AdversarialAttack._normalize_edge_softness(edge_softness)
+        softness = max(0.0, min(edge_softness, 0.49))
         if softness <= 0.0:
             return torch.ones((1, channels, height, width), device=device, dtype=dtype)
 
