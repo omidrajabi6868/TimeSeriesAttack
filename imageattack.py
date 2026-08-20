@@ -19,7 +19,7 @@ def main():
     eval_transform = ImageDataset.default_eval_transform(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=64,
+        batch_size=32,
         stratify_by_bad_sample=True,
         eval_transform=eval_transform,
     )
@@ -35,23 +35,23 @@ def main():
         optimizer_name='Adam', 
         checkpoint_dir='backups/original_model',
     )
-
+    print(f'Test on {classification.model_name}: \n')
     classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
-    test_metrics = classification.evaluate_model(test_loader=test_loader)
-    print('\n\n')
-    print(
-        f'test_loss: {test_metrics["loss"]}, '
-        f'test_accuracy: {test_metrics["accuracy"]}, '
-        f'test_precision: {test_metrics["precision"]}, '
-        f'test_recall: {test_metrics["recall"]}, '
-        f'test_f1: {test_metrics["f1"]}'
-    )
-    print(
-        'test_good_accuracy: '
-        f'{test_metrics["good_accuracy"]}, '
-        f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
-    )
+    # test_metrics = classification.evaluate_model(test_loader=test_loader)
+    # print('\n\n')
+    # print(
+    #     f'test_loss: {test_metrics["loss"]}, '
+    #     f'test_accuracy: {test_metrics["accuracy"]}, '
+    #     f'test_precision: {test_metrics["precision"]}, '
+    #     f'test_recall: {test_metrics["recall"]}, '
+    #     f'test_f1: {test_metrics["f1"]}'
+    # )
+    # print(
+    #     'test_good_accuracy: '
+    #     f'{test_metrics["good_accuracy"]}, '
+    #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
+    # )
 
     patch_count = 1
     patch_size = (608, 256)
@@ -63,8 +63,8 @@ def main():
     mask_learning_rate = 0.001
     mask_l1_weight = 0
     patch_l2_weight = 0
-    patch_update_method = "mi_fgsm"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
-    epsilon = 0.03
+    patch_update_method = "robust_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
+    epsilon = 0.05
     bandwidth = 60
     trigger_preview_dir=f'backups/{task}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)
@@ -128,7 +128,8 @@ def main():
         **selected_trigger_eval_kwargs,
     )
     print(f'selected_trigger_validation_eval: {selected_validation_eval}')
-
+    print('\n\n')
+    print('Test Loader:')
     learned_adversarial_eval = attack.evaluate_attack_success(
         test_loader=test_loader,
         **selected_trigger_eval_kwargs,

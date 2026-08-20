@@ -3,7 +3,7 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'feature_squeezing'
+    defend_name = 'feature_distillation'
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
@@ -29,14 +29,15 @@ def main():
         checkpoint_dir='backups'
     )
 
-    classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
+    classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
 
     if defend_name == "feature_distillation":
         print("Feature Distillation")
+        trigger_path = '/home/oraja001/Jlab/TimeSeriesAttack/backups/learn_fixed_size_patch_no_mask_optimization_mi_fgsm_blend_count_1_size_608by256_epsilon_0.03_lr_0.05_mlr_0.001_mask_weight_0_patch_weight_0/saved_trigger'
         print(defender.feature_distillation(
-                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger',
+                trigger_path=trigger_path,
                 source_filter='bad',
                 how_to_attach='blend',
                 QS=1,
