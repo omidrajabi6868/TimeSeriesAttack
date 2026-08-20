@@ -10,6 +10,25 @@ class IdentityLogitModel(torch.nn.Module):
         return inputs.view(inputs.shape[0], -1)[:, :1]
 
 
+@pytest.mark.parametrize(
+    ('stored_softness', 'expected'),
+    [
+        (0.15, 0.15),
+        ({'initial_edge_softness': 0.2, 'final_edge_softness': 0.1}, 0.1),
+        ({
+            'initial_edge_softness': 0.2,
+            'final_edge_softness': 0.1,
+            'selected_edge_softness': 0.05,
+        }, 0.05),
+        ({'selected_edge_softness': None, 'final_edge_softness': 0.1}, 0.1),
+        ({}, 0.0),
+        (None, 0.0),
+    ],
+)
+def test_normalize_edge_softness_supports_saved_trigger_metadata(stored_softness, expected):
+    assert AdversarialAttack._normalize_edge_softness(stored_softness) == expected
+
+
 def test_attack_metrics_use_source_class_but_classification_uses_full_loader():
     inputs = torch.tensor([-1.0, -1.0, 1.0, -1.0]).view(-1, 1, 1, 1)
     targets = torch.tensor([0.0, 0.0, 1.0, 1.0]).view(-1, 1)
