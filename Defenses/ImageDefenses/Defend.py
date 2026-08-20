@@ -1,4 +1,5 @@
-from typing import Optional, Sequence
+import time
+from typing import Callable, Optional, Sequence, Tuple, TypeVar
 
 import torch.nn.functional as F
 import torch
@@ -7,6 +8,9 @@ from .DiffusionPurification import DiffusionPurifier
 from .FeatureSqueezing import JointFeatureSqueezingDetector, BitDepthReduction, MedianSmoothing, NonLocalMeansSmoothing
 from .defense_visualization import trigger_coverage_ratio
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+_TimedResult = TypeVar("_TimedResult")
+
 
 class Defender:
     def __init__(self,
@@ -33,6 +37,32 @@ class Defender:
             model_name="classifier",
         )
         return
+
+    def _timed_inference(self, operation: Callable[[], _TimedResult]) -> Tuple[_TimedResult, float]:
+        """Run an inference operation and return its wall-clock duration.
+
+        CUDA kernels are asynchronous, so synchronizing immediately before and
+        after the operation is necessary for the reported duration to represent
+        the work performed by the defender rather than kernel launch time.
+        """
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        start = time.perf_counter()
+        result = operation()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return result, time.perf_counter() - start
+
+    @staticmethod
+    def _runtime_metrics(total_seconds, sample_count, prefix):
+        seconds_per_image = total_seconds / sample_count if sample_count else 0.0
+        return {
+            f'{prefix}_runtime_seconds': total_seconds,
+            f'{prefix}_runtime_seconds_per_image': seconds_per_image,
+            f'{prefix}_throughput_images_per_second': (
+                sample_count / total_seconds if total_seconds else 0.0
+            ),
+        }
 
     def _unwrap_data_parallel(self, model):
         """Return the underlying module and its DataParallel device IDs.
@@ -111,6 +141,8 @@ class Defender:
         successful_defense_examples = []
         unsuccessful_defense_examples = []
         max_saved_examples = int(max_saved_examples)
+        clean_fd_runtime = 0.0
+        poisoned_fd_runtime = 0.0
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -144,7 +176,12 @@ class Defender:
             with torch.no_grad():
                 for start in range(0, source_inputs.shape[0], fd_batch_size):
                     end = min(start + fd_batch_size, source_inputs.shape[0])
-                    fd_clean_inputs = fd(source_inputs[start:end].clone())
+                    (fd_clean_inputs, fd_outputs), elapsed = self._timed_inference(
+                        lambda start=start, end=end: self._feature_distillation_inference(
+                            fd, source_inputs[start:end], self.model
+                        )
+                    )
+                    clean_fd_runtime += elapsed
                     fd_clean_input_batches.append(fd_clean_inputs.detach().cpu())
                     clean_input_diff = (fd_clean_inputs - source_inputs[start:end]).abs()
                     clean_fd_abs_diff_sum += float(
@@ -155,7 +192,6 @@ class Defender:
                         float(clean_input_diff.max().item()),
                     )
                     clean_fd_pixel_count += int(fd_clean_inputs.numel())
-                    fd_outputs = self.model(fd_clean_inputs)
                     clean_output_abs_diff_sum += float(
                         (fd_outputs.view(-1) - clean_outputs[start:end].view(-1)).abs().sum().item()
                     )
@@ -188,7 +224,12 @@ class Defender:
             with torch.no_grad():
                 for start in range(0, poisoned_inputs.shape[0], fd_batch_size):
                     end = min(start + fd_batch_size, poisoned_inputs.shape[0])
-                    fd_poisoned_inputs = fd(poisoned_inputs[start:end].clone())
+                    (fd_poisoned_inputs, fd_outputs), elapsed = self._timed_inference(
+                        lambda start=start, end=end: self._feature_distillation_inference(
+                            fd, poisoned_inputs[start:end], self.model
+                        )
+                    )
+                    poisoned_fd_runtime += elapsed
                     fd_poisoned_input_batches.append(fd_poisoned_inputs.detach().cpu())
                     poisoned_input_diff = (fd_poisoned_inputs - poisoned_inputs[start:end]).abs()
                     poisoned_fd_abs_diff_sum += float(
@@ -212,7 +253,6 @@ class Defender:
                         )
                         trigger_region_fd_pixel_count += int(after_region.numel())
 
-                    fd_outputs = self.model(fd_poisoned_inputs)
                     poisoned_output_abs_diff_sum += float(
                         (fd_outputs.view(-1) - poisoned_outputs[start:end].view(-1)).abs().sum().item()
                     )
@@ -288,7 +328,7 @@ class Defender:
             if clean_correct_and_not_target else 0.0
         )
 
-        return {
+        result = {
             'samples_evaluated': total,
             'clean_source_accuracy': clean_source_accuracy,
             'clean_fd_accuracy': clean_fd_accuracy,
@@ -330,6 +370,7 @@ class Defender:
             'fd_preserve_ratio': fd.preserve_ratio,
             'fd_preserved_coefficients': int(fd.accuracy_sensitive_mask.sum().item()),
             'fd_total_coefficients': int(fd.accuracy_sensitive_mask.numel()),
+            'fd_timing_batch_size': int(fd_batch_size),
             'fd_quantization_table': fd.quantization_table.detach().cpu().tolist(),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
@@ -340,6 +381,15 @@ class Defender:
             ),
             'saved_feature_distillation_examples': saved_example_info,
         }
+        result.update(self._runtime_metrics(clean_fd_runtime, total, 'clean_fd'))
+        result.update(self._runtime_metrics(poisoned_fd_runtime, total, 'poisoned_fd'))
+        result.update(self._runtime_metrics(clean_fd_runtime + poisoned_fd_runtime, total * 2, 'fd'))
+        return result
+
+    @staticmethod
+    def _feature_distillation_inference(fd, inputs, model):
+        defended_inputs = fd(inputs.clone())
+        return defended_inputs, model(defended_inputs)
 
     def diffusion_purification(self,
                             trigger_path,
@@ -386,6 +436,8 @@ class Defender:
         successful_defense_examples = []
         unsuccessful_defense_examples = []
         max_saved_examples = int(max_saved_examples)
+        clean_dp_runtime = 0.0
+        poisoned_dp_runtime = 0.0
 
         for inputs, targets in self.val_loader:
             self.model.eval()
@@ -419,17 +471,17 @@ class Defender:
             with torch.no_grad():
                 for start in range(0, source_inputs.shape[0], dp_batch_size):
                     end = min(start + dp_batch_size, source_inputs.shape[0])
-                    purified_clean = purifier.purify(
-                        source_inputs[start:end].clone(),
-                        diffusion_step=diffusion_step,
-                        reverse_steps=reverse_steps,
-                        stochastic=stochastic,
+                    (purified_clean, purified_clean_outputs), elapsed = self._timed_inference(
+                        lambda start=start, end=end: self._diffusion_inference(
+                            purifier, source_inputs[start:end], self.model,
+                            diffusion_step, reverse_steps, stochastic,
+                        )
                     )
+                    clean_dp_runtime += elapsed
                     purified_clean_batches.append(purified_clean.detach().cpu())
                     clean_diff = (purified_clean - source_inputs[start:end]).abs()
                     clean_dp_abs_diff_sum += float(clean_diff.sum().item())
                     clean_dp_pixel_count += int(purified_clean.numel())
-                    purified_clean_outputs = self.model(purified_clean)
                     purified_clean_preds.append((purified_clean_outputs > 0).float().view(-1))
 
             dp_clean_preds = torch.cat(purified_clean_preds, dim=0)
@@ -457,12 +509,13 @@ class Defender:
             with torch.no_grad():
                 for start in range(0, poisoned_inputs.shape[0], dp_batch_size):
                     end = min(start + dp_batch_size, poisoned_inputs.shape[0])
-                    purified_poisoned = purifier.purify(
-                        poisoned_inputs[start:end].clone(),
-                        diffusion_step=diffusion_step,
-                        reverse_steps=reverse_steps,
-                        stochastic=stochastic,
+                    (purified_poisoned, purified_poisoned_outputs), elapsed = self._timed_inference(
+                        lambda start=start, end=end: self._diffusion_inference(
+                            purifier, poisoned_inputs[start:end], self.model,
+                            diffusion_step, reverse_steps, stochastic,
+                        )
                     )
+                    poisoned_dp_runtime += elapsed
                     purified_poisoned_batches.append(purified_poisoned.detach().cpu())
                     poisoned_diff = (purified_poisoned - poisoned_inputs[start:end]).abs()
                     poisoned_dp_abs_diff_sum += float(poisoned_diff.sum().item())
@@ -476,7 +529,6 @@ class Defender:
                         after_region = purified_poisoned[:, :, y:y + height, x:x + width]
                         trigger_region_dp_abs_diff_sum += float((after_region - before_region).abs().sum().item())
                         trigger_region_dp_pixel_count += int(after_region.numel())
-                    purified_poisoned_outputs = self.model(purified_poisoned)
                     purified_poisoned_preds.append((purified_poisoned_outputs > 0).float().view(-1))
 
             dp_poisoned_preds = torch.cat(purified_poisoned_preds, dim=0)
@@ -542,7 +594,7 @@ class Defender:
         conditional_attack_success_rate = ((conditional_attack_success / clean_correct_and_not_target) * 100 if clean_correct_and_not_target else 0.0)
         conditional_defended_attack_success_rate = ((conditional_asr_after_defend / clean_correct_and_not_target) * 100 if clean_correct_and_not_target else 0.0)
 
-        return {
+        result = {
             'samples_evaluated': total,
             'clean_source_accuracy': clean_source_accuracy,
             'clean_dp_accuracy': clean_dp_accuracy,
@@ -563,6 +615,7 @@ class Defender:
             'diffusion_step': int(diffusion_step),
             'reverse_steps': reverse_steps,
             'stochastic_reverse_process': bool(stochastic),
+            'dp_timing_batch_size': int(dp_batch_size),
             'target_label': target_label,
             'trigger_box': learned_trigger['trigger_boxes'],
             'trigger_coverage_ratio': trigger_coverage_ratio(
@@ -572,6 +625,20 @@ class Defender:
             ),
             'saved_diffusion_purification_examples': saved_example_info,
         }
+        result.update(self._runtime_metrics(clean_dp_runtime, total, 'clean_dp'))
+        result.update(self._runtime_metrics(poisoned_dp_runtime, total, 'poisoned_dp'))
+        result.update(self._runtime_metrics(clean_dp_runtime + poisoned_dp_runtime, total * 2, 'dp'))
+        return result
+
+    @staticmethod
+    def _diffusion_inference(purifier, inputs, model, diffusion_step, reverse_steps, stochastic):
+        defended_inputs = purifier.purify(
+            inputs.clone(),
+            diffusion_step=diffusion_step,
+            reverse_steps=reverse_steps,
+            stochastic=stochastic,
+        )
+        return defended_inputs, model(defended_inputs)
 
     def feature_squeezing(self,
                         trigger_path,
@@ -598,6 +665,8 @@ class Defender:
 
         total_clean, false_positives = 0, 0
         total_adv, true_positives = 0, 0
+        clean_detection_runtime = 0.0
+        adversarial_detection_runtime = 0.0
 
         for inputs, targets in self.val_loader:
             inputs = inputs.to(self.device)
@@ -618,7 +687,8 @@ class Defender:
             source_targets = targets[source_mask]
 
             with torch.no_grad():
-                out_clean = detector(source_inputs)
+                out_clean, elapsed = self._timed_inference(lambda: detector(source_inputs))
+            clean_detection_runtime += elapsed
             false_positives += out_clean["is_adversarial"].sum().item()
             total_clean += source_inputs.size(0)
 
@@ -639,12 +709,13 @@ class Defender:
 
             if successful_attacks.sum() > 0:
                 valid_adv_images = adv_images[successful_attacks]
-                out_adv = detector(valid_adv_images)
+                out_adv, elapsed = self._timed_inference(lambda: detector(valid_adv_images))
+                adversarial_detection_runtime += elapsed
                 true_positives += out_adv["is_adversarial"].sum().item()
                 total_adv += valid_adv_images.size(0)
         
         # Calculate final percentages
-        fpr = (false_positives / total_clean) * 100.0
+        fpr = (false_positives / total_clean) * 100.0 if total_clean > 0 else 0.0
         detection_rate = (true_positives / total_adv) * 100.0 if total_adv > 0 else 0.0
 
         print("-" * 50)
@@ -654,3 +725,18 @@ class Defender:
         print(f"False Positive Rate (FPR)         : {fpr:.2f}%  (Target: Low)")
         print(f"Adversarial Detection Rate (TPR)  : {detection_rate:.2f}%  (Target: High)")
         print("-" * 50)
+
+        result = {
+            'total_clean_samples': total_clean,
+            'successful_adversarial_samples': total_adv,
+            'false_positive_rate': fpr,
+            'adversarial_detection_rate': detection_rate,
+        }
+        result.update(self._runtime_metrics(clean_detection_runtime, total_clean, 'clean_detection'))
+        result.update(self._runtime_metrics(adversarial_detection_runtime, total_adv, 'adversarial_detection'))
+        result.update(self._runtime_metrics(
+            clean_detection_runtime + adversarial_detection_runtime,
+            total_clean + total_adv,
+            'detection',
+        ))
+        return result
