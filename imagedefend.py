@@ -3,7 +3,7 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'feature_squeezing'
+    defend_name = 'feature_squeezing'  # {'feature_distillation', 'diffusion_purification', 'feature_squeezing'}
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
@@ -29,9 +29,12 @@ def main():
         checkpoint_dir='backups'
     )
 
-    classification.load_checkpoint("backups/original_model/best_checkpoint.pth")
+    classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
 
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
+
+    trigger_path = '/home/oraja001/Jlab/TimeSeriesAttack/backups/learn_fixed_size_patch_no_mask_optimization_gap_uap_blend_count_1_size_608by256_epsilon_0.03_lr_0.001_mlr_0.001_mask_weight_0_patch_weight_0/saved_trigger'
+    print(f'{trigger_path}')
 
     if defend_name == "feature_distillation":
         print("Feature Distillation")
@@ -48,7 +51,7 @@ def main():
     if defend_name == "diffusion_purification":
         print("Diffusion Purification")
         print(defender.diffusion_purification(
-                trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
+                trigger_path=trigger_path,
                 diffusion_checkpoint_path='backups/diffusion_purifier/best_checkpoint.pth',
                 diffusion_step=100,
                 reverse_steps=None,
