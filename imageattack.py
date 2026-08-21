@@ -1,26 +1,77 @@
-import numpy as np
+import argparse
 from pathlib import Path
-from torch.utils.data import DataLoader
-from Dataset.DataManagement import ImageDataset
-from Tasks.ImageClassification import ClassificationBase
-from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
-from Attacks.ImageAttacks.ImageBackdoorAttack import BackdoorAttack
-from Attacks.ImageAttacks.Attack import Attck
-from Network.ImageVAE import ImageVAE
 
 
-def main():
-    task = 'perturbation_attack'
-    training = True
+PATCH_UPDATE_METHODS = (
+    'deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap',
+    'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap',
+)
 
-    label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
-    image_size = (608, 256)
+
+def _size(value):
+    """Parse an image/patch size written as WIDTHxHEIGHT."""
+    try:
+        width, height = (int(part) for part in value.lower().split('x', 1))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('size must be WIDTHxHEIGHT, for example 608x256') from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError('size dimensions must be positive')
+    return width, height
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description='Train or evaluate an image adversarial trigger.')
+    parser.add_argument('--task', default='perturbation_attack', help='Name used for the output run.')
+    parser.add_argument('--training', action=argparse.BooleanOptionalAction, default=True,
+                        help='Train a trigger; use --no-training to load one instead.')
+    parser.add_argument('--label-path', default='/home/oraja001/Jlab/Hydra data/labels_v2.txt')
+    parser.add_argument('--image-size', type=_size, default=(608, 256), metavar='WIDTHxHEIGHT')
+    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--stratify-by-bad-sample', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--model-name', default='SwinT')
+    parser.add_argument('--optimizer-name', default='Adam')
+    parser.add_argument('--checkpoint-dir', default='backups/original_model')
+    parser.add_argument('--checkpoint-path', default=None,
+                        help='Classifier checkpoint (default: CHECKPOINT_DIR/MODEL_NAME.pth).')
+    parser.add_argument('--patch-count', type=int, default=1)
+    parser.add_argument('--patch-size', type=_size, default=(608, 256), metavar='WIDTHxHEIGHT')
+    parser.add_argument('--how-to-attach', choices=('blend', 'replace'), default='blend')
+    parser.add_argument('--steps', type=int, default=100)
+    parser.add_argument('--learning-rate', type=float, default=0.001)
+    parser.add_argument('--optimize-mask', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--mask-learning-rate', type=float, default=0.001)
+    parser.add_argument('--mask-l1-weight', type=float, default=0.0)
+    parser.add_argument('--patch-l2-weight', type=float, default=0.0)
+    parser.add_argument('--patch-update-method', choices=PATCH_UPDATE_METHODS, default='gap_uap')
+    parser.add_argument('--epsilon', type=float, default=0.03)
+    parser.add_argument('--bandwidth', type=int, default=60)
+    parser.add_argument('--target-label', type=float, default=1.0)
+    parser.add_argument('--source-filter', choices=('good', 'bad', 'all'), default='bad')
+    parser.add_argument('--output-dir', default=None,
+                        help='Run directory; when omitted it is generated from the attack settings.')
+    parser.add_argument('--trigger-preview-max-images', type=int, default=1)
+    parser.add_argument('--visualization-examples', type=int, default=20)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    from Dataset.DataManagement import ImageDataset
+    from Tasks.ImageClassification import ClassificationBase
+    from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+    from Attacks.ImageAttacks.Attack import Attck
+
+    task = args.task
+    training = args.training
+
+    label_path = args.label_path
+    image_size = args.image_size
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
     eval_transform = ImageDataset.default_eval_transform(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=32,
-        stratify_by_bad_sample=True,
+        batch_size=args.batch_size,
+        stratify_by_bad_sample=args.stratify_by_bad_sample,
         eval_transform=eval_transform,
     )
 
@@ -31,12 +82,15 @@ def main():
         print(f'{split_name} bad_ratio: {split_info["bad_ratio"]:.4f}')
 
     classification = ClassificationBase(
-        model_name='SwinT', 
-        optimizer_name='Adam', 
-        checkpoint_dir='backups/original_model',
+        model_name=args.model_name,
+        optimizer_name=args.optimizer_name,
+        checkpoint_dir=args.checkpoint_dir,
     )
     print(f'Test on {classification.model_name}: \n')
-    classification.load_checkpoint(f"backups/original_model/{classification.model_name}.pth")
+    checkpoint_path = args.checkpoint_path or str(
+        Path(args.checkpoint_dir) / f'{classification.model_name}.pth'
+    )
+    classification.load_checkpoint(checkpoint_path)
 
     # test_metrics = classification.evaluate_model(test_loader=test_loader)
     # print('\n\n')
@@ -53,28 +107,28 @@ def main():
     #     f'test_bad_accuracy: {test_metrics["bad_accuracy"]}'
     # )
 
-    patch_count = 1
-    patch_size = (608, 256)
-    how_to_attach = 'blend'
+    patch_count = args.patch_count
+    patch_size = args.patch_size
+    how_to_attach = args.how_to_attach
     attack = Attck(patch_size=patch_size, model=classification.model)
-    steps = 100
-    learning_rate = 0.001
-    optimize_mask = False
-    mask_learning_rate = 0.001
-    mask_l1_weight = 0
-    patch_l2_weight = 0
-    patch_update_method = "gap_uap"   # ['deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap']
-    epsilon = 0.03
-    bandwidth = 60
-    trigger_preview_dir=f'backups/{task}_{classification.model_name}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
+    steps = args.steps
+    learning_rate = args.learning_rate
+    optimize_mask = args.optimize_mask
+    mask_learning_rate = args.mask_learning_rate
+    mask_l1_weight = args.mask_l1_weight
+    patch_l2_weight = args.patch_l2_weight
+    patch_update_method = args.patch_update_method
+    epsilon = args.epsilon
+    bandwidth = args.bandwidth
+    trigger_preview_dir = args.output_dir or f'backups/{task}_{classification.model_name}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
     print(trigger_preview_dir)
 
     if training:
         learned_trigger = attack.learn_fixed_size_patch(dataset=dataset,
                                             data_loader=train_loader,
                                             val_loader=val_loader,
-                                            target_label=1,
-                                            source_filter='bad',
+                                            target_label=args.target_label,
+                                            source_filter=args.source_filter,
                                             steps=steps,
                                             learning_rate=learning_rate,
                                             mask_learning_rate=mask_learning_rate,
@@ -83,7 +137,7 @@ def main():
                                             patch_l2_weight=patch_l2_weight,
                                             trigger_preview_dir=trigger_preview_dir,
                                             trigger_preview_loader=test_loader,
-                                            trigger_preview_max_images=1,
+                                            trigger_preview_max_images=args.trigger_preview_max_images,
                                             how_to_attach=how_to_attach,
                                             patch_count=patch_count,
                                             patch_update_method=patch_update_method,
@@ -136,12 +190,12 @@ def main():
 
     dataset.save_trigger_visualizations(
         output_dir=f'{trigger_preview_dir}/trigger_visualization',
-        num_examples=20,
+        num_examples=args.visualization_examples,
         trigger_box=learned_trigger['trigger_boxes'],
         trigger_delta=learned_trigger['patch'],
         model=classification.model,
-        target_label=1.0,
-        source_filter='bad',
+        target_label=args.target_label,
+        source_filter=args.source_filter,
         only_successful_poisoned=True,
     )
     print('Saved trigger visualizations to trigger_visualization/')
