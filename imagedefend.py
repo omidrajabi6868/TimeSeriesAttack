@@ -3,14 +3,12 @@ from Tasks.ImageClassification import ClassificationBase
 from Defenses.ImageDefenses.Defend import Defender
 
 def main():
-    defend_name = 'feature_squeezing'  # {'feature_distillation', 'diffusion_purification', 'feature_squeezing'}
+    defend_name = 'feature_distillation'  # {'feature_distillation', 'diffusion_purification', 'feature_squeezing'}
 
     # dataset
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
-    # Use deterministic preprocessing for defense evaluation. Random training
-    # augmentation would change both the learned trigger placement and the DCT
-    # calibration statistics from run to run.
+    
     dataset = ImageDataset(label_path=label_path, transform=None, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
         batch_size=512,
@@ -33,13 +31,13 @@ def main():
 
     defender = Defender(classification.model, dataset, test_loader, calibration_loader=train_loader)
 
-    trigger_path = '/home/oraja001/Jlab/TimeSeriesAttack/backups/learn_fixed_size_patch_no_mask_optimization_gap_uap_blend_count_1_size_608by256_epsilon_0.03_lr_0.001_mlr_0.001_mask_weight_0_patch_weight_0/saved_trigger'
+    trigger_path = '/home/oraja001/Jlab/TimeSeriesAttack/backups/learn_fixed_size_patch_no_mask_optimization_robust_uap_blend_count_1_size_608by256_epsilon_0.05_lr_0.0001_mlr_0.001_mask_weight_0_patch_weight_0/saved_trigger'
     print(f'{trigger_path}')
 
     if defend_name == "feature_distillation":
         print("Feature Distillation")
         print(defender.feature_distillation(
-                trigger_path='/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_blend_count_1_size_608by256_lr_0.05_mlr_0.05_mask_weight_10_patch_weight_100/saved_trigger',
+                trigger_path=trigger_path,
                 QS=1,
                 preserve_ratio=0.0,
                 fd_batch_size=16,
@@ -64,7 +62,7 @@ def main():
     
     if defend_name == "feature_squeezing":
         print('Feature Squeezing')
-        print(defender.feature_squeezing(trigger_path="/home/oraja001/Jlab/TimeSeriesAttack/backups/fixed_size_adversarial_patch_with_mask_optimization_count_1_size_128by64/saved_trigger",
+        print(defender.feature_squeezing(trigger_path=trigger_path,
                 sqz_threshold=0.08,
                 save_examples_dir="backups/feature_squeezing",
                 max_saved_examples=5
