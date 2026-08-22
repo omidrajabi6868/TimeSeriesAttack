@@ -60,3 +60,36 @@ def test_attack_metrics_use_source_class_but_classification_uses_full_loader():
     assert metrics['after_attack_metrics']['samples'] == 4
     assert metrics['classification_metrics_scope'] == 'all'
     assert metrics['attack_metrics_scope'] == 'bad'
+
+
+def test_trigger_learning_saves_periodic_checkpoint(tmp_path):
+    inputs = torch.zeros(2, 1, 2, 2)
+    targets = torch.zeros(2, 1)
+    loader = DataLoader(TensorDataset(inputs, targets), batch_size=2)
+    attack = AdversarialAttack(
+        model=IdentityLogitModel(), device='cpu', use_multi_gpu=False
+    )
+    checkpoint_path = tmp_path / 'saved_trigger_checkpoint'
+
+    attack.learn_universal_trigger(
+        data_loader=loader,
+        trigger_box={'x': 0, 'y': 0, 'width': 2, 'height': 2},
+        validation_loader=None,
+        steps=2,
+        learning_rate=0.01,
+        optimize_mask=False,
+        patch_update_method='adam',
+        epsilon=0.03,
+        log_interval=0,
+        trigger_preview_interval=0,
+        checkpoint_interval=1,
+        checkpoint_path=checkpoint_path,
+        progressive_resize=False,
+        randomize_training_location=False,
+    )
+
+    checkpoint = attack.load_trigger(checkpoint_path)
+    assert checkpoint['selection'] == 'latest_checkpoint'
+    assert checkpoint['selected_step'] == 2
+    assert len(checkpoint['history']) == 2
+    assert checkpoint['patch_update_method'] == 'adam'

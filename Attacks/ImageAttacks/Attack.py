@@ -36,7 +36,9 @@ class Attck(AdversarialAttack):
                             patch_count, 
                             patch_update_method,
                             epsilon,
-                            bandwidth):
+                            bandwidth,
+                            checkpoint_interval=None,
+                            checkpoint_path=None):
 
         natural_trigger = dataset.find_natural_trigger_candidates(
             window_size=self.patch_size,
@@ -80,6 +82,8 @@ class Attck(AdversarialAttack):
             trigger_preview_dir=trigger_preview_dir,
             trigger_preview_loader=trigger_preview_loader,
             trigger_preview_max_images=trigger_preview_max_images,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_path=checkpoint_path,
             progressive_resize=False,
             randomize_training_location=False,
             enable_compression_phase=False,
