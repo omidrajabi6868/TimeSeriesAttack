@@ -32,25 +32,33 @@ def test_feature_uap_layer_selection_supports_every_image_model(builder, classif
 
 
 @pytest.mark.parametrize(
-    "builder",
+    ("builder", "classifier_name", "expected_layer_type"),
     [
-        models.resnet18,
-        models.resnet34,
-        models.resnet50,
-        models.resnet101,
-        models.alexnet,
-        models.mobilenet_v3_small,
-        models.efficientnet_b0,
-        models.swin_t,
+        (models.resnet18, "fc", nn.Conv2d),
+        (models.resnet34, "fc", nn.Conv2d),
+        (models.resnet50, "fc", nn.Conv2d),
+        (models.resnet101, "fc", nn.Conv2d),
+        (models.alexnet, "classifier.6", nn.Conv2d),
+        (models.mobilenet_v3_small, "classifier.3", nn.Conv2d),
+        (models.efficientnet_b0, "classifier.1", nn.Conv2d),
+        (models.swin_t, "head", nn.Linear),
     ],
 )
-def test_gd_uap_layer_selection_supports_every_image_model(builder):
+def test_gd_uap_layer_selection_supports_every_image_model(
+    builder, classifier_name, expected_layer_type
+):
     model = builder(weights=None)
     attack = AdversarialAttack(model, device="cpu", use_multi_gpu=False)
 
     attack._build_cost_function("gd_uap")
 
     assert attack.feature_extractor.layer_names
+    assert classifier_name not in attack.feature_extractor.layer_names
+    selected_modules = dict(model.named_modules())
+    assert all(
+        isinstance(selected_modules[name], expected_layer_type)
+        for name in attack.feature_extractor.layer_names
+    )
     attack._remove_feature_extractor()
 
 
