@@ -704,28 +704,31 @@ class FeatureExtractor:
         self.capture_enabled = True
         self.output_device = self._infer_output_device(model)
 
-        layers = [
-            m for m in model.modules()
-            if isinstance(m, layer_types)
+        named_layers = [
+            (name, module) for name, module in model.named_modules()
+            if isinstance(module, layer_types)
         ]
-        if not layers:
-            layers = [
-                m for m in model.modules()
-                if isinstance(m, (nn.Conv2d, nn.Linear))
+        if not named_layers:
+            named_layers = [
+                (name, module) for name, module in model.named_modules()
+                if isinstance(module, (nn.Conv2d, nn.Linear))
             ]
 
         if exclude_last_layers < 0:
             raise ValueError('exclude_last_layers must be non-negative.')
-        selectable_layers = layers[:-exclude_last_layers] if exclude_last_layers else layers
+        selectable_layers = named_layers[:-exclude_last_layers] if exclude_last_layers else named_layers
         selected_layers = selectable_layers[-n_last_layers:] if n_last_layers else selectable_layers
         if not selected_layers:
             raise RuntimeError(
-                f'FeatureExtractor found {len(layers)} candidate layers, but selected none after '
+                f'FeatureExtractor found {len(named_layers)} candidate layers, but selected none after '
                 f'excluding the last {exclude_last_layers}. Use a smaller exclude_last_layers, '
                 'a positive n_last_layers value, or a model with supported layers.'
             )
 
-        for layer_idx, layer in enumerate(selected_layers):
+        # Keep names alongside the hooks so architecture-specific selections can
+        # be inspected without relying on fragile numeric module positions.
+        self.layer_names = [name for name, _ in selected_layers]
+        for layer_idx, (_, layer) in enumerate(selected_layers):
             self.hooks.append(
                 layer.register_forward_hook(self._make_hook(layer_idx))
             )

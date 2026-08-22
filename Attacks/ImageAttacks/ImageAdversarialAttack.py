@@ -61,7 +61,15 @@ class AdversarialAttack:
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=100, layer_types=(torch.nn.Conv2d,))
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,),exclude_last_layers=1)
+            # Gather the last feature-producing layers while omitting the output
+            # classifier.  ResNets only have one Linear layer, so limiting this
+            # to Linear modules used to leave ResNet18/34/50/101 with no hooks.
+            self.feature_extractor = FeatureExtractor(
+                self.model,
+                n_last_layers=4,
+                layer_types=(torch.nn.Conv2d, torch.nn.Linear),
+                exclude_last_layers=1,
+            )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'psp_uap':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=0, layer_types=(torch.nn.Conv2d,))
