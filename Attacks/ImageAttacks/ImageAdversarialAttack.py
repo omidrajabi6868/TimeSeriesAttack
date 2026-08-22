@@ -58,10 +58,44 @@ class AdversarialAttack:
         if name == 'classification':
             self.cost_function = ClassificationObjective()
         elif name == 'gd_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=100, layer_types=(torch.nn.Conv2d,))
+            conv_count = sum(
+                isinstance(module, torch.nn.Conv2d)
+                for module in self.model.modules()
+            )
+            linear_count = sum(
+                isinstance(module, torch.nn.Linear)
+                for module in self.model.modules()
+            )
+            if linear_count > conv_count:
+                # Transformer backbones such as Swin perform almost all feature
+                # transformations with Linear layers.  Their lone Conv2d is only
+                # the patch embedding, so hooking Conv2d alone does not represent
+                # the backbone.  Omit the final Linear classifier just as FG-UAP
+                # does and limit the hooks to avoid retaining every transformer
+                # block's (potentially large) activation.
+                self.feature_extractor = FeatureExtractor(
+                    self.model,
+                    n_last_layers=4,
+                    layer_types=(torch.nn.Linear,),
+                    exclude_last_layers=1,
+                )
+            else:
+                self.feature_extractor = FeatureExtractor(
+                    self.model,
+                    n_last_layers=100,
+                    layer_types=(torch.nn.Conv2d,),
+                )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'fg_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=4, layer_types=(torch.nn.Linear,),exclude_last_layers=1)
+            # Gather the last feature-producing layers while omitting the output
+            # classifier.  ResNets only have one Linear layer, so limiting this
+            # to Linear modules used to leave ResNet18/34/50/101 with no hooks.
+            self.feature_extractor = FeatureExtractor(
+                self.model,
+                n_last_layers=4,
+                layer_types=(torch.nn.Conv2d, torch.nn.Linear),
+                exclude_last_layers=1,
+            )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'psp_uap':
             self.feature_extractor = FeatureExtractor(self.model, n_last_layers=0, layer_types=(torch.nn.Conv2d,))
