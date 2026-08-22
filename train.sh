@@ -19,4 +19,20 @@ module load container_env pytorch-gpu/2.2.0
 export PYTHONUNBUFFERED=1
 
 # Execute
-crun python imageattack.py
+crun python imageattack.py \
+  --task perturbation_attack \
+  --training \
+  --image-size 608x256 \
+  --batch-size 32 \
+  --model-name SwinT \
+  --patch-size 608x256 \
+  --patch-count 1 \
+  --patch-update-method hp_uap \
+  --how-to-attach blend \
+  --steps 100 \
+  --learning-rate 0.05 \
+  --epsilon 0.03 \
+  --bandwidth 60 \
+  --target-label 1 \
+  --source-filter bad \
+  --no-optimize-mask 

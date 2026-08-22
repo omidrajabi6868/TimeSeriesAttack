@@ -36,7 +36,7 @@ def build_parser():
     parser.add_argument('--checkpoint-dir', default='backups/original_model')
     parser.add_argument('--checkpoint-path', default=None,
                         help='Classifier checkpoint (default: CHECKPOINT_DIR/MODEL_NAME.pth).')
-    parser.add_argument('--trigger-path', default='/home/oraja001/Jlab/TimeSeriesAttack/backups/learn_fixed_size_patch_no_mask_optimization_robust_uap_blend_count_1_size_608by256_epsilon_0.05_lr_0.0001_mlr_0.001_mask_weight_0_patch_weight_0/saved_trigger')
+    parser.add_argument('--trigger-path', default='')
     parser.add_argument('--max-saved-examples', type=int, default=5)
     parser.add_argument('--qs', type=int, default=1, help='Feature-distillation JPEG quality scale.')
     parser.add_argument('--preserve-ratio', type=float, default=0.0)
