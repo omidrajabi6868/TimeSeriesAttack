@@ -50,6 +50,8 @@ def build_parser():
     parser.add_argument('--output-dir', default=None,
                         help='Run directory; when omitted it is generated from the attack settings.')
     parser.add_argument('--trigger-preview-max-images', type=int, default=1)
+    parser.add_argument('--checkpoint-interval', type=int, default=5,
+                        help='Save an interruption-safe trigger checkpoint every N steps; 0 disables it.')
     parser.add_argument('--visualization-examples', type=int, default=20)
     return parser
 
@@ -138,6 +140,8 @@ def main(argv=None):
                                             trigger_preview_dir=trigger_preview_dir,
                                             trigger_preview_loader=test_loader,
                                             trigger_preview_max_images=args.trigger_preview_max_images,
+                                            checkpoint_interval=args.checkpoint_interval,
+                                            checkpoint_path=f'{trigger_preview_dir}/saved_trigger',
                                             how_to_attach=how_to_attach,
                                             patch_count=patch_count,
                                             patch_update_method=patch_update_method,

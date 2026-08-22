@@ -109,8 +109,7 @@ class AdversarialAttack:
         if not torch.is_tensor(patch):
             patch = torch.tensor(patch, dtype=torch.float32)
         mask = trigger.get('mask')
-        torch.save(
-            {
+        trigger_payload = {
                 'patch': patch.detach().cpu(),
                 'mask': (
                     mask.detach().cpu()
@@ -138,9 +137,10 @@ class AdversarialAttack:
                 'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
                 'history_path': str(history_path),
-            },
-            output_path,
-        )
+            }
+        temporary_output_path = output_path.with_name(f'.{output_path.name}.tmp')
+        torch.save(trigger_payload, temporary_output_path)
+        temporary_output_path.replace(output_path)
 
         history_payload = {
             'history': trigger.get('history', []),
@@ -155,8 +155,10 @@ class AdversarialAttack:
             'trigger_previews': trigger.get('trigger_previews', []),
             'patch_path': str(output_path),
         }
-        with open(history_path, 'w', encoding='utf-8') as history_file:
+        temporary_history_path = history_path.with_name(f'.{history_path.name}.tmp')
+        with open(temporary_history_path, 'w', encoding='utf-8') as history_file:
             json.dump(AdversarialAttack._json_safe(history_payload), history_file, indent=2)
+        temporary_history_path.replace(history_path)
         trigger['path'] = str(output_path)
         trigger['history_path'] = str(history_path)
         return str(output_path)
@@ -234,6 +236,8 @@ class AdversarialAttack:
                                 trigger_preview_dir='backups/adversarial_trigger_previews',
                                 trigger_preview_loader=None,
                                 trigger_preview_max_images=5,
+                                checkpoint_interval=None,
+                                checkpoint_path=None,
                                 progressive_resize=True,
                                 progressive_resize_direction='grow',
                                 min_patch_size=(16, 16),
@@ -484,6 +488,11 @@ class AdversarialAttack:
         if preview_interval > 0 and preview_output_dir is not None:
             preview_output_dir.mkdir(parents=True, exist_ok=True)
         preview_data_loader = trigger_preview_loader or validation_loader or data_loader
+        checkpoint_interval = (
+            max(0, int(checkpoint_interval))
+            if checkpoint_interval is not None else 0
+        )
+        checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
 
         history = []
         best_patch = None
@@ -990,6 +999,61 @@ class AdversarialAttack:
                             step_history['size_decision'] = size_limit_decision
 
 
+                history.append(step_history)
+
+                if (
+                    checkpoint_interval > 0
+                    and checkpoint_path is not None
+                    and (step_idx + 1) % checkpoint_interval == 0
+                ):
+                    # Persist a usable trigger before preview rendering and the
+                    # progress print.  Batch schedulers and OOM killers can end
+                    # a run without raising a Python exception, so relying only
+                    # on the save performed after this method returns loses all
+                    # completed optimization steps.
+                    self.save_trigger(
+                        trigger={
+                            'patch': current_patch_for_metrics.cpu(),
+                            'mask': (
+                                current_mask_for_metrics.cpu()
+                                if current_mask_for_metrics is not None else None
+                            ),
+                            'history': history,
+                            'trigger_box': trigger_boxes[0],
+                            'trigger_boxes': trigger_boxes,
+                            'target_label': float(target_label),
+                            'source_filter': source_filter,
+                            'patch_update_method': patch_update_method,
+                            'how_to_attach': how_to_attach,
+                            'epsilon': patch_linf_norm,
+                            'effective_epsilon': effective_patch_linf_norm,
+                            'patch_norms': {
+                                'l1': patch_l1_norm,
+                                'l2': patch_l2_norm,
+                                'linf': patch_linf_norm,
+                                'effective_linf': effective_patch_linf_norm,
+                            },
+                            'softness': {
+                                'selected_edge_softness': float(current_softness),
+                            },
+                            'selection': 'latest_checkpoint',
+                            'selected_step': step_idx + 1,
+                            'selected_validation_asr': step_history.get('validation_asr'),
+                            'best_validation_loss': (
+                                None if validation_loader is None else best_val_loss
+                            ),
+                            'best_validation_asr': (
+                                None if validation_loader is None else best_val_asr
+                            ),
+                            'trigger_previews': preview_records,
+                        },
+                        output_path=checkpoint_path,
+                    )
+                    print(
+                        '[Trigger Learning] checkpoint saved: '
+                        f'step={step_idx + 1}, path={checkpoint_path}'
+                    )
+
                 if (
                     preview_interval > 0
                     and preview_output_dir is not None
@@ -1011,8 +1075,6 @@ class AdversarialAttack:
                     if step_preview_records:
                         preview_records.extend(step_preview_records)
                         step_history['trigger_previews'] = step_preview_records
-
-                history.append(step_history)
 
                 if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
                     val_log = ''
