@@ -27,11 +27,11 @@ crun python imageattack.py \
   --model-name SwinT \
   --patch-size 608x256 \
   --patch-count 1 \
-  --patch-update-method hp_uap \
+  --patch-update-method robust_uap \
   --how-to-attach blend \
   --steps 100 \
   --learning-rate 0.05 \
-  --epsilon 0.03 \
+  --epsilon 0.05 \
   --bandwidth 60 \
   --target-label 1 \
   --source-filter bad \
