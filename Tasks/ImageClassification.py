@@ -58,6 +58,8 @@ class ClassificationBase:
             self.model = ClassificationModels.InceptionV3(1).model
         elif self.model_name == 'SwinT':
             self.model = ClassificationModels.SwinT(1).model
+        elif self.model_name == "InceptionV3":
+            self.model = ClassificationModels.InceptionV3(1).model
         else:
             raise ValueError(f'Unsupported model_name: {self.model_name}')
 

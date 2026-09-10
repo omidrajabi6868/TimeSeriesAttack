@@ -22,7 +22,7 @@ def _size(value):
 def build_parser():
     parser = argparse.ArgumentParser(description='Train or evaluate an image adversarial trigger.')
     parser.add_argument('--task', default='perturbation_attack', help='Name used for the output run.')
-    parser.add_argument('--training', action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument('--training', action=argparse.BooleanOptionalAction, default=False,
                         help='Train a trigger; use --no-training to load one instead.')
     parser.add_argument('--label-path', default='/home/oraja001/Jlab/Hydra data/labels_v2.txt')
     parser.add_argument('--image-size', type=_size, default=(608, 256), metavar='WIDTHxHEIGHT')
@@ -42,12 +42,12 @@ def build_parser():
     parser.add_argument('--mask-learning-rate', type=float, default=0.001)
     parser.add_argument('--mask-l1-weight', type=float, default=0.0)
     parser.add_argument('--patch-l2-weight', type=float, default=0.0)
-    parser.add_argument('--patch-update-method', choices=PATCH_UPDATE_METHODS, default='gap_uap')
+    parser.add_argument('--patch-update-method', choices=PATCH_UPDATE_METHODS, default='adam')
     parser.add_argument('--epsilon', type=float, default=0.03)
     parser.add_argument('--bandwidth', type=int, default=60)
     parser.add_argument('--target-label', type=float, default=1.0)
     parser.add_argument('--source-filter', choices=('good', 'bad', 'all'), default='bad')
-    parser.add_argument('--output-dir', default=None,
+    parser.add_argument('--output-dir', default='/home/oraja001/Jlab/TimeSeriesAttack/backups/perturbation_attack_ResNet34_robust_uap_blend_count_1_size_608by256_epsilon_0.05_lr_0.05_mlr_0.001_mask_weight_0.0_patch_weight_0.0/',
                         help='Run directory; when omitted it is generated from the attack settings.')
     parser.add_argument('--trigger-preview-max-images', type=int, default=1)
     parser.add_argument('--checkpoint-interval', type=int, default=5,

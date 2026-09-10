@@ -18,21 +18,23 @@ module load container_env pytorch-gpu/2.2.0
 # Force Python to flush output immediately
 export PYTHONUNBUFFERED=1
 
+crun python train_model.py
+
 # Execute
-crun python imageattack.py \
-  --task perturbation_attack \
-  --training \
-  --image-size 608x256 \
-  --batch-size 32 \
-  --model-name SwinT \
-  --patch-size 608x256 \
-  --patch-count 1 \
-  --patch-update-method robust_uap \
-  --how-to-attach blend \
-  --steps 100 \
-  --learning-rate 0.05 \
-  --epsilon 0.05 \
-  --bandwidth 60 \
-  --target-label 1 \
-  --source-filter bad \
-  --no-optimize-mask 
+# crun python imageattack.py \
+#   --task perturbation_attack \
+#   --training \
+#   --image-size 608x256 \
+#   --batch-size 32 \
+#   --model-name SwinT \
+#   --patch-size 608x256 \
+#   --patch-count 1 \
+#   --patch-update-method gd_uap \
+#   --how-to-attach blend \
+#   --steps 100 \
+#   --learning-rate 0.05 \
+#   --epsilon 0.03 \
+#   --bandwidth 60 \
+#   --target-label 1 \
+#   --source-filter bad \
+#   --no-optimize-mask

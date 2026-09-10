@@ -57,7 +57,6 @@ class EfficientNetB0:
 
 class InceptionV3:
     """An Inception v3 model adapted for binary or multiclass classification."""
-
     def __init__(self, num_classes: int = 2):
         self.model = models.inception_v3(
             weights=models.Inception_V3_Weights.IMAGENET1K_V1
@@ -73,8 +72,6 @@ class InceptionV3:
 
 
 class SwinT:
-    """A compact hierarchical vision transformer with ImageNet weights."""
-
     def __init__(self, num_classes: int = 2):
         self.model = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
         self.num_classes = num_classes
