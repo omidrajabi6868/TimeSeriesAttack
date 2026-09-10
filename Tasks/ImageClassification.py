@@ -54,6 +54,8 @@ class ClassificationBase:
             self.model = ClassificationModels.MobileNetV3Small(1).model
         elif self.model_name == 'EfficientNetB0':
             self.model = ClassificationModels.EfficientNetB0(1).model
+        elif self.model_name == 'InceptionV3':
+            self.model = ClassificationModels.InceptionV3(1).model
         elif self.model_name == 'SwinT':
             self.model = ClassificationModels.SwinT(1).model
         else:

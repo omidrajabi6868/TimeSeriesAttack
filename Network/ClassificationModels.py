@@ -55,6 +55,23 @@ class EfficientNetB0:
         self.model.classifier[1] = torch.nn.Linear(in_features, num_classes)
 
 
+class InceptionV3:
+    """An Inception v3 model adapted for binary or multiclass classification."""
+
+    def __init__(self, num_classes: int = 2):
+        self.model = models.inception_v3(
+            weights=models.Inception_V3_Weights.IMAGENET1K_V1
+        )
+        self.num_classes = num_classes
+
+        # Unlike EfficientNet and MobileNet, torchvision's Inception3 exposes
+        # its final classifier as ``fc`` rather than ``classifier``.  Disable
+        # the auxiliary training head so callers always receive one tensor.
+        in_features = self.model.fc.in_features
+        self.model.fc = torch.nn.Linear(in_features, num_classes)
+        self.model.aux_logits = False
+
+
 class SwinT:
     """A compact hierarchical vision transformer with ImageNet weights."""
 
