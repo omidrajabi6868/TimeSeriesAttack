@@ -31,6 +31,13 @@ from Tasks.ImageClassification import ClassificationBase
             'head',
             None,
         ),
+        (
+            ClassificationModels.InceptionV3,
+            'inception_v3',
+            ClassificationModels.models.Inception_V3_Weights.IMAGENET1K_V1,
+            'fc',
+            None,
+        ),
     ],
 )
 def test_new_models_use_imagenet_weights_and_replace_classifier(
@@ -38,7 +45,7 @@ def test_new_models_use_imagenet_weights_and_replace_classifier(
 ):
     model = MagicMock()
     if classifier_index is None:
-        model.head.in_features = 32
+        getattr(model, classifier_attribute).in_features = 32
     else:
         classifier = [MagicMock() for _ in range(classifier_index + 1)]
         classifier[classifier_index].in_features = 32
@@ -56,7 +63,9 @@ def test_new_models_use_imagenet_weights_and_replace_classifier(
     assert output_layer.out_features == 1
 
 
-@pytest.mark.parametrize('model_name', ['MobileNetV3Small', 'EfficientNetB0', 'SwinT'])
+@pytest.mark.parametrize(
+    'model_name', ['MobileNetV3Small', 'EfficientNetB0', 'InceptionV3', 'SwinT']
+)
 def test_classification_base_builds_new_binary_models(model_name):
     mock_model = MagicMock()
     mock_model.to.return_value = mock_model
@@ -70,3 +79,13 @@ def test_classification_base_builds_new_binary_models(model_name):
 
     wrapper.assert_called_once_with(1)
     assert result is mock_model
+
+
+def test_inception_disables_auxiliary_logits():
+    model = MagicMock()
+    model.fc.in_features = 32
+
+    with patch.object(ClassificationModels.models, 'inception_v3', return_value=model):
+        wrapped = ClassificationModels.InceptionV3(num_classes=1)
+
+    assert wrapped.model.aux_logits is False
