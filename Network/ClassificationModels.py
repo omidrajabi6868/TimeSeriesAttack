@@ -68,6 +68,7 @@ class InceptionV3:
         # the auxiliary training head so callers always receive one tensor.
         in_features = self.model.fc.in_features
         self.model.fc = torch.nn.Linear(in_features, num_classes)
+        self.model.AuxLogits = None
         self.model.aux_logits = False
 
 
