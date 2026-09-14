@@ -23,6 +23,7 @@ class ClassificationBase:
         model_name: str,
         optimizer_name: str = 'Adam',
         checkpoint_dir: str = 'checkpoints',
+        multimodel_load: bool = False,
         device: Optional[str] = None,
         use_multi_gpu: bool = True,
         gpu_ids: Optional[Sequence[int]] = None):
@@ -34,47 +35,58 @@ class ClassificationBase:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device)
         self.model = None
+        self.models = None
         self.cost_function = None
         self.optimizer = None
         self.use_multi_gpu = use_multi_gpu
         self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+        self.multimodel_load = multimodel_load
 
     def _build_model(self):
-        if self.model_name == 'ResNet18':
-            self.model = ClassificationModels.ResNet('18', 1).model
-        elif self.model_name == 'ResNet34':
-            self.model = ClassificationModels.ResNet('34', 1).model
-        elif self.model_name == 'ResNet50':
-            self.model = ClassificationModels.ResNet('50', 1).model
-        elif self.model_name == 'ResNet101':
-            self.model = ClassificationModels.ResNet('101', 1).model
-        elif self.model_name == "AlexNet":
-            self.model = ClassificationModels.AlexNet('', 1).model
-        elif self.model_name == 'MobileNetV3Small':
-            self.model = ClassificationModels.MobileNetV3Small(1).model
-        elif self.model_name == 'EfficientNetB0':
-            self.model = ClassificationModels.EfficientNetB0(1).model
-        elif self.model_name == 'InceptionV3':
-            self.model = ClassificationModels.InceptionV3(1).model
-        elif self.model_name == 'SwinT':
-            self.model = ClassificationModels.SwinT(1).model
-        elif self.model_name == "InceptionV3":
-            self.model = ClassificationModels.InceptionV3(1).model
-        else:
-            raise ValueError(f'Unsupported model_name: {self.model_name}')
 
-        self.model = self.model.to(self.device)
-        if (
-            self.use_multi_gpu
-            and self.device.type == "cuda"
-            and torch.cuda.device_count() > 1
-        ):
-            if self.gpu_ids is None:
-                self.gpu_ids = list(range(torch.cuda.device_count()))
-            if len(self.gpu_ids) > 1:
-                print(f"Using DataParallel on GPUs: {self.gpu_ids}")
-                self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
-        return self.model
+        if self.multimodel_load:
+            self.models = []
+            self.models.append(ClassificationModels.ResNet('34', 1).model)
+            self.models.append(ClassificationModels.AlexNEt('', 1).model)
+            self.models.append(ClassificationModels.MobileNetV3Small(1).model)
+            self.models.append(ClassificationModels.SwinT(1).model)
+        else: 
+            if self.model_name == 'ResNet18':
+                self.model = ClassificationModels.ResNet('18', 1).model
+            elif self.model_name == 'ResNet34':
+                self.model = ClassificationModels.ResNet('34', 1).model
+            elif self.model_name == 'ResNet50':
+                self.model = ClassificationModels.ResNet('50', 1).model
+            elif self.model_name == 'ResNet101':
+                self.model = ClassificationModels.ResNet('101', 1).model
+            elif self.model_name == "AlexNet":
+                self.model = ClassificationModels.AlexNet('', 1).model
+            elif self.model_name == 'MobileNetV3Small':
+                self.model = ClassificationModels.MobileNetV3Small(1).model
+            elif self.model_name == 'EfficientNetB0':
+                self.model = ClassificationModels.EfficientNetB0(1).model
+            elif self.model_name == 'InceptionV3':
+                self.model = ClassificationModels.InceptionV3(1).model
+            elif self.model_name == 'SwinT':
+                self.model = ClassificationModels.SwinT(1).model
+            elif self.model_name == "InceptionV3":
+                self.model = ClassificationModels.InceptionV3(1).model
+            else:
+                raise ValueError(f'Unsupported model_name: {self.model_name}')
+
+            self.model = self.model.to(self.device)
+            if (
+                self.use_multi_gpu
+                and self.device.type == "cuda"
+                and torch.cuda.device_count() > 1
+            ):
+                if self.gpu_ids is None:
+                    self.gpu_ids = list(range(torch.cuda.device_count()))
+                if len(self.gpu_ids) > 1:
+                    print(f"Using DataParallel on GPUs: {self.gpu_ids}")
+                    self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
+
+        return self.models if self.multimodel_load else self.model
 
     def _build_cost_function(self):
         self.cost_function = torch.nn.BCEWithLogitsLoss()
@@ -165,11 +177,11 @@ class ClassificationBase:
         return self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
 
     def load_checkpoint(self, checkpoint_path: str, load_optimizer: bool = True):
-        if self.model is None:
+        if self.model is None and not self.multimodel_load:
             self._build_model()
         if self.cost_function is None:
             self._build_cost_function()
-        if self.optimizer is None:
+        if self.optimizer is None and not self.multimodel_load:
             self._build_optimization_algorithm(self.model.parameters(), learning_rate=1e-3)
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
@@ -184,6 +196,10 @@ class ClassificationBase:
         history = checkpoint.get('history')
 
         return start_epoch, best_val_loss, history
+    
+    def load_checkpoints(self, checkpoint_dir: str):
+        for model in self.models:
+            self.load_checkpoint(checkpoint_path='')
 
     def train_model(
         self,

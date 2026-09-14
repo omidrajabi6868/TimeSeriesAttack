@@ -28,7 +28,7 @@ def build_parser():
     parser.add_argument('--image-size', type=_size, default=(608, 256), metavar='WIDTHxHEIGHT')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--stratify-by-bad-sample', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--model-name', default='SwinT')
+    parser.add_argument('--model-name', default='AlexNet')
     parser.add_argument('--optimizer-name', default='Adam')
     parser.add_argument('--checkpoint-dir', default='backups/original_model')
     parser.add_argument('--checkpoint-path', default=None,
@@ -47,12 +47,14 @@ def build_parser():
     parser.add_argument('--bandwidth', type=int, default=60)
     parser.add_argument('--target-label', type=float, default=1.0)
     parser.add_argument('--source-filter', choices=('good', 'bad', 'all'), default='bad')
-    parser.add_argument('--output-dir', default='/home/oraja001/Jlab/TimeSeriesAttack/backups/perturbation_attack_ResNet34_robust_uap_blend_count_1_size_608by256_epsilon_0.05_lr_0.05_mlr_0.001_mask_weight_0.0_patch_weight_0.0/',
+    parser.add_argument('--output-dir', default=None,
                         help='Run directory; when omitted it is generated from the attack settings.')
     parser.add_argument('--trigger-preview-max-images', type=int, default=1)
     parser.add_argument('--checkpoint-interval', type=int, default=5,
                         help='Save an interruption-safe trigger checkpoint every N steps; 0 disables it.')
     parser.add_argument('--visualization-examples', type=int, default=20)
+    parser.add_argument('--multimodel-optimization', type=arg.BooleanOptionalAction, default=False,
+                        help='Train a trigger with knowledge of several models. use --no-multimodel-optimization to load one instead.')
     return parser
 
 
@@ -83,16 +85,22 @@ def main(argv=None):
         print(f'{split_name} counts: {split_info["counts"]}')
         print(f'{split_name} bad_ratio: {split_info["bad_ratio"]:.4f}')
 
+
     classification = ClassificationBase(
         model_name=args.model_name,
         optimizer_name=args.optimizer_name,
         checkpoint_dir=args.checkpoint_dir,
+        multimodel_load=args.multimodel_optimization,
     )
-    print(f'Test on {classification.model_name}: \n')
-    checkpoint_path = args.checkpoint_path or str(
-        Path(args.checkpoint_dir) / f'{classification.model_name}.pth'
-    )
-    classification.load_checkpoint(checkpoint_path)
+
+    if args.multimodel_optimization:
+        classification.load_checkpoints(args.checkpoint_dir)
+    else:    
+        print(f'Test on {classification.model_name}: \n')
+        checkpoint_path = args.checkpoint_path or str(
+            Path(args.checkpoint_dir) / f'{classification.model_name}.pth'
+        )
+        classification.load_checkpoint(checkpoint_path)
 
     # test_metrics = classification.evaluate_model(test_loader=test_loader)
     # print('\n\n')

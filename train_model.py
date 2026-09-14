@@ -44,8 +44,8 @@ def main():
     classification.train_model(
             train_loader,
             val_loader,
-            learning_rate=1e-4,
-            epoch_num=5,
+            learning_rate=1e-3,
+            epoch_num=50,
             resume=False,
             resume_from='backups/original_model/last_checkpoint.pth',
             pos_weight=pos_weight,
