@@ -11,11 +11,13 @@ class Attck(AdversarialAttack):
                 model: Callable,
                 device: Optional[str] = None,
                 use_multi_gpu: bool = True,
-                gpu_ids: Optional[Sequence[int]] = None):
+                gpu_ids: Optional[Sequence[int]] = None,
+                aggregation: str = 'mean',
+                model_weights: Optional[Sequence[float]] = None):
         
         self.patch_size = patch_size
-        super().__init__(model)
-        pass
+        super().__init__(model, device=device, use_multi_gpu=use_multi_gpu,
+                         gpu_ids=gpu_ids, aggregation=aggregation, model_weights=model_weights)
 
     def learn_fixed_size_patch(self, 
                             dataset,

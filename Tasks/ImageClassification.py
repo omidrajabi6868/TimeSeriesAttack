@@ -26,7 +26,8 @@ class ClassificationBase:
         multimodel_load: bool = False,
         device: Optional[str] = None,
         use_multi_gpu: bool = True,
-        gpu_ids: Optional[Sequence[int]] = None):
+        gpu_ids: Optional[Sequence[int]] = None,
+        model_names: Optional[Sequence[str]] = None):
         self.model_name = model_name
         self.optimizer_name = optimizer_name
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -41,38 +42,34 @@ class ClassificationBase:
         self.use_multi_gpu = use_multi_gpu
         self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
         self.multimodel_load = multimodel_load
+        self.model_names = list(model_names) if model_names is not None else [
+            'ResNet34', 'AlexNet', 'MobileNetV3Small', 'SwinT'
+        ]
+
+    @staticmethod
+    def _create_model(model_name):
+        builders = {
+            'ResNet18': lambda: ClassificationModels.ResNet('18', 1).model,
+            'ResNet34': lambda: ClassificationModels.ResNet('34', 1).model,
+            'ResNet50': lambda: ClassificationModels.ResNet('50', 1).model,
+            'ResNet101': lambda: ClassificationModels.ResNet('101', 1).model,
+            'AlexNet': lambda: ClassificationModels.AlexNet('', 1).model,
+            'MobileNetV3Small': lambda: ClassificationModels.MobileNetV3Small(1).model,
+            'EfficientNetB0': lambda: ClassificationModels.EfficientNetB0(1).model,
+            'InceptionV3': lambda: ClassificationModels.InceptionV3(1).model,
+            'SwinT': lambda: ClassificationModels.SwinT(1).model,
+        }
+        try:
+            return builders[model_name]()
+        except KeyError as exc:
+            raise ValueError(f'Unsupported model_name: {model_name}') from exc
 
     def _build_model(self):
 
         if self.multimodel_load:
-            self.models = {}
-            self.models['ResNet34'] = ClassificationModels.ResNet('34', 1).model
-            self.models['AlexNet'] = ClassificationModels.AlexNet('', 1).model
-            self.models['MobileNetV3Small'] = ClassificationModels.MobileNetV3Small(1).model
-            self.models['SwinT'] = ClassificationModels.SwinT(1).model
+            self.models = {name: self._create_model(name) for name in self.model_names}
         else: 
-            if self.model_name == 'ResNet18':
-                self.model = ClassificationModels.ResNet('18', 1).model
-            elif self.model_name == 'ResNet34':
-                self.model = ClassificationModels.ResNet('34', 1).model
-            elif self.model_name == 'ResNet50':
-                self.model = ClassificationModels.ResNet('50', 1).model
-            elif self.model_name == 'ResNet101':
-                self.model = ClassificationModels.ResNet('101', 1).model
-            elif self.model_name == "AlexNet":
-                self.model = ClassificationModels.AlexNet('', 1).model
-            elif self.model_name == 'MobileNetV3Small':
-                self.model = ClassificationModels.MobileNetV3Small(1).model
-            elif self.model_name == 'EfficientNetB0':
-                self.model = ClassificationModels.EfficientNetB0(1).model
-            elif self.model_name == 'InceptionV3':
-                self.model = ClassificationModels.InceptionV3(1).model
-            elif self.model_name == 'SwinT':
-                self.model = ClassificationModels.SwinT(1).model
-            elif self.model_name == "InceptionV3":
-                self.model = ClassificationModels.InceptionV3(1).model
-            else:
-                raise ValueError(f'Unsupported model_name: {self.model_name}')
+            self.model = self._create_model(self.model_name)
 
             self.model = self.model.to(self.device)
             if (
@@ -206,6 +203,7 @@ class ClassificationBase:
             checkpoint_state = _strip_module_prefix(checkpoint['model_state_dict'])
             model = model.module if isinstance(model, torch.nn.DataParallel) else model
             model.load_state_dict(checkpoint_state)
+        return self.models
             
 
     def train_model(
