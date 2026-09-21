@@ -20,6 +20,21 @@ def _size(value):
     return width, height
 
 
+def _default_output_dir(args):
+    """Build a run directory that cannot collide across optimization modes."""
+    if args.multimodel_optimization:
+        optimization_dir = Path('multi_model') / '__'.join(args.ensemble_models) / args.aggregation
+    else:
+        optimization_dir = Path('single_model') / args.model_name
+    run_name = (
+        f'{args.task}_{args.patch_update_method}_{args.how_to_attach}'
+        f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
+        f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
+        f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
+    )
+    return str(Path('backups') / optimization_dir / run_name)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description='Train or evaluate an image adversarial trigger.')
     parser.add_argument('--task', default='perturbation_attack', help='Name used for the output run.')
@@ -147,8 +162,8 @@ def main(argv=None):
     patch_update_method = args.patch_update_method
     epsilon = args.epsilon
     bandwidth = args.bandwidth
-    trigger_preview_dir = args.output_dir or f'backups/{task}_{classification.model_name}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
-    print(trigger_preview_dir)
+    trigger_preview_dir = args.output_dir or _default_output_dir(args)
+    print(f'attack_output_dir: {trigger_preview_dir}')
 
     if training:
         learned_trigger = attack.learn_fixed_size_patch(dataset=dataset,

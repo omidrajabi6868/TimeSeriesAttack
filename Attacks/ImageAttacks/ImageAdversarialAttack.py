@@ -105,6 +105,15 @@ class AdversarialAttack:
         return aggregate(losses, self.aggregation, self.model_weights), aggregate(
             outputs, self.aggregation, self.model_weights
         )
+
+    def _ensemble_metadata(self):
+        return {
+            'multi_model': self.models is not None,
+            'model_names': list(self.models) if self.models else ['model'],
+            'aggregation': self.aggregation,
+            'model_weights': self.model_weights,
+            'gpu_ids': self.gpu_ids,
+        }
     
     def _remove_feature_extractor(self):
         feature_extractor = getattr(self, 'feature_extractor', None)
@@ -230,6 +239,7 @@ class AdversarialAttack:
                 'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
                 'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
+                'ensemble': trigger.get('ensemble', {}),
                 'history_path': str(history_path),
             }
         temporary_output_path = output_path.with_name(f'.{output_path.name}.tmp')
@@ -247,6 +257,7 @@ class AdversarialAttack:
             'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
             'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
             'trigger_previews': trigger.get('trigger_previews', []),
+            'ensemble': trigger.get('ensemble', {}),
             'patch_path': str(output_path),
         }
         temporary_history_path = history_path.with_name(f'.{history_path.name}.tmp')
@@ -297,6 +308,7 @@ class AdversarialAttack:
             'smallest_success_validation_asr': trigger_payload.get('smallest_success_validation_asr'),
             'smallest_success_patch_area': trigger_payload.get('smallest_success_patch_area'),
             'trigger_previews': trigger_payload.get('trigger_previews', []),
+            'ensemble': trigger_payload.get('ensemble', {}),
             'history': history,
             'path': str(trigger_path),
             'history_path': resolved_history_path,
@@ -1153,6 +1165,7 @@ class AdversarialAttack:
                                 None if validation_loader is None else best_val_asr
                             ),
                             'trigger_previews': preview_records,
+                            'ensemble': self._ensemble_metadata(),
                         },
                         output_path=checkpoint_path,
                     )
@@ -1299,6 +1312,7 @@ class AdversarialAttack:
                 'events': resize_events,
             },
             'trigger_previews': preview_records,
+            'ensemble': self._ensemble_metadata(),
             'selection': selection,
             'selected_step': int(selected_step),
             'selected_validation_asr': (
