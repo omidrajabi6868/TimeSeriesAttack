@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 
 # Ensure the logs directory exists
@@ -26,7 +26,7 @@ crun python imageattack.py \
   --training \
   --image-size 608x256 \
   --batch-size 32 \
-  --model-name AlexNet \
+  --model-name InceptionV3 \
   --patch-size 608x256 \
   --patch-count 1 \
   --patch-update-method adam \
@@ -37,4 +37,5 @@ crun python imageattack.py \
   --bandwidth 60 \
   --target-label 1 \
   --source-filter bad \
-  --no-optimize-mask
+  --no-optimize-mask \
+  --multimodel-optimization
