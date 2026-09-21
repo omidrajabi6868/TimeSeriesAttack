@@ -45,11 +45,11 @@ class ClassificationBase:
     def _build_model(self):
 
         if self.multimodel_load:
-            self.models = []
-            self.models.append(ClassificationModels.ResNet('34', 1).model)
-            self.models.append(ClassificationModels.AlexNEt('', 1).model)
-            self.models.append(ClassificationModels.MobileNetV3Small(1).model)
-            self.models.append(ClassificationModels.SwinT(1).model)
+            self.models = {}
+            self.models['ResNet34'] = ClassificationModels.ResNet('34', 1).model
+            self.models['AlexNet'] = ClassificationModels.AlexNet('', 1).model
+            self.models['MobileNetV3Small'] = ClassificationModels.MobileNetV3Small(1).model
+            self.models['SwinT'] = ClassificationModels.SwinT(1).model
         else: 
             if self.model_name == 'ResNet18':
                 self.model = ClassificationModels.ResNet('18', 1).model
@@ -198,8 +198,15 @@ class ClassificationBase:
         return start_epoch, best_val_loss, history
     
     def load_checkpoints(self, checkpoint_dir: str):
-        for model in self.models:
-            self.load_checkpoint(checkpoint_path='')
+        if self.models is None:
+            self._build_model()
+        for name, model in self.models.items():
+            checkpoint_path = f'{checkpoint_dir}/{name}.pth'
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            checkpoint_state = _strip_module_prefix(checkpoint['model_state_dict'])
+            model = model.module if isinstance(model, torch.nn.DataParallel) else model
+            model.load_state_dict(checkpoint_state)
+            
 
     def train_model(
         self,

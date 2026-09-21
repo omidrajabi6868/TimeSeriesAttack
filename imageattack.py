@@ -53,7 +53,7 @@ def build_parser():
     parser.add_argument('--checkpoint-interval', type=int, default=5,
                         help='Save an interruption-safe trigger checkpoint every N steps; 0 disables it.')
     parser.add_argument('--visualization-examples', type=int, default=20)
-    parser.add_argument('--multimodel-optimization', type=arg.BooleanOptionalAction, default=False,
+    parser.add_argument('--multimodel-optimization', type=argparse.BooleanOptionalAction, default=True,
                         help='Train a trigger with knowledge of several models. use --no-multimodel-optimization to load one instead.')
     return parser
 
@@ -120,7 +120,7 @@ def main(argv=None):
     patch_count = args.patch_count
     patch_size = args.patch_size
     how_to_attach = args.how_to_attach
-    attack = Attck(patch_size=patch_size, model=classification.model)
+    attack = Attck(patch_size=patch_size, model= classification.models if args.multimodel_optimization else classification.model)
     steps = args.steps
     learning_rate = args.learning_rate
     optimize_mask = args.optimize_mask

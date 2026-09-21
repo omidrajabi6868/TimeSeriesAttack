@@ -24,16 +24,24 @@ class AdversarialAttack:
                 use_multi_gpu: bool = True,
                 gpu_ids: Optional[Sequence[int]] = None,
                 ):
-                    
-        self.model = model
+        
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
+        
         self.device = torch.device(self.device)
-        self.model = self.model.to(self.device)
         self.use_multi_gpu = use_multi_gpu
         self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+
+        if type(model) is list:
+            self.models = model
+            self.model = None
+        else:
+            self.model = model
+            self.models = None     
+            self.model = self.model.to(self.device)
+       
         if (
             self.use_multi_gpu
             and self.device.type == 'cuda'
@@ -287,7 +295,13 @@ class AdversarialAttack:
                                 how_to_attach='blend',
                                 bandwidth=60,
                                 psp_num_copies=128):
-        self.model.eval()
+        if self.model:
+            self.model.eval()
+            self.models = [self.model]
+        if self.models:
+            for _, model in self.models.items():
+                model.eval()
+
         progressive_resize_enabled = bool(progressive_resize)
 
         validation_trigger_boxes = self._normalize_trigger_boxes(trigger_box)
@@ -615,6 +629,15 @@ class AdversarialAttack:
                 if randomize_training_location:
                     training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
                     training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
+                
+                poisoned_inputs = self._inject_trigger(
+                    selected_inputs,
+                    training_trigger_boxes,
+                    trigger_patch=training_patch,
+                    trigger_mask=training_mask,
+                    edge_softness=current_softness,
+                    how_to_attach=how_to_attach
+                )
 
                 target_tensor = None
                 if patch_update_method == 'gd_uap':
@@ -624,15 +647,6 @@ class AdversarialAttack:
                     with torch.no_grad():
                         self.model(selected_inputs)
                     target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
-
-                poisoned_inputs = self._inject_trigger(
-                    selected_inputs,
-                    training_trigger_boxes,
-                    trigger_patch=training_patch,
-                    trigger_mask=training_mask,
-                    edge_softness=current_softness,
-                    how_to_attach=how_to_attach
-                )
 
                 feature_extractor = getattr(self, 'feature_extractor', None)
                 if feature_extractor is not None:

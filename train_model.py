@@ -8,10 +8,12 @@ def main():
     label_path = "/home/oraja001/Jlab/Hydra data/labels_v2.txt"
     image_size = (608, 256)
     train_transform = ImageDataset.default_train_augmentation(image_size=image_size)
+    eval_transform = ImageDataset.default_eval_transform(image_size=image_size)
     dataset = ImageDataset(label_path=label_path, transform=train_transform, image_size=image_size)
     train_loader, val_loader, test_loader = dataset.train_val_test_loader(
-        batch_size=32,
+        batch_size=64,
         stratify_by_bad_sample=True,
+        eval_transform=eval_transform,
     )
 
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -44,13 +46,13 @@ def main():
     classification.train_model(
             train_loader,
             val_loader,
-            learning_rate=1e-3,
-            epoch_num=50,
+            learning_rate=1e-4,
+            epoch_num=10,
             resume=False,
             resume_from='backups/original_model/last_checkpoint.pth',
-            pos_weight=pos_weight,
+            pos_weight=0.0,
             noise_probability_check=False,
-            noise_regularization_weight=0.05,
+            noise_regularization_weight=0.0,
             input_shape=(3, image_size[1], image_size[0]),
         )
     
