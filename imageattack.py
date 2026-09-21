@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from Attacks.ImageAttacks.Aggregation import available_aggregators
 
 
 PATCH_UPDATE_METHODS = (
@@ -55,6 +56,15 @@ def build_parser():
     parser.add_argument('--visualization-examples', type=int, default=20)
     parser.add_argument('--multimodel-optimization', type=argparse.BooleanOptionalAction, default=True,
                         help='Train a trigger with knowledge of several models. use --no-multimodel-optimization to load one instead.')
+    parser.add_argument('--ensemble-models', nargs='+',
+                        default=['ResNet34', 'AlexNet', 'MobileNetV3Small', 'SwinT'],
+                        help='Model names and checkpoint stems used for multi-model optimization.')
+    parser.add_argument('--aggregation', choices=available_aggregators(), default='mean',
+                        help='How per-model attack losses and logits are combined.')
+    parser.add_argument('--model-weights', nargs='+', type=float, default=None,
+                        help='One weight per ensemble model (required by weighted_mean).')
+    parser.add_argument('--gpu-ids', nargs='+', type=int, default=None,
+                        help='GPU IDs across which ensemble models are distributed round-robin.')
     return parser
 
 
@@ -91,6 +101,7 @@ def main(argv=None):
         optimizer_name=args.optimizer_name,
         checkpoint_dir=args.checkpoint_dir,
         multimodel_load=args.multimodel_optimization,
+        model_names=args.ensemble_models,
     )
 
     if args.multimodel_optimization:
@@ -120,7 +131,13 @@ def main(argv=None):
     patch_count = args.patch_count
     patch_size = args.patch_size
     how_to_attach = args.how_to_attach
-    attack = Attck(patch_size=patch_size, model= classification.models if args.multimodel_optimization else classification.model)
+    attack = Attck(
+        patch_size=patch_size,
+        model=classification.models if args.multimodel_optimization else classification.model,
+        gpu_ids=args.gpu_ids,
+        aggregation=args.aggregation,
+        model_weights=args.model_weights,
+    )
     steps = args.steps
     learning_rate = args.learning_rate
     optimize_mask = args.optimize_mask
