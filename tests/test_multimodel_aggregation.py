@@ -72,6 +72,14 @@ def test_default_output_directories_separate_single_and_multi_model_runs():
     assert single_path != multi_path
 
 
+def test_multimodel_optimization_is_a_boolean_flag():
+    parser = build_parser()
+
+    assert parser.parse_args([]).multimodel_optimization is False
+    assert parser.parse_args(['--multimodel-optimization']).multimodel_optimization is True
+    assert parser.parse_args(['--no-multimodel-optimization']).multimodel_optimization is False
+
+
 def test_ensemble_metadata_records_reproducibility_settings():
     attack = AdversarialAttack(
         {'small': ScaleModel(1), 'large': ScaleModel(2)},

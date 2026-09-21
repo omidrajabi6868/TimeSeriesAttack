@@ -69,8 +69,8 @@ def build_parser():
     parser.add_argument('--checkpoint-interval', type=int, default=5,
                         help='Save an interruption-safe trigger checkpoint every N steps; 0 disables it.')
     parser.add_argument('--visualization-examples', type=int, default=20)
-    parser.add_argument('--multimodel-optimization', type=argparse.BooleanOptionalAction, default=False,
-                        help='Train a trigger with knowledge of several models. use --no-multimodel-optimization to load one instead.')
+    parser.add_argument('--multimodel-optimization', action=argparse.BooleanOptionalAction, default=False,
+                        help='Train a trigger with knowledge of several models; use --no-multimodel-optimization to load one instead.')
     parser.add_argument('--ensemble-models', nargs='+',
                         default=['ResNet34', 'AlexNet', 'MobileNetV3Small', 'SwinT'],
                         help='Model names and checkpoint stems used for multi-model optimization.')
