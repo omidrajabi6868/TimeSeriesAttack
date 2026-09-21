@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from Attacks.ImageAttacks.Aggregation import available_aggregators
 
 
 PATCH_UPDATE_METHODS = (
@@ -17,6 +18,21 @@ def _size(value):
     if width <= 0 or height <= 0:
         raise argparse.ArgumentTypeError('size dimensions must be positive')
     return width, height
+
+
+def _default_output_dir(args):
+    """Build a run directory that cannot collide across optimization modes."""
+    if args.multimodel_optimization:
+        optimization_dir = Path('multi_model') / '__'.join(args.ensemble_models) / args.aggregation
+    else:
+        optimization_dir = Path('single_model') / args.model_name
+    run_name = (
+        f'{args.task}_{args.patch_update_method}_{args.how_to_attach}'
+        f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
+        f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
+        f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
+    )
+    return str(Path('backups') / optimization_dir / run_name)
 
 
 def build_parser():
@@ -55,6 +71,15 @@ def build_parser():
     parser.add_argument('--visualization-examples', type=int, default=20)
     parser.add_argument('--multimodel-optimization', type=argparse.BooleanOptionalAction, default=True,
                         help='Train a trigger with knowledge of several models. use --no-multimodel-optimization to load one instead.')
+    parser.add_argument('--ensemble-models', nargs='+',
+                        default=['ResNet34', 'AlexNet', 'MobileNetV3Small', 'SwinT'],
+                        help='Model names and checkpoint stems used for multi-model optimization.')
+    parser.add_argument('--aggregation', choices=available_aggregators(), default='mean',
+                        help='How per-model attack losses and logits are combined.')
+    parser.add_argument('--model-weights', nargs='+', type=float, default=None,
+                        help='One weight per ensemble model (required by weighted_mean).')
+    parser.add_argument('--gpu-ids', nargs='+', type=int, default=None,
+                        help='GPU IDs across which ensemble models are distributed round-robin.')
     return parser
 
 
@@ -91,6 +116,7 @@ def main(argv=None):
         optimizer_name=args.optimizer_name,
         checkpoint_dir=args.checkpoint_dir,
         multimodel_load=args.multimodel_optimization,
+        model_names=args.ensemble_models,
     )
 
     if args.multimodel_optimization:
@@ -120,7 +146,13 @@ def main(argv=None):
     patch_count = args.patch_count
     patch_size = args.patch_size
     how_to_attach = args.how_to_attach
-    attack = Attck(patch_size=patch_size, model= classification.models if args.multimodel_optimization else classification.model)
+    attack = Attck(
+        patch_size=patch_size,
+        model=classification.models if args.multimodel_optimization else classification.model,
+        gpu_ids=args.gpu_ids,
+        aggregation=args.aggregation,
+        model_weights=args.model_weights,
+    )
     steps = args.steps
     learning_rate = args.learning_rate
     optimize_mask = args.optimize_mask
@@ -130,8 +162,8 @@ def main(argv=None):
     patch_update_method = args.patch_update_method
     epsilon = args.epsilon
     bandwidth = args.bandwidth
-    trigger_preview_dir = args.output_dir or f'backups/{task}_{classification.model_name}_{patch_update_method}_{how_to_attach}_count_{patch_count}_size_{patch_size[0]}by{patch_size[1]}_epsilon_{epsilon}_lr_{learning_rate}_mlr_{mask_learning_rate}_mask_weight_{mask_l1_weight}_patch_weight_{patch_l2_weight}'
-    print(trigger_preview_dir)
+    trigger_preview_dir = args.output_dir or _default_output_dir(args)
+    print(f'attack_output_dir: {trigger_preview_dir}')
 
     if training:
         learned_trigger = attack.learn_fixed_size_patch(dataset=dataset,

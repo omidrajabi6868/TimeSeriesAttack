@@ -1,5 +1,6 @@
 import json
 import math
+from collections.abc import Mapping
 from contextlib import nullcontext
 
 import numpy as np
@@ -14,6 +15,7 @@ from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
 from Attacks.ImageAttacks.RobustUAP import RobustUAPConfig, TransformSampler, estimate_robustness, project_lp_ball
 from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler 
+from Attacks.ImageAttacks.Aggregation import aggregate
 from torch.utils.data import TensorDataset, DataLoader
 
 
@@ -23,29 +25,53 @@ class AdversarialAttack:
                 device: Optional[str] = None,
                 use_multi_gpu: bool = True,
                 gpu_ids: Optional[Sequence[int]] = None,
+                aggregation: str = 'mean',
+                model_weights: Optional[Sequence[float]] = None,
                 ):
         
+        requested_gpu_ids = list(gpu_ids) if gpu_ids is not None else None
         if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if torch.cuda.is_available() and requested_gpu_ids:
+                self.device = f'cuda:{requested_gpu_ids[0]}'
+            else:
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
         
         self.device = torch.device(self.device)
         self.use_multi_gpu = use_multi_gpu
-        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+        self.gpu_ids = requested_gpu_ids
 
-        if type(model) is list:
-            self.models = model
-            self.model = None
+        self.aggregation = aggregation
+        self.model_weights = list(model_weights) if model_weights is not None else None
+        if isinstance(model, Mapping):
+            self.models = dict(model)
+        elif isinstance(model, (list, tuple)):
+            self.models = {f'model_{index}': item for index, item in enumerate(model)}
         else:
-            self.model = model
-            self.models = None     
+            self.models = None
+        self.model = next(iter(self.models.values()), None) if self.models is not None else model
+        if self.model is None:
+            raise ValueError('At least one model is required.')
+
+        if self.models:
+            if self.model_weights is not None and len(self.model_weights) != len(self.models):
+                raise ValueError('The number of model weights must match the number of models.')
+            gpu_ids = self.gpu_ids or list(range(torch.cuda.device_count()))
+            for index, (name, current_model) in enumerate(self.models.items()):
+                model_device = self.device
+                if self.device.type == 'cuda' and self.use_multi_gpu and gpu_ids:
+                    model_device = torch.device(f'cuda:{gpu_ids[index % len(gpu_ids)]}')
+                self.models[name] = current_model.to(model_device)
+            self.model = next(iter(self.models.values()))
+        else:
             self.model = self.model.to(self.device)
        
         if (
             self.use_multi_gpu
             and self.device.type == 'cuda'
             and torch.cuda.device_count() > 1
+            and self.models is None
             and not isinstance(self.model, torch.nn.DataParallel)
         ):
             if self.gpu_ids is None:
@@ -53,6 +79,41 @@ class AdversarialAttack:
             if len(self.gpu_ids) > 1:
                 print(f'Using DataParallel for adversarial attack on GPUs: {self.gpu_ids}')
                 self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
+
+    def _model_items(self):
+        return self.models.items() if self.models else [('model', self.model)]
+
+    @staticmethod
+    def _module_device(model):
+        return next(model.parameters()).device
+
+    def _forward_all(self, inputs):
+        return [model(inputs.to(self._module_device(model))) for _, model in self._model_items()]
+
+    def _forward_logits(self, inputs):
+        return aggregate(self._forward_all(inputs), self.aggregation, self.model_weights)
+
+    def _classification_loss(self, inputs, target_label):
+        losses = []
+        outputs = []
+        for _, model in self._model_items():
+            model_inputs = inputs.to(self._module_device(model))
+            output = model(model_inputs)
+            target = torch.full_like(output, float(target_label))
+            losses.append(self.cost_function(outputs=output, targets=target))
+            outputs.append(output)
+        return aggregate(losses, self.aggregation, self.model_weights), aggregate(
+            outputs, self.aggregation, self.model_weights
+        )
+
+    def _ensemble_metadata(self):
+        return {
+            'multi_model': self.models is not None,
+            'model_names': list(self.models) if self.models else ['model'],
+            'aggregation': self.aggregation,
+            'model_weights': self.model_weights,
+            'gpu_ids': self.gpu_ids,
+        }
     
     def _remove_feature_extractor(self):
         feature_extractor = getattr(self, 'feature_extractor', None)
@@ -178,6 +239,7 @@ class AdversarialAttack:
                 'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
                 'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
+                'ensemble': trigger.get('ensemble', {}),
                 'history_path': str(history_path),
             }
         temporary_output_path = output_path.with_name(f'.{output_path.name}.tmp')
@@ -195,6 +257,7 @@ class AdversarialAttack:
             'smallest_success_validation_asr': trigger.get('smallest_success_validation_asr'),
             'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
             'trigger_previews': trigger.get('trigger_previews', []),
+            'ensemble': trigger.get('ensemble', {}),
             'patch_path': str(output_path),
         }
         temporary_history_path = history_path.with_name(f'.{history_path.name}.tmp')
@@ -245,6 +308,7 @@ class AdversarialAttack:
             'smallest_success_validation_asr': trigger_payload.get('smallest_success_validation_asr'),
             'smallest_success_patch_area': trigger_payload.get('smallest_success_patch_area'),
             'trigger_previews': trigger_payload.get('trigger_previews', []),
+            'ensemble': trigger_payload.get('ensemble', {}),
             'history': history,
             'path': str(trigger_path),
             'history_path': resolved_history_path,
@@ -295,12 +359,8 @@ class AdversarialAttack:
                                 how_to_attach='blend',
                                 bandwidth=60,
                                 psp_num_copies=128):
-        if self.model:
-            self.model.eval()
-            self.models = [self.model]
-        if self.models:
-            for _, model in self.models.items():
-                model.eval()
+        for _, model in self._model_items():
+            model.eval()
 
         progressive_resize_enabled = bool(progressive_resize)
 
@@ -401,6 +461,12 @@ class AdversarialAttack:
             raise ValueError(
                 'patch_update_method must be one of: '
                 f'{sorted(valid_patch_update_methods)}.'
+            )
+        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap', 'robust_uap', 'psp_uap'}:
+            raise ValueError(
+                f"Multi-model optimization is not supported for '{patch_update_method}' because it "
+                "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
+                "gap_uap, or hp_uap."
             )
 
         epsilon = float(epsilon)
@@ -652,15 +718,20 @@ class AdversarialAttack:
                 if feature_extractor is not None:
                     feature_extractor.clear()
 
-                model_outputs = self.model(poisoned_inputs)
-                if patch_update_method not in ('gd_uap', 'fg_uap'):
+                if self.models and patch_update_method not in ('gd_uap', 'fg_uap'):
+                    attack_loss, model_outputs = self._classification_loss(poisoned_inputs, target_label)
                     target_tensor = torch.full_like(model_outputs, float(target_label))
+                else:
+                    model_outputs = self.model(poisoned_inputs)
+                    if patch_update_method not in ('gd_uap', 'fg_uap'):
+                        target_tensor = torch.full_like(model_outputs, float(target_label))
                 objective_outputs = (
                     feature_extractor.activations
                     if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
                 )
 
-                attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
+                if not (self.models and patch_update_method not in ('gd_uap', 'fg_uap')):
+                    attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
 
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
 
@@ -1094,6 +1165,7 @@ class AdversarialAttack:
                                 None if validation_loader is None else best_val_asr
                             ),
                             'trigger_previews': preview_records,
+                            'ensemble': self._ensemble_metadata(),
                         },
                         output_path=checkpoint_path,
                     )
@@ -1240,6 +1312,7 @@ class AdversarialAttack:
                 'events': resize_events,
             },
             'trigger_previews': preview_records,
+            'ensemble': self._ensemble_metadata(),
             'selection': selection,
             'selected_step': int(selected_step),
             'selected_validation_asr': (
@@ -2145,7 +2218,7 @@ class AdversarialAttack:
                     how_to_attach=how_to_attach
 
                 )
-                poisoned_outputs = self.model(poisoned_inputs)
+                poisoned_outputs = self._forward_logits(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float().view(-1)
                 success_mask = (poisoned_preds == target_value)
 
@@ -2244,7 +2317,8 @@ class AdversarialAttack:
                               softness_alignment_weight=0.0,
                               how_to_attach='blend',
                               use_clean_feature_targets=False):
-        self.model.eval()
+        for _, model in self._model_items():
+            model.eval()
         losses = []
         attack_losses = []
         total = 0
@@ -2327,11 +2401,20 @@ class AdversarialAttack:
                     feature_extractor.clear()
                 else:
                     target_tensor = None
-                model_outputs = self.model(poisoned_inputs)
-                objective_outputs = feature_extractor.activations if use_feature_objective else model_outputs
-                if not use_feature_objective:
-                    target_tensor = torch.full_like(model_outputs, float(target_label))
-                attack_loss = cost_function(objective_outputs, target_tensor).to(self.device)
+                if self.models and not use_feature_objective:
+                    model_losses = []
+                    model_outputs_all = self._forward_all(poisoned_inputs)
+                    for output in model_outputs_all:
+                        model_target = torch.full_like(output, float(target_label))
+                        model_losses.append(cost_function(output, model_target))
+                    model_outputs = aggregate(model_outputs_all, self.aggregation, self.model_weights)
+                    attack_loss = aggregate(model_losses, self.aggregation, self.model_weights)
+                else:
+                    model_outputs = self.model(poisoned_inputs)
+                    objective_outputs = feature_extractor.activations if use_feature_objective else model_outputs
+                    if not use_feature_objective:
+                        target_tensor = torch.full_like(model_outputs, float(target_label))
+                    attack_loss = cost_function(objective_outputs, target_tensor).to(self.device)
                 loss = float(attack_loss.item()) + regularization_loss
                 batch_size = int(model_outputs.shape[0])
                 losses.append(loss * batch_size)
@@ -2369,7 +2452,8 @@ class AdversarialAttack:
         non-source samples left unchanged, while ASR and prediction-change rates
         use only the selected source samples as their denominator.
         """
-        self.model.eval()
+        for _, model in self._model_items():
+            model.eval()
         target_tensor = torch.tensor(target_label, dtype=torch.float32, device=self.device).view(1, -1)
 
         total = 0
@@ -2412,7 +2496,7 @@ class AdversarialAttack:
                 else:
                     source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
 
-                clean_outputs = self.model(inputs)
+                clean_outputs = self._forward_logits(inputs)
                 clean_preds = (clean_outputs > 0).float().view(-1)
                 clean_targets = flat_targets
                 clean_tp += int(((clean_preds == 1) & (clean_targets == 1)).sum().item())
@@ -2441,7 +2525,7 @@ class AdversarialAttack:
                         edge_softness=edge_softness,
                         how_to_attach=how_to_attach
                     )
-                poisoned_outputs = self.model(poisoned_inputs)
+                poisoned_outputs = self._forward_logits(poisoned_inputs)
                 poisoned_preds = (poisoned_outputs > 0).float()
                 flat_poisoned_preds = poisoned_preds.view(-1)
                 attacked_tp += int(((flat_poisoned_preds == 1) & (clean_targets == 1)).sum().item())
