@@ -29,7 +29,7 @@ crun python imageattack.py \
   --model-name InceptionV3 \
   --patch-size 608x256 \
   --patch-count 1 \
-  --patch-update-method adam \
+  --patch-update-method psp_uap \
   --how-to-attach blend \
   --steps 100 \
   --learning-rate 0.05 \

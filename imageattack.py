@@ -44,7 +44,7 @@ def build_parser():
     parser.add_argument('--image-size', type=_size, default=(608, 256), metavar='WIDTHxHEIGHT')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--stratify-by-bad-sample', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--model-name', default='AlexNet')
+    parser.add_argument('--model-name', default='InceptionV3')
     parser.add_argument('--optimizer-name', default='Adam')
     parser.add_argument('--checkpoint-dir', default='backups/original_model')
     parser.add_argument('--checkpoint-path', default=None,
