@@ -1,8 +1,10 @@
 import pytest
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from Attacks.ImageAttacks.Aggregation import aggregate, register_aggregator
+import Attacks.ImageAttacks.ImageAdversarialAttack as attack_module
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 from imageattack import _default_output_dir, build_parser
 
@@ -14,6 +16,21 @@ class ScaleModel(nn.Module):
 
     def forward(self, inputs):
         return inputs.flatten(1).mean(dim=1, keepdim=True) * self.scale
+
+
+class TinyConvModel(nn.Module):
+    def __init__(self, scale):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 2, kernel_size=1, bias=False)
+        self.head = nn.Linear(2, 1, bias=False)
+        nn.init.constant_(self.conv.weight, float(scale))
+        nn.init.constant_(self.head.weight, 0.5)
+        self.forward_calls = 0
+
+    def forward(self, inputs):
+        self.forward_calls += 1
+        features = torch.relu(self.conv(inputs)).mean(dim=(2, 3))
+        return self.head(features)
 
 
 def test_builtin_aggregation_strategies():
@@ -94,3 +111,88 @@ def test_ensemble_metadata_records_reproducibility_settings():
         'model_weights': [1, 2],
         'gpu_ids': None,
     }
+
+
+def _tiny_image_loader():
+    inputs = torch.zeros(2, 3, 8, 8)
+    targets = torch.zeros(2, 1)
+    return DataLoader(TensorDataset(inputs, targets), batch_size=2)
+
+
+def test_multimodel_psp_uap_aggregates_each_models_feature_loss():
+    models = {'first': TinyConvModel(0.5), 'second': TinyConvModel(1.0)}
+    attack = AdversarialAttack(
+        models,
+        device='cpu',
+        use_multi_gpu=False,
+        aggregation='weighted_mean',
+        model_weights=[1, 2],
+    )
+    loader = _tiny_image_loader()
+
+    result = attack.learn_universal_trigger(
+        data_loader=loader,
+        trigger_box={'x': 0, 'y': 0, 'width': 8, 'height': 8},
+        validation_loader=loader,
+        steps=1,
+        learning_rate=0.01,
+        optimize_mask=False,
+        patch_update_method='psp_uap',
+        epsilon=0.03,
+        log_interval=0,
+        trigger_preview_interval=0,
+        progressive_resize=False,
+        randomize_training_location=False,
+        psp_num_copies=2,
+    )
+
+    assert result['ensemble']['multi_model'] is True
+    assert result['ensemble']['model_names'] == ['first', 'second']
+    assert result['ensemble']['aggregation'] == 'weighted_mean'
+    assert all(model.forward_calls >= 2 for model in models.values())
+
+
+def test_multimodel_robust_uap_aggregates_each_models_classification_loss(monkeypatch):
+    class TinyRobustConfig:
+        def __init__(self, alpha=0.01):
+            self.psi = 0.2
+            self.phi = 0.2
+            self.gamma = 0.7
+            self.zeta = 0.8
+            self.alpha = alpha
+            self.max_inner_steps = 1
+            self.max_batch_size = 2
+            self.norm = 'linf'
+            self.num_transform_samples = 1
+
+    monkeypatch.setattr(attack_module, 'RobustUAPConfig', TinyRobustConfig)
+    monkeypatch.setattr(attack_module, 'estimate_robustness', lambda **kwargs: 0.0)
+
+    models = {'first': TinyConvModel(0.5), 'second': TinyConvModel(1.0)}
+    attack = AdversarialAttack(
+        models,
+        device='cpu',
+        use_multi_gpu=False,
+        aggregation='mean',
+    )
+    loader = _tiny_image_loader()
+
+    result = attack.learn_universal_trigger(
+        data_loader=loader,
+        trigger_box={'x': 0, 'y': 0, 'width': 8, 'height': 8},
+        validation_loader=loader,
+        steps=1,
+        learning_rate=0.01,
+        optimize_mask=False,
+        patch_update_method='robust_uap',
+        epsilon=0.03,
+        log_interval=0,
+        trigger_preview_interval=0,
+        progressive_resize=False,
+        randomize_training_location=False,
+    )
+
+    assert result['ensemble']['multi_model'] is True
+    assert result['ensemble']['model_names'] == ['first', 'second']
+    assert result['ensemble']['aggregation'] == 'mean'
+    assert all(model.forward_calls > 0 for model in models.values())

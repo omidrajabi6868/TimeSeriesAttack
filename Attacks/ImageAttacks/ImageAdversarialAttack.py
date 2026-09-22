@@ -106,6 +106,35 @@ class AdversarialAttack:
             outputs, self.aggregation, self.model_weights
         )
 
+    def _zero_model_grad(self):
+        for _, model in self._model_items():
+            model.zero_grad(set_to_none=True)
+
+    def _psp_loss(self, semantic_prior, semantic_delta):
+        losses = []
+        for name, model in self._model_items():
+            extractor = self.feature_extractors[name]
+            objective = self.psp_objectives[name]
+            model_device = self._module_device(model)
+
+            # The semantic prior is the fixed teacher. PSP features are only
+            # captured for the differentiable semantic-delta forward pass.
+            with torch.no_grad(), extractor.suspend_capture():
+                semantic_logits = model(semantic_prior.to(model_device))
+
+            extractor.clear()
+            delta_logits = model(semantic_delta.to(model_device))
+            losses.append(
+                objective(
+                    outputs=extractor.activations,
+                    semantic_logits=semantic_logits,
+                    delta_logits=delta_logits,
+                )
+            )
+            extractor.clear()
+
+        return aggregate(losses, self.aggregation, self.model_weights)
+
     def _ensemble_metadata(self):
         return {
             'multi_model': self.models is not None,
@@ -116,11 +145,25 @@ class AdversarialAttack:
         }
     
     def _remove_feature_extractor(self):
+        extractors = []
         feature_extractor = getattr(self, 'feature_extractor', None)
         if feature_extractor is not None:
-            feature_extractor.clear()
-            feature_extractor.remove()
-            self.feature_extractor = None
+            extractors.append(feature_extractor)
+        feature_extractors = getattr(self, 'feature_extractors', None)
+        if feature_extractors:
+            extractors.extend(feature_extractors.values())
+
+        removed = set()
+        for extractor in extractors:
+            if id(extractor) in removed:
+                continue
+            extractor.clear()
+            extractor.remove()
+            removed.add(id(extractor))
+
+        self.feature_extractor = None
+        self.feature_extractors = None
+        self.psp_objectives = None
 
     def _build_cost_function(self, name):
         self._remove_feature_extractor()
@@ -167,13 +210,27 @@ class AdversarialAttack:
             )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
         elif name == 'psp_uap':
-            self.feature_extractor = FeatureExtractor(self.model, n_last_layers=0, layer_types=(torch.nn.Conv2d,))
-            self.cost_function = PSPUAPObjective(
-                feature_extractor=self.feature_extractor,
-                p_active=True,
-                re_weight=True,
-                maximize_activations=False,
-            )
+            self.feature_extractors = {}
+            self.psp_objectives = {}
+            for model_name, model in self._model_items():
+                extractor = FeatureExtractor(
+                    model,
+                    n_last_layers=0,
+                    layer_types=(torch.nn.Conv2d,),
+                )
+                self.feature_extractors[model_name] = extractor
+                self.psp_objectives[model_name] = PSPUAPObjective(
+                    feature_extractor=extractor,
+                    p_active=True,
+                    re_weight=True,
+                    maximize_activations=False,
+                )
+
+            # Preserve the historical single-model attributes for callers that
+            # inspect them directly; multi-model PSP uses the dictionaries.
+            if self.models is None:
+                self.feature_extractor = next(iter(self.feature_extractors.values()))
+                self.cost_function = next(iter(self.psp_objectives.values()))
         else:
             assert name not in ['classification', 'gd_uap', 'fg_uap'], "This cost is not defined."
 
@@ -462,11 +519,11 @@ class AdversarialAttack:
                 'patch_update_method must be one of: '
                 f'{sorted(valid_patch_update_methods)}.'
             )
-        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap', 'robust_uap', 'psp_uap'}:
+        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap'}:
             raise ValueError(
                 f"Multi-model optimization is not supported for '{patch_update_method}' because it "
                 "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
-                "gap_uap, or hp_uap."
+                "gap_uap, hp_uap, robust_uap, or psp_uap."
             )
 
         epsilon = float(epsilon)
@@ -1664,7 +1721,7 @@ class AdversarialAttack:
 
                 selected_inputs = inputs[source_mask].clone()
                 batch_robustness = estimate_robustness(
-                    model=self.model,
+                    model=self._forward_logits,
                     inject_trigger=self._inject_trigger,
                     inputs=selected_inputs,
                     trigger_boxes=trigger_boxes,
@@ -1692,7 +1749,7 @@ class AdversarialAttack:
                     patch_update = patch_update.detach().requires_grad_(True)
                     candidate_patch = project_lp_ball(universal_patch.detach() + patch_update, epsilon, robust_config.norm)
                     loss_value = 0.0
-                    self.model.zero_grad(set_to_none=True)
+                    self._zero_model_grad()
                     for augmentation in sampler.sample(num_transform_samples):
                         for batch_start in range(0, selected_inputs.shape[0], robust_config.max_batch_size):
                             candidate_patch = project_lp_ball(
@@ -1710,12 +1767,10 @@ class AdversarialAttack:
                                 edge_softness=edge_softness,
                                 how_to_attach=how_to_attach,
                             )
-                            objective_outputs = self.model(poisoned_inputs)
-                            target_tensor = torch.full_like(objective_outputs, float(target_label))
-                            batch_loss = self.cost_function(
-                                outputs=objective_outputs,
-                                targets=target_tensor,
-                            ).to(self.device)
+                            batch_loss, _ = self._classification_loss(
+                                poisoned_inputs,
+                                target_label,
+                            )
                             batch_weight = float(input_batch.shape[0]) / float(selected_inputs.shape[0])
                             scaled_loss = batch_loss * batch_weight / float(num_transform_samples)
                             scaled_loss.backward()
@@ -1734,7 +1789,7 @@ class AdversarialAttack:
                     inner_updates += 1
 
                     batch_robustness = estimate_robustness(
-                        model=self.model,
+                        model=self._forward_logits,
                         inject_trigger=self._inject_trigger,
                         inputs=selected_inputs,
                         trigger_boxes=trigger_boxes,
@@ -1877,6 +1932,7 @@ class AdversarialAttack:
                 'transform_samples': int(num_transform_samples),
                 'norm': robust_config.norm,
             },
+            'ensemble': self._ensemble_metadata(),
             'trigger_previews': preview_records,
             'selection': 'best_targeted_attack_success_rate',
             'selected_step': int(best_step or steps),
@@ -1981,29 +2037,17 @@ class AdversarialAttack:
             semantic_prior = semantic_prior.to(self.device)
             semantic_delta = semantic_delta.to(self.device)
 
-            # Clean samples provide only the KL teacher logits. Disabling the
-            # hooks avoids retaining a second copy of every convolution map.
-            with torch.no_grad(), self.feature_extractor.suspend_capture():
-                semantic_logits = self.model(semantic_prior)
-
-            self.feature_extractor.clear()
-
-            delta_logits = self.model(semantic_delta)
-
-            adv_features = self.feature_extractor.activations
-
-            batch_loss = self.cost_function(
-                outputs=adv_features,
-                semantic_logits=semantic_logits,
-                delta_logits=delta_logits,
-            )
-
             patch_optimizer.zero_grad(set_to_none=True)
+            self._zero_model_grad()
+
+            batch_loss = self._psp_loss(
+                semantic_prior=semantic_prior,
+                semantic_delta=semantic_delta,
+            )
 
             batch_loss.backward()
 
             patch_optimizer.step()
-            self.feature_extractor.clear()
 
             with torch.no_grad():
                 universal_patch = (epsilon*torch.tanh(trigger_delta))
@@ -2138,6 +2182,7 @@ class AdversarialAttack:
                 "enabled": False,
                 "events": [],
             },
+            "ensemble": self._ensemble_metadata(),
             "trigger_previews": preview_records,
             "selection": ("best_targeted_attack_success_rate"),
             "selected_step": int(best_step or steps),
