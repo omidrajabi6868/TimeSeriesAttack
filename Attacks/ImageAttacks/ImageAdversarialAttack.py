@@ -2193,7 +2193,7 @@ class AdversarialAttack:
             "smallest_success_patch_area": None,
         }
 
-    def _learn_image_specific_trigger(self, data_loader,
+    def _learn_universal_trigger_legacy_copy(self, data_loader,
                                 val_loader,
                                 target_label, 
                                 source_filter, 
@@ -3412,9 +3412,12 @@ class AdversarialAttack:
                                         optimize_mask=False,
                                         mask_l1_weight=0.0,
                                         patch_l2_weight=0.0,
-                                        patch_update_method='pgd_sign',
+                                        patch_update_method='pgd',
                                         momentum_decay=1.0,
                                         epsilon=0.03,
+                                        bandwidth=60,
+                                        eot_samples=4,
+                                        deepfool_overshoot=0.02,
                                         edge_softness=0.0,
                                         how_to_attach='blend'):
         """Optimize one perturbation for one image.
@@ -3434,15 +3437,19 @@ class AdversarialAttack:
 
         method = str(patch_update_method).lower()
         aliases = {
-            'mi_fgsm': 'momentum_sign', 'mifgsm': 'momentum_sign', 'momentum': 'momentum_sign',
-            'iterative_fgsm': 'pgd_sign', 'ifgsm': 'pgd_sign', 'sign': 'pgd_sign', 'pgd': 'pgd_sign',
+            'mifgsm': 'mi_fgsm', 'momentum': 'mi_fgsm', 'momentum_sign': 'mi_fgsm',
+            'iterative_fgsm': 'ifgsm', 'sign': 'ifgsm', 'pgd_sign': 'pgd',
         }
         method = aliases.get(method, method)
-        if method not in {'adam', 'pgd_sign', 'momentum_sign'}:
+        valid_methods = {'fgsm', 'ifgsm', 'mi_fgsm', 'pgd', 'adam', 'deepfool', 'robust', 'hp'}
+        if method not in valid_methods:
             raise ValueError(
-                'Image-specific attacks support adam, pgd_sign, and momentum_sign; '
-                f"'{patch_update_method}' is a universal-attack method."
+                f"Image-specific attack method '{patch_update_method}' is not supported. "
+                f"Choose from: {', '.join(sorted(valid_methods))}. Universal-only methods "
+                "such as gd_uap, gap_uap, fg_uap, and psp_uap cannot be used here."
             )
+        if method == 'deepfool' and optimize_mask:
+            raise ValueError('deepfool does not optimize a mask; set optimize_mask=False.')
 
         epsilon = float(epsilon)
         if not 0.0 <= epsilon <= 1.0:
@@ -3469,6 +3476,7 @@ class AdversarialAttack:
         )
         eligible = selected_source and clean_prediction == label_value and label_value != float(target_label)
         base_result = {
+            'attack_method': method,
             'true_label': label_value,
             'clean_prediction': clean_prediction,
             'clean_logit': float(clean_logit.view(-1)[0].item()),
@@ -3493,9 +3501,18 @@ class AdversarialAttack:
             }
 
         channels = int(image.shape[1])
-        delta = torch.zeros((len(boxes), channels, height, width), device=self.device, requires_grad=True)
+        delta = torch.zeros((len(boxes), channels, height, width), device=self.device)
+        if method in {'pgd', 'robust'}:
+            delta.uniform_(-epsilon, epsilon)
+        delta.requires_grad_(True)
         delta_optimizer = torch.optim.Adam([delta], lr=learning_rate) if method == 'adam' else None
         momentum = torch.zeros_like(delta)
+        hp_filter = FourierFilter(mode='high_pass', bandwidth=bandwidth) if method == 'hp' else None
+        robust_sampler = (
+            TransformSampler(height=int(image.shape[-2]), width=int(image.shape[-1]))
+            if method == 'robust' else None
+        )
+        attack_steps = 1 if method == 'fgsm' else int(steps)
         mask_logits = None
         mask_optimizer = None
         if optimize_mask:
@@ -3509,7 +3526,7 @@ class AdversarialAttack:
         success = False
         steps_used = 0
         final_logit = clean_logit.detach()
-        for step in range(1, int(steps) + 1):
+        for step in range(1, attack_steps + 1):
             self._zero_model_grad()
             if delta_optimizer is not None:
                 delta_optimizer.zero_grad(set_to_none=True)
@@ -3517,12 +3534,30 @@ class AdversarialAttack:
                 mask_optimizer.zero_grad(set_to_none=True)
 
             mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+            attack_patch = hp_filter(delta).clamp(-epsilon, epsilon) if hp_filter is not None else delta
             poisoned = self._inject_trigger(
-                image, boxes, trigger_patch=delta, trigger_mask=mask,
+                image, boxes, trigger_patch=attack_patch, trigger_mask=mask,
                 edge_softness=edge_softness, how_to_attach='blend'
             )
-            attack_loss, logits = self._classification_loss(poisoned, target_label)
-            loss = attack_loss + float(patch_l2_weight) * delta.pow(2).mean()
+            if method == 'robust':
+                transformed_losses = []
+                transformed_logits = []
+                for augmentation in robust_sampler.sample(max(1, int(eot_samples))):
+                    transformed = augmentation(poisoned)
+                    transform_loss, transform_logits = self._classification_loss(
+                        transformed, target_label
+                    )
+                    transformed_losses.append(transform_loss)
+                    transformed_logits.append(transform_logits)
+                attack_loss = aggregate(transformed_losses, 'mean')
+                logits = aggregate(transformed_logits, 'mean')
+            else:
+                attack_loss, logits = self._classification_loss(poisoned, target_label)
+            loss = (
+                logits.sum()
+                if method == 'deepfool'
+                else attack_loss + float(patch_l2_weight) * delta.pow(2).mean()
+            )
             if mask_logits is not None:
                 loss = loss + float(mask_l1_weight) * mask.mean()
             loss.backward()
@@ -3530,12 +3565,17 @@ class AdversarialAttack:
             with torch.no_grad():
                 if method == 'adam':
                     delta_optimizer.step()
-                elif method == 'pgd_sign':
-                    delta.add_(-float(learning_rate) * delta.grad.sign())
-                else:
+                elif method == 'deepfool':
+                    logit = logits.view(-1)[0].detach()
+                    grad_norm_sq = delta.grad.pow(2).sum().clamp_min(1e-12)
+                    delta.add_(-(1.0 + float(deepfool_overshoot)) * logit * delta.grad / grad_norm_sq)
+                elif method == 'mi_fgsm':
                     normalized_grad = delta.grad / delta.grad.abs().mean().clamp_min(1e-12)
                     momentum.mul_(float(momentum_decay)).add_(normalized_grad)
                     delta.add_(-float(learning_rate) * momentum.sign())
+                else:
+                    step_size = epsilon if method == 'fgsm' else float(learning_rate)
+                    delta.add_(-step_size * delta.grad.sign())
                 delta.clamp_(-epsilon, epsilon)
             if mask_optimizer is not None:
                 mask_optimizer.step()
@@ -3543,8 +3583,9 @@ class AdversarialAttack:
             steps_used = step
             with torch.no_grad():
                 current_mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+                current_patch = hp_filter(delta).clamp(-epsilon, epsilon) if hp_filter is not None else delta
                 current_adv = self._inject_trigger(
-                    image, boxes, trigger_patch=delta, trigger_mask=current_mask,
+                    image, boxes, trigger_patch=current_patch, trigger_mask=current_mask,
                     edge_softness=edge_softness, how_to_attach='blend'
                 )
                 final_logit = self._forward_logits(current_adv)
@@ -3554,8 +3595,9 @@ class AdversarialAttack:
 
         with torch.no_grad():
             final_mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+            final_patch = hp_filter(delta).clamp(-epsilon, epsilon) if hp_filter is not None else delta
             adversarial = self._inject_trigger(
-                image, boxes, trigger_patch=delta, trigger_mask=final_mask,
+                image, boxes, trigger_patch=final_patch, trigger_mask=final_mask,
                 edge_softness=edge_softness, how_to_attach='blend'
             )
             effective_delta = adversarial - image
@@ -3569,7 +3611,7 @@ class AdversarialAttack:
             'elapsed_seconds': float(time.perf_counter() - started),
             'adversarial_image': adversarial.detach().cpu(),
             'perturbation': effective_delta.detach().cpu(),
-            'patch': delta.detach().cpu(), 'mask': final_mask.detach().cpu(),
+            'patch': final_patch.detach().cpu(), 'mask': final_mask.detach().cpu(),
             'trigger_boxes': [dict(box) for box in boxes],
             'adversarial_prediction': adversarial_prediction,
             'adversarial_logit': float(final_logit.view(-1)[0].item()),
@@ -3591,8 +3633,10 @@ class AdversarialAttack:
                                      min_edge_softness=0.0,
                                      mask_l1_weight=0.0,
                                      patch_l2_weight=0.0,
-                                     patch_update_method='pgd_sign',
+                                     patch_update_method='pgd',
                                      epsilon=0.03,
+                                     bandwidth=60,
+                                     eot_samples=4,
                                      log_interval=5,
                                      how_to_attach='blend',
                                      output_dir='backups/image_specific',
@@ -3628,6 +3672,7 @@ class AdversarialAttack:
                     mask_learning_rate=mask_learning_rate, optimize_mask=optimize_mask,
                     mask_l1_weight=mask_l1_weight, patch_l2_weight=patch_l2_weight,
                     patch_update_method=patch_update_method, epsilon=epsilon,
+                    bandwidth=bandwidth, eot_samples=eot_samples,
                     edge_softness=max(float(initial_edge_softness), float(min_edge_softness)),
                     how_to_attach=how_to_attach,
                 )
@@ -3640,7 +3685,7 @@ class AdversarialAttack:
                     'original_image': inputs[index:index + 1].detach().cpu(),
                     'target_label': float(target_label),
                     'source_filter': source_filter,
-                    'patch_update_method': patch_update_method,
+                    'patch_update_method': result['attack_method'],
                     'epsilon': float(epsilon),
                 }
                 torch.save(payload, artifact_path)

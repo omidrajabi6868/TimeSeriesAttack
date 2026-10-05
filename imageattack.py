@@ -3,10 +3,16 @@ from pathlib import Path
 from Attacks.ImageAttacks.Aggregation import available_aggregators
 
 
-PATCH_UPDATE_METHODS = (
+UNIVERSAL_ATTACK_METHODS = (
     'deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap',
     'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap',
 )
+IMAGE_SPECIFIC_ATTACK_METHODS = (
+    'fgsm', 'ifgsm', 'mi_fgsm', 'pgd', 'adam', 'deepfool', 'robust', 'hp',
+)
+PATCH_UPDATE_METHODS = tuple(sorted(set(
+    UNIVERSAL_ATTACK_METHODS + IMAGE_SPECIFIC_ATTACK_METHODS
+)))
 
 
 def _size(value):
@@ -64,6 +70,8 @@ def build_parser():
     parser.add_argument('--patch-update-method', choices=PATCH_UPDATE_METHODS, default='adam')
     parser.add_argument('--epsilon', type=float, default=0.03)
     parser.add_argument('--bandwidth', type=int, default=60)
+    parser.add_argument('--eot-samples', type=int, default=4,
+                        help='Number of transformations per step for image-specific robust attacks.')
     parser.add_argument('--target-label', type=float, default=1.0)
     parser.add_argument('--source-filter', choices=('good', 'bad', 'all'), default='bad')
     parser.add_argument('--output-dir', default=None,
@@ -89,7 +97,18 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    allowed_methods = (
+        IMAGE_SPECIFIC_ATTACK_METHODS
+        if args.attack_scope == 'image_specific'
+        else UNIVERSAL_ATTACK_METHODS
+    )
+    if args.patch_update_method not in allowed_methods:
+        parser.error(
+            f"--patch-update-method {args.patch_update_method!r} is not valid for "
+            f"--attack-scope {args.attack_scope}. Choose from: {', '.join(allowed_methods)}"
+        )
     from Dataset.DataManagement import ImageDataset
     from Tasks.ImageClassification import ClassificationBase
     from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
@@ -194,6 +213,7 @@ def main(argv=None):
                     patch_update_method=patch_update_method,
                     epsilon=epsilon,
                     bandwidth=bandwidth,
+                    eot_samples=args.eot_samples,
                     output_dir=trigger_preview_dir,
                     split_name=split_name,
                 )

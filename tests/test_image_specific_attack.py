@@ -1,9 +1,10 @@
 import json
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack, TransformSampler
 
 
 class MeanThresholdModel(torch.nn.Module):
@@ -29,7 +30,7 @@ def test_image_specific_generation_saves_independent_artifacts(tmp_path):
         steps=10,
         learning_rate=0.1,
         epsilon=0.5,
-        patch_update_method='pgd_sign',
+        patch_update_method='pgd',
         output_dir=tmp_path,
         split_name='validation',
         log_interval=0,
@@ -79,3 +80,59 @@ def test_transfer_evaluation_reuses_saved_adversarial_images(tmp_path):
     assert metrics['models']['source']['conditional_transfer_asr'] == 100.0
     assert metrics['models']['black_box']['eligible_samples'] == 1
     assert (tmp_path / 'test' / 'transfer_summary.json').exists()
+
+
+@pytest.mark.parametrize('method', ['fgsm', 'ifgsm', 'mi_fgsm', 'pgd', 'adam', 'deepfool', 'hp'])
+def test_supported_image_specific_method_names(method):
+    attack = AdversarialAttack(MeanThresholdModel(), device='cpu', use_multi_gpu=False)
+    result = attack.optimize_image_specific_trigger(
+        torch.zeros(1, 3, 2, 2),
+        torch.tensor(0.0),
+        {'x': 0, 'y': 0, 'width': 2, 'height': 2},
+        steps=10,
+        learning_rate=0.1,
+        epsilon=0.5,
+        bandwidth=0,
+        patch_update_method=method,
+    )
+
+    assert result['attack_method'] == method
+    assert result['linf'] <= 0.5 + 1e-6
+    assert result['success']
+
+
+@pytest.mark.parametrize(
+    'method',
+    ['deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'],
+)
+def test_universal_method_names_are_rejected_for_image_specific_attacks(method):
+    attack = AdversarialAttack(MeanThresholdModel(), device='cpu', use_multi_gpu=False)
+    with pytest.raises(ValueError, match='Universal-only methods'):
+        attack.optimize_image_specific_trigger(
+            torch.zeros(1, 3, 2, 2),
+            torch.tensor(0.0),
+            {'x': 0, 'y': 0, 'width': 2, 'height': 2},
+            patch_update_method=method,
+        )
+
+
+def test_robust_image_specific_attack_uses_per_image_eot(monkeypatch):
+    monkeypatch.setattr(
+        TransformSampler,
+        'sample',
+        lambda self, count: [lambda inputs: inputs for _ in range(count)],
+    )
+    attack = AdversarialAttack(MeanThresholdModel(), device='cpu', use_multi_gpu=False)
+    result = attack.optimize_image_specific_trigger(
+        torch.zeros(1, 3, 2, 2),
+        torch.tensor(0.0),
+        {'x': 0, 'y': 0, 'width': 2, 'height': 2},
+        steps=10,
+        learning_rate=0.1,
+        epsilon=0.5,
+        eot_samples=3,
+        patch_update_method='robust',
+    )
+
+    assert result['attack_method'] == 'robust'
+    assert result['success']
