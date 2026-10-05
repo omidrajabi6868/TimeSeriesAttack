@@ -498,134 +498,22 @@ class AdversarialAttack:
             patch_update_method = 'pgd_sign'
         elif patch_update_method == 'pgd':
             patch_update_method = 'pgd_sign'
-        elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
-            patch_update_method = 'deepfool_uap'
-        elif patch_update_method in ('gd_uap', 'gd'):
-            patch_update_method = 'gd_uap'
-        elif patch_update_method in ('gap_uap', 'gap'):
-            patch_update_method = 'gap_uap'
-        elif patch_update_method in ('hp_uap', 'hp'):
-            patch_update_method = 'hp_uap'
-        elif patch_update_method in ('fg_uap', 'fg'):
-            patch_update_method = 'fg_uap'
-        elif patch_update_method in ('robust', 'robust_uap'):
-            patch_update_method = 'robust_uap'
-        elif patch_update_method in ('psp', 'psp_uap'):
-            patch_update_method = 'psp_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
                 f'{sorted(valid_patch_update_methods)}.'
-            )
-        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap'}:
-            raise ValueError(
-                f"Multi-model optimization is not supported for '{patch_update_method}' because it "
-                "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
-                "gap_uap, hp_uap, robust_uap, or psp_uap."
             )
 
         epsilon = float(epsilon)
         if epsilon < 0 or epsilon > 1:
             raise ValueError('epsilon must be between 0 and 1 for normalized input-space perturbations.')
 
-        if patch_update_method == 'deepfool_uap':
-            if optimize_mask:
-                raise ValueError(
-                    'DeepFool UAP follows the original additive-perturbation algorithm and does not '
-                    'optimize masks. Set optimize_mask=False.'
-                )
-            if randomize_training_location:
-                raise ValueError(
-                    'DeepFool UAP requires a fixed universal perturbation location. Set '
-                    'randomize_training_location=False.'
-                )
-            if progressive_resize_enabled:
-                raise ValueError(
-                    'DeepFool UAP does not use the training-loop progressive resize heuristic. Set '
-                    'progressive_resize=False.'
-                )
-            return self._learn_deepfool_uap_trigger(
-                data_loader=data_loader,
-                validation_loader=validation_loader,
-                trigger_boxes=trigger_boxes,
-                target_label=target_label,
-                source_filter=source_filter,
-                steps=steps,
-                epsilon=epsilon,
-                log_interval=log_interval,
-                trigger_preview_interval=trigger_preview_interval,
-                trigger_preview_dir=trigger_preview_dir,
-                trigger_preview_loader=trigger_preview_loader,
-                trigger_preview_max_images=trigger_preview_max_images,
-                edge_softness=current_softness,
-                how_to_attach=how_to_attach,
-                overshoot=0.02,
-                max_deepfool_iter=50,
-            )
 
         patch_optimizer = None
-        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap'):
+        if patch_update_method in ('adam'):
             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
-            if patch_update_method == 'hp_uap':
-                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
-        
-        if patch_update_method == 'gap_uap':
-            generator = ParameterRender().to(self.device)
-            # Keep a direct, trainable path from the latent perturbation to the
-            # rendered perturbation.  Optimizing only the deep renderer made the
-            # targeted BCE gradient pass through every U-Net block before it
-            # could change the patch and commonly left GAP-UAP near its random
-            # initialization.  The residual parameterization is still rendered
-            # by GAP, while guaranteeing a well-conditioned identity path.
-            patch_optimizer = torch.optim.Adam(
-                [trigger_delta, *generator.parameters()],
-                lr=learning_rate,
-            )
-
-            def render_gap_patch():
-                return epsilon * torch.tanh(trigger_delta + generator(trigger_delta))
-
-        if patch_update_method == 'robust_uap':
-            return self._learn_robust_uap_trigger(
-                data_loader=data_loader,
-                validation_loader=validation_loader,
-                trigger_boxes=trigger_boxes,
-                trigger_delta=trigger_delta,
-                target_label=target_label,
-                source_filter=source_filter,
-                steps=steps,
-                epsilon=epsilon,
-                log_interval=log_interval,
-                trigger_preview_interval=trigger_preview_interval,
-                trigger_preview_dir=trigger_preview_dir,
-                trigger_preview_loader=trigger_preview_loader,
-                trigger_preview_max_images=trigger_preview_max_images,
-                edge_softness=current_softness,
-                how_to_attach=how_to_attach,
-                patch_optimizer=patch_optimizer
-            )
-
-        if patch_update_method == 'psp_uap':
-            return self._learn_psp_uap_trigger(
-                validation_loader=validation_loader,
-                trigger_boxes=trigger_boxes,
-                trigger_delta=trigger_delta,
-                target_label=target_label,
-                source_filter=source_filter,
-                steps=steps,
-                epsilon=epsilon,
-                log_interval=log_interval,
-                trigger_preview_interval=trigger_preview_interval,
-                trigger_preview_dir=trigger_preview_dir,
-                trigger_preview_loader=trigger_preview_loader,
-                trigger_preview_max_images=trigger_preview_max_images,
-                edge_softness=current_softness,
-                how_to_attach=how_to_attach,
-                patch_optimizer=patch_optimizer,
-                num_copies=psp_num_copies,
-            )
 
         patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
         alpha = float(learning_rate)
@@ -687,12 +575,8 @@ class AdversarialAttack:
         size_no_improve_steps = 0
         best_size_asr = float('-inf')
 
-        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap', 'hp_uap'):
+        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign'):
             self._build_cost_function('classification')
-        elif patch_update_method == 'gd_uap':
-            self._build_cost_function('gd_uap')
-        elif patch_update_method == 'fg_uap':
-            self._build_cost_function('fg_uap')
 
         for step_idx in range(steps):
             size_step_count += 1
@@ -702,12 +586,8 @@ class AdversarialAttack:
             step_mask_reg_losses = []
             step_softness_reg_losses = []
             step_samples = 0
-            if patch_update_method == 'gap_uap':
-                generator.eval()
-                with torch.no_grad():
-                    previous_patch = render_gap_patch().detach().clone()
-            else:
-                previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
+        
+            previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
 
             for inputs, targets in data_loader:
                 inputs = inputs.to(self.device)
@@ -729,13 +609,8 @@ class AdversarialAttack:
                     self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
                     if mask_logits is not None else None
                 )
-                if patch_update_method == 'gap_uap':
-                    generator.train()
-                    bounded_trigger_patch = render_gap_patch()
-                elif patch_update_method == 'hp_uap':
-                    bounded_trigger_patch = epsilon * torch.tanh(hp_filtering(trigger_delta))
-                else:
-                    bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
+               
+                bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
 
                 training_trigger_boxes = (
                     self._random_trigger_boxes(
@@ -763,31 +638,17 @@ class AdversarialAttack:
                 )
 
                 target_tensor = None
-                if patch_update_method == 'gd_uap':
-                    self.feature_extractor.clear()
-                elif patch_update_method == 'fg_uap':
-                    self.feature_extractor.clear()
-                    with torch.no_grad():
-                        self.model(selected_inputs)
-                    target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
 
-                feature_extractor = getattr(self, 'feature_extractor', None)
-                if feature_extractor is not None:
-                    feature_extractor.clear()
-
-                if self.models and patch_update_method not in ('gd_uap', 'fg_uap'):
+                if self.models:
                     attack_loss, model_outputs = self._classification_loss(poisoned_inputs, target_label)
                     target_tensor = torch.full_like(model_outputs, float(target_label))
                 else:
                     model_outputs = self.model(poisoned_inputs)
-                    if patch_update_method not in ('gd_uap', 'fg_uap'):
-                        target_tensor = torch.full_like(model_outputs, float(target_label))
-                objective_outputs = (
-                    feature_extractor.activations
-                    if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
-                )
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
 
-                if not (self.models and patch_update_method not in ('gd_uap', 'fg_uap')):
+                objective_outputs = model_outputs
+
+                if not (self.models):
                     attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
 
                 patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
