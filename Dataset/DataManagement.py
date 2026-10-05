@@ -10,6 +10,16 @@ import numpy as np
 import os
 import copy
 
+
+class IdentifiedSubset(Subset):
+    """A Subset that also returns a stable original-dataset identifier."""
+
+    def __getitem__(self, idx):
+        original_idx = int(self.indices[idx])
+        image, label = self.dataset[original_idx]
+        image_path = str(self.dataset.image_paths[original_idx])
+        return image, label, str(original_idx), image_path
+
  
 class ImageDataset(TorchDataset):
     def __init__(self, label_path, transform=None, image_size=None, transform_input='pil'):
@@ -54,7 +64,8 @@ class ImageDataset(TorchDataset):
                               pin_memory=None,
                               persistent_workers=None,
                               prefetch_factor=2,
-                              eval_transform=None):
+                              eval_transform=None,
+                              include_sample_ids=False):
         if not torch.isclose(torch.tensor(train_ratio + val_ratio + test_ratio), torch.tensor(1.0)):
             raise ValueError('train_ratio, val_ratio and test_ratio must sum to 1.')
 
@@ -75,7 +86,8 @@ class ImageDataset(TorchDataset):
                 seed=seed,
             )
 
-        train_set = Subset(self, train_indices)
+        subset_type = IdentifiedSubset if include_sample_ids else Subset
+        train_set = subset_type(self, train_indices)
 
         # A Subset delegates __getitem__ to its parent dataset.  Reusing `self`
         # here would therefore apply stochastic training augmentation during
@@ -86,8 +98,8 @@ class ImageDataset(TorchDataset):
         if eval_transform is not None:
             evaluation_dataset = copy.copy(self)
             evaluation_dataset.transform = eval_transform
-        val_set = Subset(evaluation_dataset, val_indices)
-        test_set = Subset(evaluation_dataset, test_indices)
+        val_set = subset_type(evaluation_dataset, val_indices)
+        test_set = subset_type(evaluation_dataset, test_indices)
 
         if num_workers is None:
             cpu_count = os.cpu_count() or 1

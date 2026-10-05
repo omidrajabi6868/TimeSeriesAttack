@@ -1,5 +1,6 @@
 import json
 import math
+import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 
@@ -371,7 +372,7 @@ class AdversarialAttack:
             'history_path': resolved_history_path,
         }
 
-    def learn_image_specific_trigger(self,
+    def _learn_image_specific_trigger_legacy(self,
                                 data_loader,
                                 trigger_box,
                                 target_label=1.0,
@@ -3988,6 +3989,7 @@ class AdversarialAttack:
             'smallest_success_patch_area': (
                 None if smallest_success_patch is None else int(smallest_success_area)
             ),
+        }
         
     @staticmethod
     def _image_tensor_to_pil(image_tensor, scale_from_signed=False):
@@ -4275,6 +4277,332 @@ class AdversarialAttack:
             'trigger_box': trigger_box,
             'source_filter': source_filter,
         }
+
+    def optimize_image_specific_trigger(self,
+                                        image,
+                                        label,
+                                        trigger_box,
+                                        target_label=1.0,
+                                        source_filter='bad',
+                                        steps=100,
+                                        learning_rate=0.01,
+                                        mask_learning_rate=0.001,
+                                        optimize_mask=False,
+                                        mask_l1_weight=0.0,
+                                        patch_l2_weight=0.0,
+                                        patch_update_method='pgd_sign',
+                                        momentum_decay=1.0,
+                                        epsilon=0.03,
+                                        edge_softness=0.0,
+                                        how_to_attach='blend'):
+        """Optimize one perturbation for one image.
+
+        Unlike UAP learning, no state is shared with any other sample. The
+        returned adversarial tensor can therefore be evaluated unchanged on
+        arbitrary black-box models.
+        """
+        if image.ndim == 3:
+            image = image.unsqueeze(0)
+        if image.shape[0] != 1:
+            raise ValueError('Image-specific optimization expects exactly one image.')
+        if how_to_attach != 'blend':
+            raise ValueError("Image-specific epsilon-bounded attacks currently require how_to_attach='blend'.")
+        if source_filter not in {'bad', 'good', 'all'}:
+            raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+
+        method = str(patch_update_method).lower()
+        aliases = {
+            'mi_fgsm': 'momentum_sign', 'mifgsm': 'momentum_sign', 'momentum': 'momentum_sign',
+            'iterative_fgsm': 'pgd_sign', 'ifgsm': 'pgd_sign', 'sign': 'pgd_sign', 'pgd': 'pgd_sign',
+        }
+        method = aliases.get(method, method)
+        if method not in {'adam', 'pgd_sign', 'momentum_sign'}:
+            raise ValueError(
+                'Image-specific attacks support adam, pgd_sign, and momentum_sign; '
+                f"'{patch_update_method}' is a universal-attack method."
+            )
+
+        epsilon = float(epsilon)
+        if not 0.0 <= epsilon <= 1.0:
+            raise ValueError('epsilon must be between 0 and 1.')
+        boxes = self._normalize_trigger_boxes(trigger_box)
+        width, height = int(boxes[0]['width']), int(boxes[0]['height'])
+        if any(int(box['width']) != width or int(box['height']) != height for box in boxes):
+            raise ValueError('All image-specific trigger boxes must have the same size.')
+
+        for _, model in self._model_items():
+            model.eval()
+        if not hasattr(self, 'cost_function') or self.cost_function is None:
+            self._build_cost_function('classification')
+        image = image.detach().to(self.device)
+        label_value = float(torch.as_tensor(label).view(-1)[0].item())
+        with torch.no_grad():
+            clean_logit = self._forward_logits(image)
+            clean_prediction = float((clean_logit.view(-1)[0] > 0).item())
+
+        selected_source = (
+            source_filter == 'all'
+            or (source_filter == 'bad' and label_value == 0.0)
+            or (source_filter == 'good' and label_value == 1.0)
+        )
+        eligible = selected_source and clean_prediction == label_value and label_value != float(target_label)
+        base_result = {
+            'true_label': label_value,
+            'clean_prediction': clean_prediction,
+            'clean_logit': float(clean_logit.view(-1)[0].item()),
+            'eligible': bool(eligible),
+            'already_target': bool(clean_prediction == float(target_label)),
+        }
+        if not eligible:
+            reason = 'outside_source_filter'
+            if selected_source and clean_prediction != label_value:
+                reason = 'clean_misclassified'
+            elif selected_source and label_value == float(target_label):
+                reason = 'source_is_target_class'
+            return {
+                **base_result,
+                'status': 'skipped', 'skip_reason': reason, 'success': False, 'steps_used': 0,
+                'adversarial_image': image.detach().cpu(),
+                'perturbation': torch.zeros_like(image).cpu(),
+                'patch': None, 'mask': None, 'trigger_boxes': boxes,
+                'adversarial_prediction': clean_prediction,
+                'adversarial_logit': float(clean_logit.view(-1)[0].item()),
+                'l1': 0.0, 'l2': 0.0, 'linf': 0.0,
+            }
+
+        channels = int(image.shape[1])
+        delta = torch.zeros((len(boxes), channels, height, width), device=self.device, requires_grad=True)
+        delta_optimizer = torch.optim.Adam([delta], lr=learning_rate) if method == 'adam' else None
+        momentum = torch.zeros_like(delta)
+        mask_logits = None
+        mask_optimizer = None
+        if optimize_mask:
+            mask_logits = torch.full_like(delta, 4.0, requires_grad=True)
+            mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+        fixed_mask = self._build_blend_mask(
+            height, width, channels, self.device, image.dtype, edge_softness
+        ).expand(len(boxes), -1, -1, -1)
+
+        started = time.perf_counter()
+        success = False
+        steps_used = 0
+        final_logit = clean_logit.detach()
+        for step in range(1, int(steps) + 1):
+            self._zero_model_grad()
+            if delta_optimizer is not None:
+                delta_optimizer.zero_grad(set_to_none=True)
+            if mask_optimizer is not None:
+                mask_optimizer.zero_grad(set_to_none=True)
+
+            mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+            poisoned = self._inject_trigger(
+                image, boxes, trigger_patch=delta, trigger_mask=mask,
+                edge_softness=edge_softness, how_to_attach='blend'
+            )
+            attack_loss, logits = self._classification_loss(poisoned, target_label)
+            loss = attack_loss + float(patch_l2_weight) * delta.pow(2).mean()
+            if mask_logits is not None:
+                loss = loss + float(mask_l1_weight) * mask.mean()
+            loss.backward()
+
+            with torch.no_grad():
+                if method == 'adam':
+                    delta_optimizer.step()
+                elif method == 'pgd_sign':
+                    delta.add_(-float(learning_rate) * delta.grad.sign())
+                else:
+                    normalized_grad = delta.grad / delta.grad.abs().mean().clamp_min(1e-12)
+                    momentum.mul_(float(momentum_decay)).add_(normalized_grad)
+                    delta.add_(-float(learning_rate) * momentum.sign())
+                delta.clamp_(-epsilon, epsilon)
+            if mask_optimizer is not None:
+                mask_optimizer.step()
+
+            steps_used = step
+            with torch.no_grad():
+                current_mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+                current_adv = self._inject_trigger(
+                    image, boxes, trigger_patch=delta, trigger_mask=current_mask,
+                    edge_softness=edge_softness, how_to_attach='blend'
+                )
+                final_logit = self._forward_logits(current_adv)
+                success = bool((final_logit.view(-1)[0] > 0).item() == bool(target_label))
+            if success:
+                break
+
+        with torch.no_grad():
+            final_mask = fixed_mask if mask_logits is None else fixed_mask * torch.sigmoid(mask_logits)
+            adversarial = self._inject_trigger(
+                image, boxes, trigger_patch=delta, trigger_mask=final_mask,
+                edge_softness=edge_softness, how_to_attach='blend'
+            )
+            effective_delta = adversarial - image
+            flat_delta = effective_delta.reshape(-1)
+            adversarial_prediction = float((final_logit.view(-1)[0] > 0).item())
+
+        return {
+            **base_result,
+            'status': 'success' if success else 'failed', 'skip_reason': None,
+            'success': bool(success), 'steps_used': int(steps_used),
+            'elapsed_seconds': float(time.perf_counter() - started),
+            'adversarial_image': adversarial.detach().cpu(),
+            'perturbation': effective_delta.detach().cpu(),
+            'patch': delta.detach().cpu(), 'mask': final_mask.detach().cpu(),
+            'trigger_boxes': [dict(box) for box in boxes],
+            'adversarial_prediction': adversarial_prediction,
+            'adversarial_logit': float(final_logit.view(-1)[0].item()),
+            'l1': float(flat_delta.abs().sum().item()),
+            'l2': float(torch.linalg.vector_norm(flat_delta, ord=2).item()),
+            'linf': float(flat_delta.abs().max().item()),
+        }
+
+    def learn_image_specific_trigger(self,
+                                     data_loader,
+                                     trigger_box,
+                                     target_label=1.0,
+                                     source_filter='bad',
+                                     steps=100,
+                                     learning_rate=0.01,
+                                     mask_learning_rate=0.001,
+                                     optimize_mask=False,
+                                     initial_edge_softness=0.0,
+                                     min_edge_softness=0.0,
+                                     mask_l1_weight=0.0,
+                                     patch_l2_weight=0.0,
+                                     patch_update_method='pgd_sign',
+                                     epsilon=0.03,
+                                     log_interval=5,
+                                     how_to_attach='blend',
+                                     output_dir='backups/image_specific',
+                                     split_name='test',
+                                     **_unused):
+        """Generate and save one independently optimized attack per sample."""
+        split_dir = Path(output_dir) / split_name
+        artifact_dir = split_dir / 'artifacts'
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = split_dir / 'manifest.jsonl'
+        records = []
+        sample_offset = 0
+
+        for batch in data_loader:
+            if len(batch) == 4:
+                inputs, targets, sample_ids, image_paths = batch
+            elif len(batch) == 3:
+                inputs, targets, sample_ids = batch
+                image_paths = [None] * int(inputs.shape[0])
+            elif len(batch) == 2:
+                inputs, targets = batch
+                sample_ids = [str(sample_offset + i) for i in range(int(inputs.shape[0]))]
+                image_paths = [None] * int(inputs.shape[0])
+            else:
+                raise ValueError('Expected batches containing 2, 3, or 4 fields.')
+
+            for index in range(int(inputs.shape[0])):
+                sample_id = str(sample_ids[index])
+                result = self.optimize_image_specific_trigger(
+                    inputs[index:index + 1], targets[index], trigger_box,
+                    target_label=target_label, source_filter=source_filter,
+                    steps=steps, learning_rate=learning_rate,
+                    mask_learning_rate=mask_learning_rate, optimize_mask=optimize_mask,
+                    mask_l1_weight=mask_l1_weight, patch_l2_weight=patch_l2_weight,
+                    patch_update_method=patch_update_method, epsilon=epsilon,
+                    edge_softness=max(float(initial_edge_softness), float(min_edge_softness)),
+                    how_to_attach=how_to_attach,
+                )
+                artifact_name = f'{sample_offset + index:08d}.pt'
+                artifact_path = artifact_dir / artifact_name
+                payload = {
+                    **result,
+                    'sample_id': sample_id,
+                    'image_path': None if image_paths[index] is None else str(image_paths[index]),
+                    'original_image': inputs[index:index + 1].detach().cpu(),
+                    'target_label': float(target_label),
+                    'source_filter': source_filter,
+                    'patch_update_method': patch_update_method,
+                    'epsilon': float(epsilon),
+                }
+                torch.save(payload, artifact_path)
+                record = {
+                    key: value for key, value in payload.items()
+                    if key not in {'original_image', 'adversarial_image', 'perturbation', 'patch', 'mask'}
+                }
+                record['artifact'] = str(Path('artifacts') / artifact_name)
+                records.append(record)
+                if log_interval and len(records) % int(log_interval) == 0:
+                    print(f'{split_name}: generated {len(records)} image-specific attacks')
+            sample_offset += int(inputs.shape[0])
+
+        with open(manifest_path, 'w', encoding='utf-8') as manifest_file:
+            for record in records:
+                manifest_file.write(json.dumps(record) + '\n')
+
+        eligible = [record for record in records if record['eligible']]
+        successful = [record for record in eligible if record['success']]
+        summary = {
+            'split': split_name,
+            'samples_seen': len(records),
+            'eligible_samples': len(eligible),
+            'successful_attacks': len(successful),
+            'source_attack_success_rate': 100.0 * len(successful) / len(eligible) if eligible else 0.0,
+            'mean_steps': float(np.mean([record['steps_used'] for record in eligible])) if eligible else 0.0,
+            'mean_l1': float(np.mean([record['l1'] for record in eligible])) if eligible else 0.0,
+            'mean_l2': float(np.mean([record['l2'] for record in eligible])) if eligible else 0.0,
+            'mean_linf': float(np.mean([record['linf'] for record in eligible])) if eligible else 0.0,
+            'manifest_path': str(manifest_path),
+        }
+        with open(split_dir / 'summary.json', 'w', encoding='utf-8') as summary_file:
+            json.dump(summary, summary_file, indent=2)
+        return summary
+
+    @staticmethod
+    def evaluate_image_specific_artifacts(output_dir, models, split_name='test'):
+        """Evaluate saved adversarial images without re-optimizing them."""
+        split_dir = Path(output_dir) / split_name
+        manifest_path = split_dir / 'manifest.jsonl'
+        if not manifest_path.exists():
+            raise FileNotFoundError(f'Image-specific manifest not found: {manifest_path}')
+        if not isinstance(models, Mapping):
+            models = {'model': models}
+        for model in models.values():
+            model.eval()
+
+        records = [json.loads(line) for line in manifest_path.read_text(encoding='utf-8').splitlines() if line]
+        metrics = {}
+        for model_name, model in models.items():
+            model_device = AdversarialAttack._module_device(model)
+            eligible_count = source_success_count = black_box_success = conditional_success = 0
+            clean_correct = prediction_changes = 0
+            for record in records:
+                payload = torch.load(split_dir / record['artifact'], map_location='cpu')
+                if not bool(payload['eligible']):
+                    continue
+                eligible_count += 1
+                source_success = bool(payload['success'])
+                source_success_count += int(source_success)
+                clean_image = payload['original_image'].to(model_device)
+                adversarial_image = payload['adversarial_image'].to(model_device)
+                with torch.no_grad():
+                    clean_prediction = float((model(clean_image).view(-1)[0] > 0).item())
+                    adversarial_prediction = float((model(adversarial_image).view(-1)[0] > 0).item())
+                clean_correct += int(clean_prediction == float(payload['true_label']))
+                prediction_changes += int(clean_prediction != adversarial_prediction)
+                success = adversarial_prediction == float(payload['target_label'])
+                black_box_success += int(success)
+                conditional_success += int(source_success and success)
+            metrics[model_name] = {
+                'eligible_samples': eligible_count,
+                'clean_accuracy': 100.0 * clean_correct / eligible_count if eligible_count else 0.0,
+                'prediction_change_rate': 100.0 * prediction_changes / eligible_count if eligible_count else 0.0,
+                'unconditional_transfer_asr': 100.0 * black_box_success / eligible_count if eligible_count else 0.0,
+                'source_successful_samples': source_success_count,
+                'conditional_transfer_asr': (
+                    100.0 * conditional_success / source_success_count if source_success_count else 0.0
+                ),
+            }
+        result = {'split': split_name, 'models': metrics}
+        with open(split_dir / 'transfer_summary.json', 'w', encoding='utf-8') as output_file:
+            json.dump(result, output_file, indent=2)
+        return result
 
     def evaluate_attack_success(self,
                                  test_loader,
@@ -4572,7 +4900,9 @@ class AdversarialAttack:
     def _select_non_overlapping_boxes(candidates, max_count):
         selected = []
         for candidate in candidates:
-            overlaps_existing = any(self._boxes_overlap(candidate, chosen) for chosen in selected)
+            overlaps_existing = any(
+                AdversarialAttack._boxes_overlap(candidate, chosen) for chosen in selected
+            )
             if overlaps_existing:
                 continue
             selected.append(candidate)
