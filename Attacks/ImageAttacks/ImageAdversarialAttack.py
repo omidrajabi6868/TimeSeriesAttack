@@ -371,6 +371,1023 @@ class AdversarialAttack:
             'history_path': resolved_history_path,
         }
 
+    def learn_image_specific_trigger(self,
+                                data_loader,
+                                trigger_box,
+                                target_label=1.0,
+                                source_filter='bad',
+                                validation_loader=None,
+                                report_training_asr=False,
+                                steps=100,
+                                learning_rate=0.1,
+                                mask_learning_rate=0.02,
+                                optimize_mask=True,
+                                initial_edge_softness=0.30,
+                                min_edge_softness=0.05,
+                                softness_decay=0.85,
+                                softness_patience=8,
+                                asr_hardening_threshold=70.0,
+                                mask_l1_weight=0.01,
+                                patch_l2_weight=0.0005,
+                                softness_alignment_weight=0.05,
+                                patch_update_method='momentum_sign',
+                                momentum_decay=1.0,
+                                gradient_norm_epsilon=1e-12,
+                                epsilon=1.0,
+                                log_interval=1,
+                                trigger_preview_interval=10,
+                                trigger_preview_dir='backups/adversarial_trigger_previews',
+                                trigger_preview_loader=None,
+                                trigger_preview_max_images=5,
+                                checkpoint_interval=None,
+                                checkpoint_path=None,
+                                progressive_resize=True,
+                                progressive_resize_direction='grow',
+                                min_patch_size=(16, 16),
+                                randomize_training_location=True,
+                                patch_growth_factor=None,
+                                patch_shrink_factor=None,
+                                patch_recovery_growth_factor=None,
+                                min_steps_per_patch_size=10,
+                                size_patience=None,
+                                resize_hysteresis=2.0,
+                                compression_asr_threshold=None,
+                                enable_compression_phase=True,
+                                how_to_attach='blend',
+                                bandwidth=60,
+                                psp_num_copies=128):
+        for _, model in self._model_items():
+            model.eval()
+
+        progressive_resize_enabled = bool(progressive_resize)
+
+        validation_trigger_boxes = self._normalize_trigger_boxes(trigger_box)
+        validation_anchor_boxes = [dict(box) for box in validation_trigger_boxes]
+        base_box = validation_anchor_boxes[0]
+        width = int(base_box['width'])
+        height = int(base_box['height'])
+        for candidate_box in validation_anchor_boxes[1:]:
+            if int(candidate_box['width']) != width or int(candidate_box['height']) != height:
+                raise ValueError('All trigger_boxes must have identical width/height for universal trigger learning.')
+
+        channels = 3
+        full_patch_size = self._infer_full_patch_size(data_loader, fallback=(width, height))
+        max_width, max_height = self._normalize_patch_size(full_patch_size)
+        min_width, min_height = self._normalize_patch_size(min_patch_size)
+        min_width = min(min_width, max_width)
+        min_height = min(min_height, max_height)
+        progressive_resize_direction = str(progressive_resize_direction).lower()
+        if progressive_resize_direction in ('increase', 'growing'):
+            progressive_resize_direction = 'grow'
+        elif progressive_resize_direction in ('decrease', 'shrinking', 'minimize'):
+            progressive_resize_direction = 'shrink'
+        if progressive_resize_direction not in {'grow', 'shrink'}:
+            raise ValueError("progressive_resize_direction must be either 'grow' or 'shrink'.")
+        if patch_growth_factor is None:
+            patch_growth_factor = 1.25
+        patch_growth_factor = float(patch_growth_factor)
+        if patch_growth_factor <= 1.0:
+            raise ValueError('patch_growth_factor must be greater than 1.')
+        patch_shrink_factor = patch_growth_factor if patch_shrink_factor is None else float(patch_shrink_factor)
+        if patch_shrink_factor <= 1.0:
+            raise ValueError('patch_shrink_factor must be greater than 1.')
+        if patch_recovery_growth_factor is None:
+            patch_recovery_growth_factor = (
+                math.sqrt(patch_shrink_factor)
+                if progressive_resize_direction == 'shrink' else patch_growth_factor
+            )
+        patch_recovery_growth_factor = float(patch_recovery_growth_factor)
+        if patch_recovery_growth_factor <= 1.0:
+            raise ValueError('patch_recovery_growth_factor must be greater than 1.')
+        if (
+            progressive_resize_direction == 'shrink'
+            and patch_recovery_growth_factor >= patch_shrink_factor
+        ):
+            raise ValueError(
+                'patch_recovery_growth_factor must be less than patch_shrink_factor '
+                'when progressive_resize_direction is shrink.'
+            )
+        min_steps_per_patch_size = max(1, int(min_steps_per_patch_size))
+        size_patience = int(size_patience) if size_patience is not None else int(softness_patience)
+        size_patience = max(1, size_patience)
+        resize_hysteresis = max(0.0, float(resize_hysteresis))
+        shrink_asr_threshold = min(100.0, float(asr_hardening_threshold) + resize_hysteresis)
+        grow_asr_threshold = max(0.0, float(asr_hardening_threshold) - resize_hysteresis)
+        if compression_asr_threshold is None:
+            compression_asr_threshold = asr_hardening_threshold
+        compression_asr_threshold = min(100.0, max(0.0, float(compression_asr_threshold)))
+        compression_phase_active = (
+            bool(enable_compression_phase)
+            and progressive_resize_enabled
+            and progressive_resize_direction == 'shrink'
+        )
+        if progressive_resize_enabled and progressive_resize_direction == 'grow':
+            width, height = min_width, min_height
+        elif progressive_resize_enabled and progressive_resize_direction == 'shrink':
+            width, height = max_width, max_height
+        initial_width, initial_height = int(width), int(height)
+        current_softness = float(max(min_edge_softness, initial_edge_softness))
+
+        trigger_boxes = self._resize_trigger_boxes(validation_anchor_boxes, width, height, full_patch_size)
+        trigger_delta = torch.randn((len(trigger_boxes), channels, height, width), device=self.device)
+        trigger_delta.requires_grad_()
+        patch_update_method = str(patch_update_method).lower()
+        if patch_update_method in ('mi_fgsm', 'mifgsm', 'momentum'):
+            patch_update_method = 'momentum_sign'
+        elif patch_update_method in ('iterative_fgsm', 'ifgsm', 'sign'):
+            patch_update_method = 'pgd_sign'
+        elif patch_update_method == 'pgd':
+            patch_update_method = 'pgd_sign'
+        elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
+            patch_update_method = 'deepfool_uap'
+        elif patch_update_method in ('gd_uap', 'gd'):
+            patch_update_method = 'gd_uap'
+        elif patch_update_method in ('gap_uap', 'gap'):
+            patch_update_method = 'gap_uap'
+        elif patch_update_method in ('hp_uap', 'hp'):
+            patch_update_method = 'hp_uap'
+        elif patch_update_method in ('fg_uap', 'fg'):
+            patch_update_method = 'fg_uap'
+        elif patch_update_method in ('robust', 'robust_uap'):
+            patch_update_method = 'robust_uap'
+        elif patch_update_method in ('psp', 'psp_uap'):
+            patch_update_method = 'psp_uap'
+
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'}
+        if patch_update_method not in valid_patch_update_methods:
+            raise ValueError(
+                'patch_update_method must be one of: '
+                f'{sorted(valid_patch_update_methods)}.'
+            )
+        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap'}:
+            raise ValueError(
+                f"Multi-model optimization is not supported for '{patch_update_method}' because it "
+                "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
+                "gap_uap, hp_uap, robust_uap, or psp_uap."
+            )
+
+        epsilon = float(epsilon)
+        if epsilon < 0 or epsilon > 1:
+            raise ValueError('epsilon must be between 0 and 1 for normalized input-space perturbations.')
+
+        if patch_update_method == 'deepfool_uap':
+            if optimize_mask:
+                raise ValueError(
+                    'DeepFool UAP follows the original additive-perturbation algorithm and does not '
+                    'optimize masks. Set optimize_mask=False.'
+                )
+            if randomize_training_location:
+                raise ValueError(
+                    'DeepFool UAP requires a fixed universal perturbation location. Set '
+                    'randomize_training_location=False.'
+                )
+            if progressive_resize_enabled:
+                raise ValueError(
+                    'DeepFool UAP does not use the training-loop progressive resize heuristic. Set '
+                    'progressive_resize=False.'
+                )
+            return self._learn_deepfool_uap_trigger(
+                data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                overshoot=0.02,
+                max_deepfool_iter=50,
+            )
+
+        patch_optimizer = None
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap'):
+            patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+            if patch_update_method == 'hp_uap':
+                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
+        
+        if patch_update_method == 'gap_uap':
+            generator = ParameterRender().to(self.device)
+            # Keep a direct, trainable path from the latent perturbation to the
+            # rendered perturbation.  Optimizing only the deep renderer made the
+            # targeted BCE gradient pass through every U-Net block before it
+            # could change the patch and commonly left GAP-UAP near its random
+            # initialization.  The residual parameterization is still rendered
+            # by GAP, while guaranteeing a well-conditioned identity path.
+            patch_optimizer = torch.optim.Adam(
+                [trigger_delta, *generator.parameters()],
+                lr=learning_rate,
+            )
+
+            def render_gap_patch():
+                return epsilon * torch.tanh(trigger_delta + generator(trigger_delta))
+
+        if patch_update_method == 'robust_uap':
+            return self._learn_robust_uap_trigger(
+                data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer
+            )
+
+        if patch_update_method == 'psp_uap':
+            return self._learn_psp_uap_trigger(
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer,
+                num_copies=psp_num_copies,
+            )
+
+        patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
+        alpha = float(learning_rate)
+        mu = float(momentum_decay)
+        grad_norm_epsilon = float(gradient_norm_epsilon)
+
+        learned_mask = None
+        mask_logits = None
+        mask_optimizer = None
+        base_mask = None
+        mask_training_active = bool(optimize_mask)
+        if optimize_mask:
+            base_mask = self._build_blend_mask(
+                height=height,
+                width=width,
+                channels=channels,
+                device=self.device,
+                dtype=trigger_delta.dtype,
+                edge_softness=current_softness,
+            ).expand(len(trigger_boxes), -1, -1, -1)
+            mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
+            mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+
+        preview_records = []
+        preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
+        preview_max_images = (
+            max(0, int(trigger_preview_max_images))
+            if trigger_preview_max_images is not None else 0
+        )
+        preview_output_dir = Path(trigger_preview_dir) if trigger_preview_dir is not None else None
+        if preview_interval > 0 and preview_output_dir is not None:
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+        preview_data_loader = trigger_preview_loader or validation_loader or data_loader
+        checkpoint_interval = (
+            max(0, int(checkpoint_interval))
+            if checkpoint_interval is not None else 0
+        )
+        checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+
+        history = []
+        best_patch = None
+        best_mask = None
+        best_trigger_boxes = [dict(box) for box in trigger_boxes]
+        best_step = 0
+        best_val_loss = float('inf')
+        best_val_asr = float('-inf')
+        best_softness = None
+        smallest_success_patch = None
+        smallest_success_mask = None
+        smallest_success_boxes = None
+        smallest_success_step = 0
+        smallest_success_asr = float('-inf')
+        smallest_success_val_loss = float('inf')
+        smallest_success_area = float('inf')
+        smallest_success_softness = None
+        resize_events = []
+        no_improve_steps = 0
+        size_step_count = 0
+        size_no_improve_steps = 0
+        best_size_asr = float('-inf')
+
+        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap', 'hp_uap'):
+            self._build_cost_function('classification')
+        elif patch_update_method == 'gd_uap':
+            self._build_cost_function('gd_uap')
+        elif patch_update_method == 'fg_uap':
+            self._build_cost_function('fg_uap')
+
+        for step_idx in range(steps):
+            size_step_count += 1
+            step_losses = []
+            step_attack_losses = []
+            step_patch_reg_losses = []
+            step_mask_reg_losses = []
+            step_softness_reg_losses = []
+            step_samples = 0
+            if patch_update_method == 'gap_uap':
+                generator.eval()
+                with torch.no_grad():
+                    previous_patch = render_gap_patch().detach().clone()
+            else:
+                previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
+
+            for inputs, targets in data_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
+
+                if source_filter == 'bad':
+                    source_mask = (flat_targets == 0)
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                else:
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+
+                if source_mask.sum().item() == 0:
+                    continue
+
+                selected_inputs = inputs[source_mask].clone()
+                blend_mask = (
+                    self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    if mask_logits is not None else None
+                )
+                if patch_update_method == 'gap_uap':
+                    generator.train()
+                    bounded_trigger_patch = render_gap_patch()
+                elif patch_update_method == 'hp_uap':
+                    bounded_trigger_patch = epsilon * torch.tanh(hp_filtering(trigger_delta))
+                else:
+                    bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
+
+                training_trigger_boxes = (
+                    self._random_trigger_boxes(
+                        batch_size=selected_inputs.shape[0],
+                        patch_width=width,
+                        patch_height=height,
+                        image_width=selected_inputs.shape[-1],
+                        image_height=selected_inputs.shape[-2],
+                    )
+                    if randomize_training_location else trigger_boxes
+                )
+                training_patch = bounded_trigger_patch
+                training_mask = blend_mask
+                if randomize_training_location:
+                    training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
+                    training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
+                
+                poisoned_inputs = self._inject_trigger(
+                    selected_inputs,
+                    training_trigger_boxes,
+                    trigger_patch=training_patch,
+                    trigger_mask=training_mask,
+                    edge_softness=current_softness,
+                    how_to_attach=how_to_attach
+                )
+
+                target_tensor = None
+                if patch_update_method == 'gd_uap':
+                    self.feature_extractor.clear()
+                elif patch_update_method == 'fg_uap':
+                    self.feature_extractor.clear()
+                    with torch.no_grad():
+                        self.model(selected_inputs)
+                    target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
+
+                feature_extractor = getattr(self, 'feature_extractor', None)
+                if feature_extractor is not None:
+                    feature_extractor.clear()
+
+                if self.models and patch_update_method not in ('gd_uap', 'fg_uap'):
+                    attack_loss, model_outputs = self._classification_loss(poisoned_inputs, target_label)
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
+                else:
+                    model_outputs = self.model(poisoned_inputs)
+                    if patch_update_method not in ('gd_uap', 'fg_uap'):
+                        target_tensor = torch.full_like(model_outputs, float(target_label))
+                objective_outputs = (
+                    feature_extractor.activations
+                    if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
+                )
+
+                if not (self.models and patch_update_method not in ('gd_uap', 'fg_uap')):
+                    attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
+
+                patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
+
+                if mask_logits is not None:
+                    base_mask = self._build_blend_mask(
+                        height=height,
+                        width=width,
+                        channels=channels,
+                        device=self.device,
+                        dtype=trigger_delta.dtype,
+                        edge_softness=current_softness,
+                    ).expand(len(trigger_boxes), -1, -1, -1)
+                    mask_values = self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    mask_growth = torch.relu(mask_values - base_mask)
+                    mask_reg = mask_l1_weight * torch.mean(mask_growth)
+                    softness_reg = softness_alignment_weight * torch.mean((mask_values - base_mask) ** 2)
+                else:
+                    mask_reg = torch.tensor(0.0, device=self.device)
+                    softness_reg = torch.tensor(0.0, device=self.device)
+                loss = attack_loss + patch_reg + mask_reg + softness_reg
+
+                if patch_optimizer is not None:
+                    patch_optimizer.zero_grad()
+                elif trigger_delta.grad is not None:
+                    trigger_delta.grad.zero_()
+                if mask_optimizer is not None:
+                    mask_optimizer.zero_grad()
+                loss.backward()
+
+                if patch_update_method in ('adam', 'gap_uap', 'hp_uap', 'gd_uap', 'fg_uap'):
+                    patch_optimizer.step()
+                else:
+                    with torch.no_grad():
+                        patch_grad = trigger_delta.grad
+                        if patch_grad is not None:
+                            if patch_update_method == 'pgd_sign':
+                                trigger_delta.add_(-alpha * patch_grad.sign())
+                            elif patch_update_method == 'momentum_sign':
+                                grad_l1_norm = patch_grad.norm(p=1)
+                                if torch.isfinite(grad_l1_norm) and grad_l1_norm.item() > grad_norm_epsilon:
+                                    # Targeted trigger learning minimizes the BCE objective. Use the
+                                    # negative loss gradient as the ascent objective so the patch update
+                                    # follows: g = mu * g + grad / grad.norm(p=1),
+                                    # delta += alpha * sign(g), patch = tanh(delta).
+                                    normalized_grad = -patch_grad / torch.clamp(
+                                        grad_l1_norm,
+                                        min=grad_norm_epsilon,
+                                    )
+                                    patch_momentum.mul_(mu).add_(normalized_grad)
+                                    trigger_delta.add_(alpha * patch_momentum.sign())
+                if trigger_delta.grad is not None:
+                    trigger_delta.grad.zero_()
+
+                if mask_optimizer is not None and mask_training_active:
+                    mask_optimizer.step()
+
+                batch_samples = int(model_outputs.shape[0])
+                step_losses.append(float(loss.item()) * batch_samples)
+                step_attack_losses.append(float(attack_loss.item()) * batch_samples)
+                step_patch_reg_losses.append(float(patch_reg.item()) * batch_samples)
+                step_mask_reg_losses.append(float(mask_reg.item()) * batch_samples)
+                step_softness_reg_losses.append(float(softness_reg.item()) * batch_samples)
+                step_samples += batch_samples
+
+            step_loss = (sum(step_losses) / step_samples) if step_samples else 0.0
+            step_attack_loss = (sum(step_attack_losses) / step_samples) if step_samples else 0.0
+            step_patch_reg_loss = (sum(step_patch_reg_losses) / step_samples) if step_samples else 0.0
+            step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
+            step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
+            if patch_update_method == 'gap_uap':
+                # Materialize GAP in evaluation mode so BatchNorm uses the same
+                # running statistics for validation, selection, and export.
+                generator.eval()
+                with torch.no_grad():
+                    current_patch_for_metrics = render_gap_patch().detach()
+            elif patch_update_method == 'hp_uap':
+                current_patch_for_metrics = (epsilon * torch.tanh(hp_filtering(trigger_delta))).detach()
+            else:
+                current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
+
+            current_mask_for_metrics = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                if mask_logits is not None else None
+            )
+            patch_update_l2 = float(torch.norm(
+                (current_patch_for_metrics - previous_patch).reshape(-1),
+                p=2,
+            ).item())
+            patch_l1_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=1).item())
+            patch_l2_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=2).item())
+            patch_linf_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=float('inf')).item())
+            if current_mask_for_metrics is not None:
+                mask_l1_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=1).item())
+                mask_l2_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=2).item())
+                mask_linf_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=float('inf')).item())
+                mask_mean = float(current_mask_for_metrics.mean().item())
+                effective_patch_for_metrics = current_patch_for_metrics * current_mask_for_metrics
+            else:
+                mask_l1_norm = 0.0
+                mask_l2_norm = 0.0
+                mask_linf_norm = 0.0
+                mask_mean = 0.0
+                effective_patch_for_metrics = current_patch_for_metrics
+            effective_patch_linf_norm = float(torch.norm(
+                effective_patch_for_metrics.reshape(-1),
+                p=float('inf'),
+            ).item())
+            step_history = {
+                'step': step_idx + 1,
+                'loss': step_loss,
+                'attack_loss': step_attack_loss,
+                'patch_regularization_loss': step_patch_reg_loss,
+                'mask_regularization_loss': step_mask_reg_loss,
+                'softness_alignment_loss': step_softness_reg_loss,
+                'samples': step_samples,
+                'patch_update_l2': patch_update_l2,
+                'patch_l1_norm': patch_l1_norm,
+                'patch_l2_norm': patch_l2_norm,
+                'patch_linf_norm': patch_linf_norm,
+                'effective_patch_linf_norm': effective_patch_linf_norm,
+                'inferred_epsilon': effective_patch_linf_norm,
+                'mask_l1_norm': mask_l1_norm,
+                'mask_l2_norm': mask_l2_norm,
+                'mask_linf_norm': mask_linf_norm,
+                'mask_mean': mask_mean,
+                'patch_update_method': patch_update_method,
+            }
+
+            if report_training_asr:
+                train_metrics = self.evaluate_attack_success(
+                    test_loader=data_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=current_patch_for_metrics,
+                    trigger_mask=(
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    ),
+                    target_label=target_label,
+                    source_filter=source_filter,
+                    edge_softness=current_softness,
+                    how_to_attach=how_to_attach
+                )
+                step_history['training_asr'] = float(train_metrics['attack_success_rate'])
+            with torch.no_grad():
+                if validation_loader is not None:
+
+                    current_patch = current_patch_for_metrics
+
+                    current_mask = (
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    )
+                    val_metrics = self.evaluate_attack_success(
+                        test_loader=validation_loader,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch,
+                        trigger_mask=current_mask,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        how_to_attach=how_to_attach
+                    )
+                    val_loss_metrics = self.evaluate_trigger_loss(
+                        data_loader=validation_loader,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch,
+                        trigger_mask=current_mask,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        mask_l1_weight=mask_l1_weight,
+                        patch_l2_weight=patch_l2_weight,
+                        softness_alignment_weight=softness_alignment_weight,
+                        how_to_attach=how_to_attach,
+                        use_clean_feature_targets=(patch_update_method == 'fg_uap'),
+                    )
+                    val_asr = float(val_metrics['attack_success_rate'])
+                    val_loss = float(val_loss_metrics['loss'])
+                    step_history['validation_asr'] = val_asr
+                    step_history['validation_loss'] = val_loss
+                    step_history['validation_attack_loss'] = float(val_loss_metrics['attack_loss'])
+                    step_history['validation_patch_regularization_loss'] = float(
+                        val_loss_metrics['patch_regularization_loss']
+                    )
+                    step_history['validation_mask_regularization_loss'] = float(
+                        val_loss_metrics['mask_regularization_loss']
+                    )
+                    step_history['validation_softness_alignment_loss'] = float(
+                        val_loss_metrics['softness_alignment_loss']
+                    )
+                    step_history['validation_samples'] = int(val_loss_metrics['samples_evaluated'])
+                    step_history['edge_softness'] = current_softness
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_val_asr = val_asr
+                        best_patch = current_patch.cpu().clone()
+                        best_mask = current_mask.cpu().clone() if current_mask is not None else None
+                        best_trigger_boxes = [dict(box) for box in trigger_boxes]
+                        best_step = step_idx + 1
+                        best_softness = float(current_softness)
+                        no_improve_steps = 0
+                    else:
+                        no_improve_steps += 1
+
+                    if val_asr > best_size_asr:
+                        best_size_asr = val_asr
+                        size_no_improve_steps = 0
+                    else:
+                        size_no_improve_steps += 1
+
+                    if (
+                        val_asr < grow_asr_threshold
+                        and no_improve_steps >= softness_patience
+                    ):
+                        new_softness = max(min_edge_softness, current_softness * softness_decay)
+                        if new_softness < current_softness:
+                            current_softness = new_softness
+                        no_improve_steps = 0
+
+                    size_optimized_enough = size_step_count >= min_steps_per_patch_size
+                    if val_asr >= asr_hardening_threshold and size_optimized_enough:
+                        current_area = int(width) * int(height)
+                        is_smaller_success = current_area < smallest_success_area
+                        is_better_tie = (
+                            current_area == smallest_success_area
+                            and (
+                                val_asr > smallest_success_asr
+                                or (
+                                    val_asr == smallest_success_asr
+                                    and val_loss < smallest_success_val_loss
+                                )
+                            )
+                        )
+                        if is_smaller_success or is_better_tie:
+                            # Save exactly the tensors that produced `val_asr`.
+                            # Reconstructing from trigger_delta is not equivalent
+                            # for methods that render/filter it (GAP-UAP and
+                            # HP-UAP), and caused the returned trigger to differ
+                            # from the one accepted during validation.
+                            smallest_success_patch = current_patch.detach().cpu().clone()
+                            smallest_success_mask = (
+                                current_mask.detach().cpu().clone()
+                                if current_mask is not None else None
+                            )
+                            smallest_success_boxes = [dict(box) for box in trigger_boxes]
+                            smallest_success_step = step_idx + 1
+                            smallest_success_asr = val_asr
+                            smallest_success_val_loss = val_loss
+                            smallest_success_area = current_area
+                            smallest_success_softness = float(current_softness)
+                        step_history['size_decision'] = 'accepted'
+
+                    if (
+                        bool(enable_compression_phase)
+                        and progressive_resize_enabled
+                        and val_asr >= compression_asr_threshold
+                    ):
+                        compression_phase_active = True
+                    step_history['compression_phase_active'] = bool(compression_phase_active)
+
+                    resize_decision = None
+                    next_width = width
+                    next_height = height
+                    size_limit_decision = None
+                    if progressive_resize_enabled and validation_loader is not None and size_optimized_enough:
+                        if compression_phase_active and val_asr >= shrink_asr_threshold:
+                            resize_decision = 'compress_shrink'
+                            next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                            next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                            if next_width >= width and width > min_width:
+                                next_width = width - 1
+                            if next_height >= height and height > min_height:
+                                next_height = height - 1
+                            size_limit_decision = 'min_size_reached'
+                        elif progressive_resize_direction == 'grow' and val_asr <= grow_asr_threshold:
+                            if size_no_improve_steps >= size_patience:
+                                resize_decision = 'grow'
+                                next_width = min(int(round(width * patch_growth_factor)), max_width)
+                                next_height = min(int(round(height * patch_growth_factor)), max_height)
+                                if next_width <= width and width < max_width:
+                                    next_width = width + 1
+                                if next_height <= height and height < max_height:
+                                    next_height = height + 1
+                                size_limit_decision = 'max_size_reached'
+                        elif progressive_resize_direction == 'shrink':
+                            if val_asr >= shrink_asr_threshold:
+                                resize_decision = 'shrink'
+                                next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                                next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                                if next_width >= width and width > min_width:
+                                    next_width = width - 1
+                                if next_height >= height and height > min_height:
+                                    next_height = height - 1
+                                size_limit_decision = 'min_size_reached'
+                            elif val_asr <= grow_asr_threshold and size_no_improve_steps >= size_patience:
+                                # Hysteresis keeps shrink/recover decisions from flapping when
+                                # validation ASR hovers near the hardening threshold.
+                                resize_decision = 'recover_grow'
+                                next_width = min(int(round(width * patch_recovery_growth_factor)), max_width)
+                                next_height = min(int(round(height * patch_recovery_growth_factor)), max_height)
+                                if next_width <= width and width < max_width:
+                                    next_width = width + 1
+                                if next_height <= height and height < max_height:
+                                    next_height = height + 1
+                                size_limit_decision = 'max_size_reached'
+
+                    if resize_decision is not None:
+                        can_resize = next_width != width or next_height != height
+                        if can_resize:
+                            resize_events.append({
+                                'step': step_idx + 1,
+                                'from_size': (int(width), int(height)),
+                                'to_size': (int(next_width), int(next_height)),
+                                'validation_asr': val_asr,
+                                'decision': resize_decision,
+                                'compression_phase_active': bool(compression_phase_active),
+                            })
+                            resized_patch = torch.nn.functional.interpolate(
+                                current_patch_for_metrics,
+                                size=(next_height, next_width),
+                                mode='bilinear',
+                                align_corners=False,
+                            )
+                            if epsilon > 0:
+                                resized_unscaled_patch = resized_patch / epsilon
+                            else:
+                                resized_unscaled_patch = torch.zeros_like(resized_patch)
+                            trigger_delta = torch.atanh(torch.clamp(resized_unscaled_patch, -0.999999, 0.999999)).detach()
+                            trigger_delta.requires_grad_()
+                            width, height = next_width, next_height
+                            print(
+                                'adversarial_patch_size_change: '
+                                f'step={step_idx + 1}, decision={resize_decision}, '
+                                f'patch_size=({width}, {height})'
+                            )
+                            trigger_boxes = self._resize_trigger_boxes(
+                                validation_anchor_boxes,
+                                width,
+                                height,
+                                full_patch_size,
+                            )
+                            patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
+                            if patch_update_method == 'adam':
+                                patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+                            if optimize_mask:
+                                previous_mask_logits = mask_logits.detach() if mask_logits is not None else None
+                                base_mask = self._build_blend_mask(
+                                    height=height,
+                                    width=width,
+                                    channels=channels,
+                                    device=self.device,
+                                    dtype=trigger_delta.dtype,
+                                    edge_softness=current_softness,
+                                ).expand(len(trigger_boxes), -1, -1, -1)
+                                if previous_mask_logits is not None:
+                                    mask_logits = torch.nn.functional.interpolate(
+                                        previous_mask_logits,
+                                        size=(height, width),
+                                        mode='bilinear',
+                                        align_corners=False,
+                                    ).detach()
+                                    if mask_logits.shape[0] != len(trigger_boxes):
+                                        mask_logits = mask_logits[:1].expand(len(trigger_boxes), -1, -1, -1).clone()
+                                else:
+                                    mask_logits = torch.zeros_like(base_mask, device=self.device)
+                                mask_logits = mask_logits.to(device=self.device, dtype=base_mask.dtype).requires_grad_(True)
+                                mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+                                mask_training_active = True
+                            else:
+                                base_mask = None
+                                mask_logits = None
+                                mask_optimizer = None
+                            no_improve_steps = 0
+                            size_step_count = 0
+                            size_no_improve_steps = 0
+                            best_size_asr = float('-inf')
+                            current_mask_for_metrics = (
+                                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                                if mask_logits is not None else None
+                            )
+                            step_history['resize_decision'] = resize_decision
+                            step_history['resize_to_size'] = (int(width), int(height))
+                        else:
+                            step_history['size_decision'] = size_limit_decision
+
+
+                history.append(step_history)
+
+                if (
+                    checkpoint_interval > 0
+                    and checkpoint_path is not None
+                    and (step_idx + 1) % checkpoint_interval == 0
+                ):
+                    # Persist a usable trigger before preview rendering and the
+                    # progress print.  Batch schedulers and OOM killers can end
+                    # a run without raising a Python exception, so relying only
+                    # on the save performed after this method returns loses all
+                    # completed optimization steps.
+                    self.save_trigger(
+                        trigger={
+                            'patch': current_patch_for_metrics.cpu(),
+                            'mask': (
+                                current_mask_for_metrics.cpu()
+                                if current_mask_for_metrics is not None else None
+                            ),
+                            'history': history,
+                            'trigger_box': trigger_boxes[0],
+                            'trigger_boxes': trigger_boxes,
+                            'target_label': float(target_label),
+                            'source_filter': source_filter,
+                            'patch_update_method': patch_update_method,
+                            'how_to_attach': how_to_attach,
+                            'epsilon': patch_linf_norm,
+                            'effective_epsilon': effective_patch_linf_norm,
+                            'patch_norms': {
+                                'l1': patch_l1_norm,
+                                'l2': patch_l2_norm,
+                                'linf': patch_linf_norm,
+                                'effective_linf': effective_patch_linf_norm,
+                            },
+                            'softness': {
+                                'selected_edge_softness': float(current_softness),
+                            },
+                            'selection': 'latest_checkpoint',
+                            'selected_step': step_idx + 1,
+                            'selected_validation_asr': step_history.get('validation_asr'),
+                            'best_validation_loss': (
+                                None if validation_loader is None else best_val_loss
+                            ),
+                            'best_validation_asr': (
+                                None if validation_loader is None else best_val_asr
+                            ),
+                            'trigger_previews': preview_records,
+                            'ensemble': self._ensemble_metadata(),
+                        },
+                        output_path=checkpoint_path,
+                    )
+                    print(
+                        '[Trigger Learning] checkpoint saved: '
+                        f'step={step_idx + 1}, path={checkpoint_path}'
+                    )
+
+                if (
+                    preview_interval > 0
+                    and preview_output_dir is not None
+                    and (step_idx + 1) % preview_interval == 0
+                ):
+                    step_preview_records = self._save_trigger_preview(
+                        data_loader=preview_data_loader,
+                        output_dir=preview_output_dir,
+                        step=step_idx + 1,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch_for_metrics,
+                        trigger_mask=current_mask_for_metrics,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        max_images=preview_max_images,
+                        how_to_attach=how_to_attach
+                    )
+                    if step_preview_records:
+                        preview_records.extend(step_preview_records)
+                        step_history['trigger_previews'] = step_preview_records
+
+                if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
+                    val_log = ''
+                    train_log = ''
+                    if report_training_asr:
+                        train_log = f', train_asr={step_history.get("training_asr", 0.0):.4f}'
+                    if validation_loader is not None:
+                        val_log = (
+                            f', val_loss={step_history.get("validation_loss", 0.0):.6f}'
+                            f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
+                        )
+                    print(
+                        f'[Trigger Learning] step={step_idx + 1}/{steps}, '
+                        f'loss={step_loss:.6f}, attack_loss={step_attack_loss:.6f}, '
+                        f'patch_reg={step_patch_reg_loss:.6f}, mask_reg={step_mask_reg_loss:.6f}, '
+                        f'softness_reg={step_softness_reg_loss:.6f}, samples={step_samples}, '
+                        f'patch_update_l2={patch_update_l2:.6f}, '
+                        f'patch_l1_norm={patch_l1_norm:.6f}, patch_l2_norm={patch_l2_norm:.6f}, '
+                        f'patch_linf_norm={patch_linf_norm:.6f}, mask_l1_norm={mask_l1_norm:.6f}, '
+                        f'mask_l2_norm={mask_l2_norm:.6f}, mask_linf_norm={mask_linf_norm:.6f}, '
+                        f'mask_mean={mask_mean:.6f}'
+                        f'{train_log}{val_log}'
+                    )
+                    if step_samples == 0:
+                        print(
+                            '[Trigger Learning] warning: no samples matched source_filter '
+                            f'"{source_filter}" at this step.'
+                        )
+
+        selection = 'last_step'
+        if smallest_success_patch is not None:
+            learned_patch = smallest_success_patch
+            learned_mask = smallest_success_mask
+            trigger_boxes = smallest_success_boxes
+            selected_step = smallest_success_step
+            selection = 'smallest_successful_patch'
+            selected_validation_asr = smallest_success_asr
+            selected_edge_softness = smallest_success_softness
+        elif best_patch is not None:
+            learned_patch = best_patch
+            learned_mask = best_mask
+            trigger_boxes = best_trigger_boxes
+            selected_step = best_step
+            selection = 'best_validation_loss'
+            selected_validation_asr = best_val_asr
+            selected_edge_softness = best_softness
+        else:
+            learned_patch = current_patch_for_metrics.cpu()
+            learned_mask = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
+                if mask_logits is not None else None
+            )
+            selected_step = steps
+            selection = 'last_step'
+            selected_validation_asr = None
+            selected_edge_softness = float(current_softness)
+
+        learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
+        learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
+        learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        learned_effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        learned_effective_epsilon = float(torch.norm(
+            learned_effective_patch.reshape(-1),
+            p=float('inf'),
+        ).item())
+
+        self._remove_feature_extractor()
+
+        return {
+            'patch': learned_patch,
+            'mask': learned_mask,
+            'history': history,
+            'trigger_box': trigger_boxes[0],
+            'trigger_boxes': trigger_boxes,
+            'target_label': float(target_label),
+            'source_filter': source_filter,
+            'patch_update_method': patch_update_method,
+            'how_to_attach': how_to_attach,
+            'epsilon': learned_patch_linf_norm,
+            'effective_epsilon': learned_effective_epsilon,
+            'patch_norms': {
+                'l1': learned_patch_l1_norm,
+                'l2': learned_patch_l2_norm,
+                'linf': learned_patch_linf_norm,
+                'effective_linf': learned_effective_epsilon,
+            },
+            'softness': {
+                'initial_edge_softness': float(initial_edge_softness),
+                'final_edge_softness': float(current_softness),
+                'min_edge_softness': float(min_edge_softness),
+                'softness_decay': float(softness_decay),
+                'softness_patience': int(softness_patience),
+                'asr_hardening_threshold': float(asr_hardening_threshold),
+                'selected_edge_softness': selected_edge_softness,
+            },
+            'progressive_resize': {
+                'enabled': bool(progressive_resize_enabled),
+                'direction': progressive_resize_direction,
+                'randomize_training_location': bool(randomize_training_location),
+                'initial_patch_size': (int(initial_width), int(initial_height)),
+                'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
+                'min_patch_size': (int(min_width), int(min_height)),
+                'max_patch_size': (int(max_width), int(max_height)),
+                'patch_growth_factor': float(patch_growth_factor),
+                'patch_shrink_factor': float(patch_shrink_factor),
+                'patch_recovery_growth_factor': float(patch_recovery_growth_factor),
+                'min_steps_per_patch_size': int(min_steps_per_patch_size),
+                'size_patience': int(size_patience),
+                'asr_threshold': float(asr_hardening_threshold),
+                'shrink_asr_threshold': float(shrink_asr_threshold),
+                'grow_asr_threshold': float(grow_asr_threshold),
+                'resize_hysteresis': float(resize_hysteresis),
+                'compression_asr_threshold': float(compression_asr_threshold),
+                'compression_phase_active': bool(compression_phase_active),
+                'events': resize_events,
+            },
+            'trigger_previews': preview_records,
+            'ensemble': self._ensemble_metadata(),
+            'selection': selection,
+            'selected_step': int(selected_step),
+            'selected_validation_asr': (
+                None if selected_validation_asr is None else float(selected_validation_asr)
+            ),
+            'best_validation_loss': None if validation_loader is None else float(best_val_loss),
+            'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+            'smallest_success_validation_loss': (
+                None if smallest_success_patch is None else float(smallest_success_val_loss)
+            ),
+            'smallest_success_validation_asr': (
+                None if smallest_success_patch is None else float(smallest_success_asr)
+            ),
+            'smallest_success_patch_area': (
+                None if smallest_success_patch is None else int(smallest_success_area)
+            ),
+        }
+
     def learn_universal_trigger(self,
                                 data_loader,
                                 trigger_box,
@@ -2192,6 +3209,925 @@ class AdversarialAttack:
             "smallest_success_patch_area": None,
         }
 
+    def _learn_image_specific_trigger(self, data_loader,
+                                val_loader,
+                                target_label, 
+                                source_filter, 
+                                steps,
+                                learning_rate,
+                                patch_l2_weight,
+                                trigger_preview_dir,
+                                trigger_preview_loader,
+                                trigger_preview_max_images,
+                                how_to_attach,
+                                patch_update_method,
+                                epsilon,
+                                bandwidth,
+                                checkpoint_interval,
+                                checkpoint_path):
+        
+        for _, model in self._model_items():
+            model.eval()
+        channels = 3
+        trigger_delta = torch.randn((1, channels, height, width), device=self.device)
+        trigger_delta.requires_grad_()
+
+        patch_update_method = str(patch_update_method).lower()
+        if patch_update_method in ('mi_fgsm', 'mifgsm', 'momentum'):
+            patch_update_method = 'momentum_sign'
+        elif patch_update_method in ('iterative_fgsm', 'ifgsm', 'sign'):
+            patch_update_method = 'pgd_sign'
+        elif patch_update_method == 'pgd':
+            patch_update_method = 'pgd_sign'
+        elif patch_update_method in ('uap', 'deepfool', 'deepfool_uap'):
+            patch_update_method = 'deepfool_uap'
+        elif patch_update_method in ('gd_uap', 'gd'):
+            patch_update_method = 'gd_uap'
+        elif patch_update_method in ('gap_uap', 'gap'):
+            patch_update_method = 'gap_uap'
+        elif patch_update_method in ('hp_uap', 'hp'):
+            patch_update_method = 'hp_uap'
+        elif patch_update_method in ('fg_uap', 'fg'):
+            patch_update_method = 'fg_uap'
+        elif patch_update_method in ('robust', 'robust_uap'):
+            patch_update_method = 'robust_uap'
+        elif patch_update_method in ('psp', 'psp_uap'):
+            patch_update_method = 'psp_uap'
+
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'}
+        if patch_update_method not in valid_patch_update_methods:
+            raise ValueError(
+                'patch_update_method must be one of: '
+                f'{sorted(valid_patch_update_methods)}.'
+            )
+        if self.models and patch_update_method in {'deepfool_uap', 'gd_uap', 'fg_uap'}:
+            raise ValueError(
+                f"Multi-model optimization is not supported for '{patch_update_method}' because it "
+                "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
+                "gap_uap, hp_uap, robust_uap, or psp_uap."
+            )
+
+        epsilon = float(epsilon)
+        if epsilon < 0 or epsilon > 1:
+            raise ValueError('epsilon must be between 0 and 1 for normalized input-space perturbations.')
+
+        if patch_update_method == 'deepfool_uap':
+            if optimize_mask:
+                raise ValueError(
+                    'DeepFool UAP follows the original additive-perturbation algorithm and does not '
+                    'optimize masks. Set optimize_mask=False.'
+                )
+            if randomize_training_location:
+                raise ValueError(
+                    'DeepFool UAP requires a fixed universal perturbation location. Set '
+                    'randomize_training_location=False.'
+                )
+            if progressive_resize_enabled:
+                raise ValueError(
+                    'DeepFool UAP does not use the training-loop progressive resize heuristic. Set '
+                    'progressive_resize=False.'
+                )
+            return self._learn_deepfool_uap_trigger(
+                data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                overshoot=0.02,
+                max_deepfool_iter=50,
+            )
+
+        patch_optimizer = None
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap'):
+            patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+            if patch_update_method == 'hp_uap':
+                hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
+        
+        if patch_update_method == 'gap_uap':
+            generator = ParameterRender().to(self.device)
+            # Keep a direct, trainable path from the latent perturbation to the
+            # rendered perturbation.  Optimizing only the deep renderer made the
+            # targeted BCE gradient pass through every U-Net block before it
+            # could change the patch and commonly left GAP-UAP near its random
+            # initialization.  The residual parameterization is still rendered
+            # by GAP, while guaranteeing a well-conditioned identity path.
+            patch_optimizer = torch.optim.Adam(
+                [trigger_delta, *generator.parameters()],
+                lr=learning_rate,
+            )
+
+            def render_gap_patch():
+                return epsilon * torch.tanh(trigger_delta + generator(trigger_delta))
+
+        if patch_update_method == 'robust_uap':
+            return self._learn_robust_uap_trigger(
+                data_loader=data_loader,
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer
+            )
+
+        if patch_update_method == 'psp_uap':
+            return self._learn_psp_uap_trigger(
+                validation_loader=validation_loader,
+                trigger_boxes=trigger_boxes,
+                trigger_delta=trigger_delta,
+                target_label=target_label,
+                source_filter=source_filter,
+                steps=steps,
+                epsilon=epsilon,
+                log_interval=log_interval,
+                trigger_preview_interval=trigger_preview_interval,
+                trigger_preview_dir=trigger_preview_dir,
+                trigger_preview_loader=trigger_preview_loader,
+                trigger_preview_max_images=trigger_preview_max_images,
+                edge_softness=current_softness,
+                how_to_attach=how_to_attach,
+                patch_optimizer=patch_optimizer,
+                num_copies=psp_num_copies,
+            )
+
+        patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
+        alpha = float(learning_rate)
+        mu = float(momentum_decay)
+        grad_norm_epsilon = float(gradient_norm_epsilon)
+
+        learned_mask = None
+        mask_logits = None
+        mask_optimizer = None
+        base_mask = None
+        mask_training_active = bool(optimize_mask)
+        if optimize_mask:
+            base_mask = self._build_blend_mask(
+                height=height,
+                width=width,
+                channels=channels,
+                device=self.device,
+                dtype=trigger_delta.dtype,
+                edge_softness=current_softness,
+            ).expand(len(trigger_boxes), -1, -1, -1)
+            mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
+            mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+
+        preview_records = []
+        preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
+        preview_max_images = (
+            max(0, int(trigger_preview_max_images))
+            if trigger_preview_max_images is not None else 0
+        )
+        preview_output_dir = Path(trigger_preview_dir) if trigger_preview_dir is not None else None
+        if preview_interval > 0 and preview_output_dir is not None:
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+        preview_data_loader = trigger_preview_loader or validation_loader or data_loader
+        checkpoint_interval = (
+            max(0, int(checkpoint_interval))
+            if checkpoint_interval is not None else 0
+        )
+        checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+
+        history = []
+        best_patch = None
+        best_mask = None
+        best_trigger_boxes = [dict(box) for box in trigger_boxes]
+        best_step = 0
+        best_val_loss = float('inf')
+        best_val_asr = float('-inf')
+        best_softness = None
+        smallest_success_patch = None
+        smallest_success_mask = None
+        smallest_success_boxes = None
+        smallest_success_step = 0
+        smallest_success_asr = float('-inf')
+        smallest_success_val_loss = float('inf')
+        smallest_success_area = float('inf')
+        smallest_success_softness = None
+        resize_events = []
+        no_improve_steps = 0
+        size_step_count = 0
+        size_no_improve_steps = 0
+        best_size_asr = float('-inf')
+
+        if patch_update_method in ('adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gap_uap', 'hp_uap'):
+            self._build_cost_function('classification')
+        elif patch_update_method == 'gd_uap':
+            self._build_cost_function('gd_uap')
+        elif patch_update_method == 'fg_uap':
+            self._build_cost_function('fg_uap')
+
+        for step_idx in range(steps):
+            size_step_count += 1
+            step_losses = []
+            step_attack_losses = []
+            step_patch_reg_losses = []
+            step_mask_reg_losses = []
+            step_softness_reg_losses = []
+            step_samples = 0
+            if patch_update_method == 'gap_uap':
+                generator.eval()
+                with torch.no_grad():
+                    previous_patch = render_gap_patch().detach().clone()
+            else:
+                previous_patch = (epsilon * torch.tanh(trigger_delta)).detach().clone()
+
+            for inputs, targets in data_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.float().to(self.device)
+                flat_targets = targets.view(-1)
+
+                if source_filter == 'bad':
+                    source_mask = (flat_targets == 0)
+                elif source_filter == 'good':
+                    source_mask = (flat_targets == 1)
+                else:
+                    source_mask = torch.ones(targets.shape[0], dtype=torch.bool, device=self.device)
+
+                if source_mask.sum().item() == 0:
+                    continue
+
+                selected_inputs = inputs[source_mask].clone()
+                blend_mask = (
+                    self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    if mask_logits is not None else None
+                )
+                if patch_update_method == 'gap_uap':
+                    generator.train()
+                    bounded_trigger_patch = render_gap_patch()
+                elif patch_update_method == 'hp_uap':
+                    bounded_trigger_patch = epsilon * torch.tanh(hp_filtering(trigger_delta))
+                else:
+                    bounded_trigger_patch = epsilon * torch.tanh(trigger_delta)
+
+                training_trigger_boxes = (
+                    self._random_trigger_boxes(
+                        batch_size=selected_inputs.shape[0],
+                        patch_width=width,
+                        patch_height=height,
+                        image_width=selected_inputs.shape[-1],
+                        image_height=selected_inputs.shape[-2],
+                    )
+                    if randomize_training_location else trigger_boxes
+                )
+                training_patch = bounded_trigger_patch
+                training_mask = blend_mask
+                if randomize_training_location:
+                    training_patch = bounded_trigger_patch.mean(dim=0, keepdim=True)
+                    training_mask = blend_mask.mean(dim=0, keepdim=True) if blend_mask is not None else None
+                
+                poisoned_inputs = self._inject_trigger(
+                    selected_inputs,
+                    training_trigger_boxes,
+                    trigger_patch=training_patch,
+                    trigger_mask=training_mask,
+                    edge_softness=current_softness,
+                    how_to_attach=how_to_attach
+                )
+
+                target_tensor = None
+                if patch_update_method == 'gd_uap':
+                    self.feature_extractor.clear()
+                elif patch_update_method == 'fg_uap':
+                    self.feature_extractor.clear()
+                    with torch.no_grad():
+                        self.model(selected_inputs)
+                    target_tensor = self.cost_function.detach_targets(self.feature_extractor.activations)
+
+                feature_extractor = getattr(self, 'feature_extractor', None)
+                if feature_extractor is not None:
+                    feature_extractor.clear()
+
+                if self.models and patch_update_method not in ('gd_uap', 'fg_uap'):
+                    attack_loss, model_outputs = self._classification_loss(poisoned_inputs, target_label)
+                    target_tensor = torch.full_like(model_outputs, float(target_label))
+                else:
+                    model_outputs = self.model(poisoned_inputs)
+                    if patch_update_method not in ('gd_uap', 'fg_uap'):
+                        target_tensor = torch.full_like(model_outputs, float(target_label))
+                objective_outputs = (
+                    feature_extractor.activations
+                    if patch_update_method in ('gd_uap', 'fg_uap') else model_outputs
+                )
+
+                if not (self.models and patch_update_method not in ('gd_uap', 'fg_uap')):
+                    attack_loss = self.cost_function(outputs=objective_outputs, targets=target_tensor).to(self.device)
+
+                patch_reg = patch_l2_weight * torch.mean(bounded_trigger_patch ** 2)
+
+                if mask_logits is not None:
+                    base_mask = self._build_blend_mask(
+                        height=height,
+                        width=width,
+                        channels=channels,
+                        device=self.device,
+                        dtype=trigger_delta.dtype,
+                        edge_softness=current_softness,
+                    ).expand(len(trigger_boxes), -1, -1, -1)
+                    mask_values = self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
+                    mask_growth = torch.relu(mask_values - base_mask)
+                    mask_reg = mask_l1_weight * torch.mean(mask_growth)
+                    softness_reg = softness_alignment_weight * torch.mean((mask_values - base_mask) ** 2)
+                else:
+                    mask_reg = torch.tensor(0.0, device=self.device)
+                    softness_reg = torch.tensor(0.0, device=self.device)
+                loss = attack_loss + patch_reg + mask_reg + softness_reg
+
+                if patch_optimizer is not None:
+                    patch_optimizer.zero_grad()
+                elif trigger_delta.grad is not None:
+                    trigger_delta.grad.zero_()
+                if mask_optimizer is not None:
+                    mask_optimizer.zero_grad()
+                loss.backward()
+
+                if patch_update_method in ('adam', 'gap_uap', 'hp_uap', 'gd_uap', 'fg_uap'):
+                    patch_optimizer.step()
+                else:
+                    with torch.no_grad():
+                        patch_grad = trigger_delta.grad
+                        if patch_grad is not None:
+                            if patch_update_method == 'pgd_sign':
+                                trigger_delta.add_(-alpha * patch_grad.sign())
+                            elif patch_update_method == 'momentum_sign':
+                                grad_l1_norm = patch_grad.norm(p=1)
+                                if torch.isfinite(grad_l1_norm) and grad_l1_norm.item() > grad_norm_epsilon:
+                                    # Targeted trigger learning minimizes the BCE objective. Use the
+                                    # negative loss gradient as the ascent objective so the patch update
+                                    # follows: g = mu * g + grad / grad.norm(p=1),
+                                    # delta += alpha * sign(g), patch = tanh(delta).
+                                    normalized_grad = -patch_grad / torch.clamp(
+                                        grad_l1_norm,
+                                        min=grad_norm_epsilon,
+                                    )
+                                    patch_momentum.mul_(mu).add_(normalized_grad)
+                                    trigger_delta.add_(alpha * patch_momentum.sign())
+                if trigger_delta.grad is not None:
+                    trigger_delta.grad.zero_()
+
+                if mask_optimizer is not None and mask_training_active:
+                    mask_optimizer.step()
+
+                batch_samples = int(model_outputs.shape[0])
+                step_losses.append(float(loss.item()) * batch_samples)
+                step_attack_losses.append(float(attack_loss.item()) * batch_samples)
+                step_patch_reg_losses.append(float(patch_reg.item()) * batch_samples)
+                step_mask_reg_losses.append(float(mask_reg.item()) * batch_samples)
+                step_softness_reg_losses.append(float(softness_reg.item()) * batch_samples)
+                step_samples += batch_samples
+
+            step_loss = (sum(step_losses) / step_samples) if step_samples else 0.0
+            step_attack_loss = (sum(step_attack_losses) / step_samples) if step_samples else 0.0
+            step_patch_reg_loss = (sum(step_patch_reg_losses) / step_samples) if step_samples else 0.0
+            step_mask_reg_loss = (sum(step_mask_reg_losses) / step_samples) if step_samples else 0.0
+            step_softness_reg_loss = (sum(step_softness_reg_losses) / step_samples) if step_samples else 0.0
+            if patch_update_method == 'gap_uap':
+                # Materialize GAP in evaluation mode so BatchNorm uses the same
+                # running statistics for validation, selection, and export.
+                generator.eval()
+                with torch.no_grad():
+                    current_patch_for_metrics = render_gap_patch().detach()
+            elif patch_update_method == 'hp_uap':
+                current_patch_for_metrics = (epsilon * torch.tanh(hp_filtering(trigger_delta))).detach()
+            else:
+                current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
+
+            current_mask_for_metrics = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                if mask_logits is not None else None
+            )
+            patch_update_l2 = float(torch.norm(
+                (current_patch_for_metrics - previous_patch).reshape(-1),
+                p=2,
+            ).item())
+            patch_l1_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=1).item())
+            patch_l2_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=2).item())
+            patch_linf_norm = float(torch.norm(current_patch_for_metrics.reshape(-1), p=float('inf')).item())
+            if current_mask_for_metrics is not None:
+                mask_l1_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=1).item())
+                mask_l2_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=2).item())
+                mask_linf_norm = float(torch.norm(current_mask_for_metrics.reshape(-1), p=float('inf')).item())
+                mask_mean = float(current_mask_for_metrics.mean().item())
+                effective_patch_for_metrics = current_patch_for_metrics * current_mask_for_metrics
+            else:
+                mask_l1_norm = 0.0
+                mask_l2_norm = 0.0
+                mask_linf_norm = 0.0
+                mask_mean = 0.0
+                effective_patch_for_metrics = current_patch_for_metrics
+            effective_patch_linf_norm = float(torch.norm(
+                effective_patch_for_metrics.reshape(-1),
+                p=float('inf'),
+            ).item())
+            step_history = {
+                'step': step_idx + 1,
+                'loss': step_loss,
+                'attack_loss': step_attack_loss,
+                'patch_regularization_loss': step_patch_reg_loss,
+                'mask_regularization_loss': step_mask_reg_loss,
+                'softness_alignment_loss': step_softness_reg_loss,
+                'samples': step_samples,
+                'patch_update_l2': patch_update_l2,
+                'patch_l1_norm': patch_l1_norm,
+                'patch_l2_norm': patch_l2_norm,
+                'patch_linf_norm': patch_linf_norm,
+                'effective_patch_linf_norm': effective_patch_linf_norm,
+                'inferred_epsilon': effective_patch_linf_norm,
+                'mask_l1_norm': mask_l1_norm,
+                'mask_l2_norm': mask_l2_norm,
+                'mask_linf_norm': mask_linf_norm,
+                'mask_mean': mask_mean,
+                'patch_update_method': patch_update_method,
+            }
+
+            if report_training_asr:
+                train_metrics = self.evaluate_attack_success(
+                    test_loader=data_loader,
+                    trigger_box=trigger_boxes,
+                    trigger_patch=current_patch_for_metrics,
+                    trigger_mask=(
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    ),
+                    target_label=target_label,
+                    source_filter=source_filter,
+                    edge_softness=current_softness,
+                    how_to_attach=how_to_attach
+                )
+                step_history['training_asr'] = float(train_metrics['attack_success_rate'])
+            with torch.no_grad():
+                if validation_loader is not None:
+
+                    current_patch = current_patch_for_metrics
+
+                    current_mask = (
+                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
+                        if mask_logits is not None else None
+                    )
+                    val_metrics = self.evaluate_attack_success(
+                        test_loader=validation_loader,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch,
+                        trigger_mask=current_mask,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        how_to_attach=how_to_attach
+                    )
+                    val_loss_metrics = self.evaluate_trigger_loss(
+                        data_loader=validation_loader,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch,
+                        trigger_mask=current_mask,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        mask_l1_weight=mask_l1_weight,
+                        patch_l2_weight=patch_l2_weight,
+                        softness_alignment_weight=softness_alignment_weight,
+                        how_to_attach=how_to_attach,
+                        use_clean_feature_targets=(patch_update_method == 'fg_uap'),
+                    )
+                    val_asr = float(val_metrics['attack_success_rate'])
+                    val_loss = float(val_loss_metrics['loss'])
+                    step_history['validation_asr'] = val_asr
+                    step_history['validation_loss'] = val_loss
+                    step_history['validation_attack_loss'] = float(val_loss_metrics['attack_loss'])
+                    step_history['validation_patch_regularization_loss'] = float(
+                        val_loss_metrics['patch_regularization_loss']
+                    )
+                    step_history['validation_mask_regularization_loss'] = float(
+                        val_loss_metrics['mask_regularization_loss']
+                    )
+                    step_history['validation_softness_alignment_loss'] = float(
+                        val_loss_metrics['softness_alignment_loss']
+                    )
+                    step_history['validation_samples'] = int(val_loss_metrics['samples_evaluated'])
+                    step_history['edge_softness'] = current_softness
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_val_asr = val_asr
+                        best_patch = current_patch.cpu().clone()
+                        best_mask = current_mask.cpu().clone() if current_mask is not None else None
+                        best_trigger_boxes = [dict(box) for box in trigger_boxes]
+                        best_step = step_idx + 1
+                        best_softness = float(current_softness)
+                        no_improve_steps = 0
+                    else:
+                        no_improve_steps += 1
+
+                    if val_asr > best_size_asr:
+                        best_size_asr = val_asr
+                        size_no_improve_steps = 0
+                    else:
+                        size_no_improve_steps += 1
+
+                    if (
+                        val_asr < grow_asr_threshold
+                        and no_improve_steps >= softness_patience
+                    ):
+                        new_softness = max(min_edge_softness, current_softness * softness_decay)
+                        if new_softness < current_softness:
+                            current_softness = new_softness
+                        no_improve_steps = 0
+
+                    size_optimized_enough = size_step_count >= min_steps_per_patch_size
+                    if val_asr >= asr_hardening_threshold and size_optimized_enough:
+                        current_area = int(width) * int(height)
+                        is_smaller_success = current_area < smallest_success_area
+                        is_better_tie = (
+                            current_area == smallest_success_area
+                            and (
+                                val_asr > smallest_success_asr
+                                or (
+                                    val_asr == smallest_success_asr
+                                    and val_loss < smallest_success_val_loss
+                                )
+                            )
+                        )
+                        if is_smaller_success or is_better_tie:
+                            # Save exactly the tensors that produced `val_asr`.
+                            # Reconstructing from trigger_delta is not equivalent
+                            # for methods that render/filter it (GAP-UAP and
+                            # HP-UAP), and caused the returned trigger to differ
+                            # from the one accepted during validation.
+                            smallest_success_patch = current_patch.detach().cpu().clone()
+                            smallest_success_mask = (
+                                current_mask.detach().cpu().clone()
+                                if current_mask is not None else None
+                            )
+                            smallest_success_boxes = [dict(box) for box in trigger_boxes]
+                            smallest_success_step = step_idx + 1
+                            smallest_success_asr = val_asr
+                            smallest_success_val_loss = val_loss
+                            smallest_success_area = current_area
+                            smallest_success_softness = float(current_softness)
+                        step_history['size_decision'] = 'accepted'
+
+                    if (
+                        bool(enable_compression_phase)
+                        and progressive_resize_enabled
+                        and val_asr >= compression_asr_threshold
+                    ):
+                        compression_phase_active = True
+                    step_history['compression_phase_active'] = bool(compression_phase_active)
+
+                    resize_decision = None
+                    next_width = width
+                    next_height = height
+                    size_limit_decision = None
+                    if progressive_resize_enabled and validation_loader is not None and size_optimized_enough:
+                        if compression_phase_active and val_asr >= shrink_asr_threshold:
+                            resize_decision = 'compress_shrink'
+                            next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                            next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                            if next_width >= width and width > min_width:
+                                next_width = width - 1
+                            if next_height >= height and height > min_height:
+                                next_height = height - 1
+                            size_limit_decision = 'min_size_reached'
+                        elif progressive_resize_direction == 'grow' and val_asr <= grow_asr_threshold:
+                            if size_no_improve_steps >= size_patience:
+                                resize_decision = 'grow'
+                                next_width = min(int(round(width * patch_growth_factor)), max_width)
+                                next_height = min(int(round(height * patch_growth_factor)), max_height)
+                                if next_width <= width and width < max_width:
+                                    next_width = width + 1
+                                if next_height <= height and height < max_height:
+                                    next_height = height + 1
+                                size_limit_decision = 'max_size_reached'
+                        elif progressive_resize_direction == 'shrink':
+                            if val_asr >= shrink_asr_threshold:
+                                resize_decision = 'shrink'
+                                next_width = max(int(round(width / patch_shrink_factor)), min_width)
+                                next_height = max(int(round(height / patch_shrink_factor)), min_height)
+                                if next_width >= width and width > min_width:
+                                    next_width = width - 1
+                                if next_height >= height and height > min_height:
+                                    next_height = height - 1
+                                size_limit_decision = 'min_size_reached'
+                            elif val_asr <= grow_asr_threshold and size_no_improve_steps >= size_patience:
+                                # Hysteresis keeps shrink/recover decisions from flapping when
+                                # validation ASR hovers near the hardening threshold.
+                                resize_decision = 'recover_grow'
+                                next_width = min(int(round(width * patch_recovery_growth_factor)), max_width)
+                                next_height = min(int(round(height * patch_recovery_growth_factor)), max_height)
+                                if next_width <= width and width < max_width:
+                                    next_width = width + 1
+                                if next_height <= height and height < max_height:
+                                    next_height = height + 1
+                                size_limit_decision = 'max_size_reached'
+
+                    if resize_decision is not None:
+                        can_resize = next_width != width or next_height != height
+                        if can_resize:
+                            resize_events.append({
+                                'step': step_idx + 1,
+                                'from_size': (int(width), int(height)),
+                                'to_size': (int(next_width), int(next_height)),
+                                'validation_asr': val_asr,
+                                'decision': resize_decision,
+                                'compression_phase_active': bool(compression_phase_active),
+                            })
+                            resized_patch = torch.nn.functional.interpolate(
+                                current_patch_for_metrics,
+                                size=(next_height, next_width),
+                                mode='bilinear',
+                                align_corners=False,
+                            )
+                            if epsilon > 0:
+                                resized_unscaled_patch = resized_patch / epsilon
+                            else:
+                                resized_unscaled_patch = torch.zeros_like(resized_patch)
+                            trigger_delta = torch.atanh(torch.clamp(resized_unscaled_patch, -0.999999, 0.999999)).detach()
+                            trigger_delta.requires_grad_()
+                            width, height = next_width, next_height
+                            print(
+                                'adversarial_patch_size_change: '
+                                f'step={step_idx + 1}, decision={resize_decision}, '
+                                f'patch_size=({width}, {height})'
+                            )
+                            trigger_boxes = self._resize_trigger_boxes(
+                                validation_anchor_boxes,
+                                width,
+                                height,
+                                full_patch_size,
+                            )
+                            patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
+                            if patch_update_method == 'adam':
+                                patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
+                            if optimize_mask:
+                                previous_mask_logits = mask_logits.detach() if mask_logits is not None else None
+                                base_mask = self._build_blend_mask(
+                                    height=height,
+                                    width=width,
+                                    channels=channels,
+                                    device=self.device,
+                                    dtype=trigger_delta.dtype,
+                                    edge_softness=current_softness,
+                                ).expand(len(trigger_boxes), -1, -1, -1)
+                                if previous_mask_logits is not None:
+                                    mask_logits = torch.nn.functional.interpolate(
+                                        previous_mask_logits,
+                                        size=(height, width),
+                                        mode='bilinear',
+                                        align_corners=False,
+                                    ).detach()
+                                    if mask_logits.shape[0] != len(trigger_boxes):
+                                        mask_logits = mask_logits[:1].expand(len(trigger_boxes), -1, -1, -1).clone()
+                                else:
+                                    mask_logits = torch.zeros_like(base_mask, device=self.device)
+                                mask_logits = mask_logits.to(device=self.device, dtype=base_mask.dtype).requires_grad_(True)
+                                mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+                                mask_training_active = True
+                            else:
+                                base_mask = None
+                                mask_logits = None
+                                mask_optimizer = None
+                            no_improve_steps = 0
+                            size_step_count = 0
+                            size_no_improve_steps = 0
+                            best_size_asr = float('-inf')
+                            current_mask_for_metrics = (
+                                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
+                                if mask_logits is not None else None
+                            )
+                            step_history['resize_decision'] = resize_decision
+                            step_history['resize_to_size'] = (int(width), int(height))
+                        else:
+                            step_history['size_decision'] = size_limit_decision
+
+
+                history.append(step_history)
+
+                if (
+                    checkpoint_interval > 0
+                    and checkpoint_path is not None
+                    and (step_idx + 1) % checkpoint_interval == 0
+                ):
+                    # Persist a usable trigger before preview rendering and the
+                    # progress print.  Batch schedulers and OOM killers can end
+                    # a run without raising a Python exception, so relying only
+                    # on the save performed after this method returns loses all
+                    # completed optimization steps.
+                    self.save_trigger(
+                        trigger={
+                            'patch': current_patch_for_metrics.cpu(),
+                            'mask': (
+                                current_mask_for_metrics.cpu()
+                                if current_mask_for_metrics is not None else None
+                            ),
+                            'history': history,
+                            'trigger_box': trigger_boxes[0],
+                            'trigger_boxes': trigger_boxes,
+                            'target_label': float(target_label),
+                            'source_filter': source_filter,
+                            'patch_update_method': patch_update_method,
+                            'how_to_attach': how_to_attach,
+                            'epsilon': patch_linf_norm,
+                            'effective_epsilon': effective_patch_linf_norm,
+                            'patch_norms': {
+                                'l1': patch_l1_norm,
+                                'l2': patch_l2_norm,
+                                'linf': patch_linf_norm,
+                                'effective_linf': effective_patch_linf_norm,
+                            },
+                            'softness': {
+                                'selected_edge_softness': float(current_softness),
+                            },
+                            'selection': 'latest_checkpoint',
+                            'selected_step': step_idx + 1,
+                            'selected_validation_asr': step_history.get('validation_asr'),
+                            'best_validation_loss': (
+                                None if validation_loader is None else best_val_loss
+                            ),
+                            'best_validation_asr': (
+                                None if validation_loader is None else best_val_asr
+                            ),
+                            'trigger_previews': preview_records,
+                            'ensemble': self._ensemble_metadata(),
+                        },
+                        output_path=checkpoint_path,
+                    )
+                    print(
+                        '[Trigger Learning] checkpoint saved: '
+                        f'step={step_idx + 1}, path={checkpoint_path}'
+                    )
+
+                if (
+                    preview_interval > 0
+                    and preview_output_dir is not None
+                    and (step_idx + 1) % preview_interval == 0
+                ):
+                    step_preview_records = self._save_trigger_preview(
+                        data_loader=preview_data_loader,
+                        output_dir=preview_output_dir,
+                        step=step_idx + 1,
+                        trigger_box=trigger_boxes,
+                        trigger_patch=current_patch_for_metrics,
+                        trigger_mask=current_mask_for_metrics,
+                        target_label=target_label,
+                        source_filter=source_filter,
+                        edge_softness=current_softness,
+                        max_images=preview_max_images,
+                        how_to_attach=how_to_attach
+                    )
+                    if step_preview_records:
+                        preview_records.extend(step_preview_records)
+                        step_history['trigger_previews'] = step_preview_records
+
+                if log_interval is not None and log_interval > 0 and (step_idx + 1) % log_interval == 0:
+                    val_log = ''
+                    train_log = ''
+                    if report_training_asr:
+                        train_log = f', train_asr={step_history.get("training_asr", 0.0):.4f}'
+                    if validation_loader is not None:
+                        val_log = (
+                            f', val_loss={step_history.get("validation_loss", 0.0):.6f}'
+                            f', val_asr={step_history.get("validation_asr", 0.0):.4f}'
+                        )
+                    print(
+                        f'[Trigger Learning] step={step_idx + 1}/{steps}, '
+                        f'loss={step_loss:.6f}, attack_loss={step_attack_loss:.6f}, '
+                        f'patch_reg={step_patch_reg_loss:.6f}, mask_reg={step_mask_reg_loss:.6f}, '
+                        f'softness_reg={step_softness_reg_loss:.6f}, samples={step_samples}, '
+                        f'patch_update_l2={patch_update_l2:.6f}, '
+                        f'patch_l1_norm={patch_l1_norm:.6f}, patch_l2_norm={patch_l2_norm:.6f}, '
+                        f'patch_linf_norm={patch_linf_norm:.6f}, mask_l1_norm={mask_l1_norm:.6f}, '
+                        f'mask_l2_norm={mask_l2_norm:.6f}, mask_linf_norm={mask_linf_norm:.6f}, '
+                        f'mask_mean={mask_mean:.6f}'
+                        f'{train_log}{val_log}'
+                    )
+                    if step_samples == 0:
+                        print(
+                            '[Trigger Learning] warning: no samples matched source_filter '
+                            f'"{source_filter}" at this step.'
+                        )
+
+        selection = 'last_step'
+        if smallest_success_patch is not None:
+            learned_patch = smallest_success_patch
+            learned_mask = smallest_success_mask
+            trigger_boxes = smallest_success_boxes
+            selected_step = smallest_success_step
+            selection = 'smallest_successful_patch'
+            selected_validation_asr = smallest_success_asr
+            selected_edge_softness = smallest_success_softness
+        elif best_patch is not None:
+            learned_patch = best_patch
+            learned_mask = best_mask
+            trigger_boxes = best_trigger_boxes
+            selected_step = best_step
+            selection = 'best_validation_loss'
+            selected_validation_asr = best_val_asr
+            selected_edge_softness = best_softness
+        else:
+            learned_patch = current_patch_for_metrics.cpu()
+            learned_mask = (
+                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
+                if mask_logits is not None else None
+            )
+            selected_step = steps
+            selection = 'last_step'
+            selected_validation_asr = None
+            selected_edge_softness = float(current_softness)
+
+        learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
+        learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
+        learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        learned_effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        learned_effective_epsilon = float(torch.norm(
+            learned_effective_patch.reshape(-1),
+            p=float('inf'),
+        ).item())
+
+        self._remove_feature_extractor()
+
+        return {
+            'patch': learned_patch,
+            'mask': learned_mask,
+            'history': history,
+            'trigger_box': trigger_boxes[0],
+            'trigger_boxes': trigger_boxes,
+            'target_label': float(target_label),
+            'source_filter': source_filter,
+            'patch_update_method': patch_update_method,
+            'how_to_attach': how_to_attach,
+            'epsilon': learned_patch_linf_norm,
+            'effective_epsilon': learned_effective_epsilon,
+            'patch_norms': {
+                'l1': learned_patch_l1_norm,
+                'l2': learned_patch_l2_norm,
+                'linf': learned_patch_linf_norm,
+                'effective_linf': learned_effective_epsilon,
+            },
+            'softness': {
+                'initial_edge_softness': float(initial_edge_softness),
+                'final_edge_softness': float(current_softness),
+                'min_edge_softness': float(min_edge_softness),
+                'softness_decay': float(softness_decay),
+                'softness_patience': int(softness_patience),
+                'asr_hardening_threshold': float(asr_hardening_threshold),
+                'selected_edge_softness': selected_edge_softness,
+            },
+            'progressive_resize': {
+                'enabled': bool(progressive_resize_enabled),
+                'direction': progressive_resize_direction,
+                'randomize_training_location': bool(randomize_training_location),
+                'initial_patch_size': (int(initial_width), int(initial_height)),
+                'final_patch_size': (int(trigger_boxes[0]['width']), int(trigger_boxes[0]['height'])),
+                'min_patch_size': (int(min_width), int(min_height)),
+                'max_patch_size': (int(max_width), int(max_height)),
+                'patch_growth_factor': float(patch_growth_factor),
+                'patch_shrink_factor': float(patch_shrink_factor),
+                'patch_recovery_growth_factor': float(patch_recovery_growth_factor),
+                'min_steps_per_patch_size': int(min_steps_per_patch_size),
+                'size_patience': int(size_patience),
+                'asr_threshold': float(asr_hardening_threshold),
+                'shrink_asr_threshold': float(shrink_asr_threshold),
+                'grow_asr_threshold': float(grow_asr_threshold),
+                'resize_hysteresis': float(resize_hysteresis),
+                'compression_asr_threshold': float(compression_asr_threshold),
+                'compression_phase_active': bool(compression_phase_active),
+                'events': resize_events,
+            },
+            'trigger_previews': preview_records,
+            'ensemble': self._ensemble_metadata(),
+            'selection': selection,
+            'selected_step': int(selected_step),
+            'selected_validation_asr': (
+                None if selected_validation_asr is None else float(selected_validation_asr)
+            ),
+            'best_validation_loss': None if validation_loader is None else float(best_val_loss),
+            'best_validation_asr': None if validation_loader is None else float(best_val_asr),
+            'smallest_success_validation_loss': (
+                None if smallest_success_patch is None else float(smallest_success_val_loss)
+            ),
+            'smallest_success_validation_asr': (
+                None if smallest_success_patch is None else float(smallest_success_asr)
+            ),
+            'smallest_success_patch_area': (
+                None if smallest_success_patch is None else int(smallest_success_area)
+            ),
+        
     @staticmethod
     def _image_tensor_to_pil(image_tensor, scale_from_signed=False):
         image_tensor = image_tensor.detach().cpu().float()

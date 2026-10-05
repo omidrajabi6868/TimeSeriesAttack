@@ -29,7 +29,7 @@ crun python imageattack.py \
   --model-name InceptionV3 \
   --patch-size 608x256 \
   --patch-count 1 \
-  --patch-update-method psp_uap \
+  --patch-update-method adam \
   --how-to-attach blend \
   --steps 100 \
   --learning-rate 0.05 \
@@ -38,4 +38,5 @@ crun python imageattack.py \
   --target-label 1 \
   --source-filter bad \
   --no-optimize-mask \
-  --multimodel-optimization
+  --multimodel-optimization \
+  --aggregation sum
