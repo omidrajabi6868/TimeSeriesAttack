@@ -26,8 +26,9 @@ def _default_output_dir(args):
         optimization_dir = Path('multi_model') / '__'.join(args.ensemble_models) / args.aggregation
     else:
         optimization_dir = Path('single_model') / args.model_name
+    scope_name = '_image_specific' if args.attack_scope == 'image_specific' else ''
     run_name = (
-        f'{args.task}_{args.patch_update_method}_{args.how_to_attach}'
+        f'{args.task}{scope_name}_{args.patch_update_method}_{args.how_to_attach}'
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
@@ -38,6 +39,8 @@ def _default_output_dir(args):
 def build_parser():
     parser = argparse.ArgumentParser(description='Train or evaluate an image adversarial trigger.')
     parser.add_argument('--task', default='perturbation_attack', help='Name used for the output run.')
+    parser.add_argument('--attack-scope', choices=('universal', 'image_specific'), default='universal',
+                        help='Learn one UAP or optimize and save one perturbation per validation/test image.')
     parser.add_argument('--training', action=argparse.BooleanOptionalAction, default=False,
                         help='Train a trigger; use --no-training to load one instead.')
     parser.add_argument('--label-path', default='/home/oraja001/Jlab/Hydra data/labels_v2.txt')
@@ -80,6 +83,8 @@ def build_parser():
                         help='One weight per ensemble model (required by weighted_mean).')
     parser.add_argument('--gpu-ids', nargs='+', type=int, default=None,
                         help='GPU IDs across which ensemble models are distributed round-robin.')
+    parser.add_argument('--black-box-models', nargs='*', default=[],
+                        help='Additional checkpoint model names used only to evaluate transferability.')
     return parser
 
 
@@ -102,6 +107,7 @@ def main(argv=None):
         batch_size=args.batch_size,
         stratify_by_bad_sample=args.stratify_by_bad_sample,
         eval_transform=eval_transform,
+        include_sample_ids=(args.attack_scope == 'image_specific'),
     )
 
     split_stats = dataset.split_statistics(train_loader, val_loader, test_loader)
@@ -164,6 +170,58 @@ def main(argv=None):
     bandwidth = args.bandwidth
     trigger_preview_dir = args.output_dir or _default_output_dir(args)
     print(f'attack_output_dir: {trigger_preview_dir}')
+
+    if args.attack_scope == 'image_specific':
+        if training:
+            for split_name, split_loader in (('validation', val_loader), ('test', test_loader)):
+                summary = attack.learn_image_specific_patch(
+                    dataset=dataset,
+                    data_loader=split_loader,
+                    target_label=args.target_label,
+                    source_filter=args.source_filter,
+                    steps=steps,
+                    learning_rate=learning_rate,
+                    mask_learning_rate=mask_learning_rate,
+                    optimize_mask=optimize_mask,
+                    mask_l1_weight=mask_l1_weight,
+                    patch_l2_weight=patch_l2_weight,
+                    trigger_preview_dir=trigger_preview_dir,
+                    trigger_preview_loader=None,
+                    trigger_preview_max_images=args.trigger_preview_max_images,
+                    checkpoint_interval=args.checkpoint_interval,
+                    checkpoint_path=None,
+                    how_to_attach=how_to_attach,
+                    patch_update_method=patch_update_method,
+                    epsilon=epsilon,
+                    bandwidth=bandwidth,
+                    output_dir=trigger_preview_dir,
+                    split_name=split_name,
+                )
+                print(f'image_specific_{split_name}_generation: {summary}')
+
+        evaluation_models = {}
+        if classification.models:
+            evaluation_models.update(classification.models)
+        else:
+            evaluation_models[args.model_name] = classification.model
+        if args.black_box_models:
+            black_box_classification = ClassificationBase(
+                model_name=args.black_box_models[0],
+                optimizer_name=args.optimizer_name,
+                checkpoint_dir=args.checkpoint_dir,
+                multimodel_load=True,
+                model_names=args.black_box_models,
+                gpu_ids=args.gpu_ids,
+            )
+            black_box_classification.load_checkpoints(args.checkpoint_dir)
+            evaluation_models.update(black_box_classification.models)
+
+        for split_name in ('validation', 'test'):
+            transfer_metrics = attack.evaluate_image_specific_artifacts(
+                trigger_preview_dir, evaluation_models, split_name=split_name
+            )
+            print(f'image_specific_{split_name}_evaluation: {transfer_metrics}')
+        return
 
     if training:
         learned_trigger = attack.learn_fixed_size_patch(dataset=dataset,
