@@ -33,11 +33,16 @@ def _default_output_dir(args):
     else:
         optimization_dir = Path('single_model') / args.model_name
     scope_name = '_image_specific' if args.attack_scope == 'image_specific' else ''
+    spatial_mask_name = (
+        f'_spatial_mask_{Path(args.perturbation_mask_path).stem}'
+        if args.perturbation_mask_path else ''
+    )
     run_name = (
         f'{args.task}{scope_name}_{args.patch_update_method}_{args.how_to_attach}'
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
+        f'{spatial_mask_name}'
     )
     return str(Path('backups') / optimization_dir / run_name)
 
@@ -64,6 +69,15 @@ def build_parser():
     parser.add_argument('--steps', type=int, default=100)
     parser.add_argument('--learning-rate', type=float, default=0.001)
     parser.add_argument('--optimize-mask', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        '--perturbation-mask-path',
+        default=None,
+        help=(
+            'Binary spatial mask for image-specific attacks. Nonzero pixels allow perturbation; '
+            'zero pixels are protected. The mask is resized to --image-size with nearest-neighbor '
+            'interpolation.'
+        ),
+    )
     parser.add_argument('--mask-learning-rate', type=float, default=0.001)
     parser.add_argument('--mask-l1-weight', type=float, default=0.0)
     parser.add_argument('--patch-l2-weight', type=float, default=0.0)
@@ -99,6 +113,8 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.perturbation_mask_path and args.attack_scope != 'image_specific':
+        parser.error('--perturbation-mask-path currently requires --attack-scope image_specific.')
     allowed_methods = (
         IMAGE_SPECIFIC_ATTACK_METHODS
         if args.attack_scope == 'image_specific'
@@ -219,6 +235,7 @@ def main(argv=None):
                     visualization_examples=(
                         args.visualization_examples if split_name == 'test' else 0
                     ),
+                    perturbation_mask_path=args.perturbation_mask_path,
                 )
                 print(f'image_specific_{split_name}_generation: {summary}')
 

@@ -3419,7 +3419,8 @@ class AdversarialAttack:
                                         eot_samples=4,
                                         deepfool_overshoot=0.02,
                                         edge_softness=0.0,
-                                        how_to_attach='blend'):
+                                        how_to_attach='blend',
+                                        perturbation_mask=None):
         """Optimize one perturbation for one image.
 
         Unlike UAP learning, no state is shared with any other sample. The
@@ -3521,6 +3522,34 @@ class AdversarialAttack:
         fixed_mask = self._build_blend_mask(
             height, width, channels, self.device, image.dtype, edge_softness
         ).expand(len(boxes), -1, -1, -1)
+        if perturbation_mask is not None:
+            content_mask = torch.as_tensor(
+                perturbation_mask, device=self.device, dtype=image.dtype
+            )
+            if content_mask.ndim == 2:
+                content_mask = content_mask.unsqueeze(0).unsqueeze(0)
+            elif content_mask.ndim == 3:
+                content_mask = content_mask.unsqueeze(0)
+            if content_mask.ndim != 4:
+                raise ValueError('perturbation_mask must be HW, CHW, or NCHW tensor-like.')
+            if tuple(content_mask.shape[-2:]) != (height, width):
+                raise ValueError(
+                    'perturbation_mask spatial dimensions must match the trigger box: '
+                    f'expected {(height, width)}, got {tuple(content_mask.shape[-2:])}.'
+                )
+            if content_mask.shape[0] == 1 and len(boxes) > 1:
+                content_mask = content_mask.expand(len(boxes), -1, -1, -1)
+            elif content_mask.shape[0] != len(boxes):
+                raise ValueError(
+                    'perturbation_mask batch dimension must be 1 or match the number of trigger boxes.'
+                )
+            if content_mask.shape[1] == 1:
+                content_mask = content_mask.expand(-1, channels, -1, -1)
+            elif content_mask.shape[1] != channels:
+                raise ValueError(
+                    'perturbation_mask channel dimension must be 1 or match the input channels.'
+                )
+            fixed_mask = fixed_mask * (content_mask > 0).to(image.dtype)
 
         started = time.perf_counter()
         success = False
@@ -3620,6 +3649,58 @@ class AdversarialAttack:
             'linf': float(flat_delta.abs().max().item()),
         }
 
+    @staticmethod
+    def _load_perturbation_mask(mask_path, image_width, image_height, trigger_box,
+                                resolved_mask_path=None):
+        """Load a full-image binary mask and crop it into trigger-box masks.
+
+        Any nonzero source value is treated as an allowed pixel. This supports
+        binary PNGs encoded as either 0/1 or 0/255 without weakening the mask.
+        """
+        source_path = Path(mask_path).expanduser()
+        if not source_path.is_file():
+            raise FileNotFoundError(f'Perturbation mask not found: {source_path}')
+
+        with Image.open(source_path) as source_image:
+            source_size = tuple(source_image.size)
+            source_values = np.asarray(source_image.convert('L'))
+        binary_values = (source_values > 0).astype(np.uint8) * 255
+        resampling = getattr(Image, 'Resampling', Image).NEAREST
+        resolved_image = Image.fromarray(binary_values).resize(
+            (int(image_width), int(image_height)), resample=resampling
+        )
+        resolved_values = (np.asarray(resolved_image) > 0).astype(np.float32)
+
+        if resolved_mask_path is not None:
+            resolved_path = Path(resolved_mask_path)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray((resolved_values * 255).astype(np.uint8)).save(resolved_path)
+        else:
+            resolved_path = None
+
+        full_mask = torch.from_numpy(resolved_values).unsqueeze(0).unsqueeze(0)
+        boxes = AdversarialAttack._normalize_trigger_boxes(trigger_box)
+        mask_crops = []
+        for box in boxes:
+            x, y = int(box['x']), int(box['y'])
+            width, height = int(box['width']), int(box['height'])
+            if x < 0 or y < 0 or x + width > image_width or y + height > image_height:
+                raise ValueError(
+                    f'Trigger box {box} lies outside the resized mask '
+                    f'({image_width}x{image_height}).'
+                )
+            mask_crops.append(full_mask[:, :, y:y + height, x:x + width])
+
+        return torch.cat(mask_crops, dim=0), {
+            'perturbation_mask_path': str(source_path),
+            'perturbation_mask_source_size': [int(source_size[0]), int(source_size[1])],
+            'perturbation_mask_resolved_size': [int(image_width), int(image_height)],
+            'perturbation_mask_allowed_fraction': float(resolved_values.mean()),
+            'resolved_perturbation_mask_path': (
+                None if resolved_path is None else str(resolved_path)
+            ),
+        }
+
     def _save_image_specific_visualizations(self, split_dir, records, max_examples):
         """Save PNG previews, preferring successful image-specific attacks."""
         max_examples = max(0, int(max_examples))
@@ -3699,6 +3780,7 @@ class AdversarialAttack:
                                      output_dir='backups/image_specific',
                                      split_name='test',
                                      visualization_examples=0,
+                                     perturbation_mask_path=None,
                                      **_unused):
         """Generate and save one independently optimized attack per sample."""
         split_dir = Path(output_dir) / split_name
@@ -3710,6 +3792,8 @@ class AdversarialAttack:
         eligible_count = 0
         successful_count = 0
         skipped_count = 0
+        perturbation_mask = None
+        perturbation_mask_metadata = {}
 
         for batch in data_loader:
             if len(batch) == 4:
@@ -3724,6 +3808,22 @@ class AdversarialAttack:
             else:
                 raise ValueError('Expected batches containing 2, 3, or 4 fields.')
 
+            if perturbation_mask_path is not None and perturbation_mask is None:
+                image_height, image_width = int(inputs.shape[-2]), int(inputs.shape[-1])
+                perturbation_mask, perturbation_mask_metadata = self._load_perturbation_mask(
+                    perturbation_mask_path,
+                    image_width=image_width,
+                    image_height=image_height,
+                    trigger_box=trigger_box,
+                    resolved_mask_path=Path(output_dir) / 'resolved_perturbation_mask.png',
+                )
+                print(
+                    'perturbation_mask: '
+                    f'{perturbation_mask_metadata["perturbation_mask_path"]} -> '
+                    f'{image_width}x{image_height}, '
+                    f'allowed={100.0 * perturbation_mask_metadata["perturbation_mask_allowed_fraction"]:.2f}%'
+                )
+
             for index in range(int(inputs.shape[0])):
                 sample_id = str(sample_ids[index])
                 result = self.optimize_image_specific_trigger(
@@ -3736,6 +3836,7 @@ class AdversarialAttack:
                     bandwidth=bandwidth, eot_samples=eot_samples,
                     edge_softness=max(float(initial_edge_softness), float(min_edge_softness)),
                     how_to_attach=how_to_attach,
+                    perturbation_mask=perturbation_mask,
                 )
                 metadata = {
                     **result,
@@ -3745,6 +3846,7 @@ class AdversarialAttack:
                     'source_filter': source_filter,
                     'patch_update_method': result['attack_method'],
                     'epsilon': float(epsilon),
+                    **perturbation_mask_metadata,
                 }
                 record = {
                     key: value for key, value in metadata.items()
@@ -3799,6 +3901,7 @@ class AdversarialAttack:
             'mean_l2': float(np.mean([record['l2'] for record in eligible])) if eligible else 0.0,
             'mean_linf': float(np.mean([record['linf'] for record in eligible])) if eligible else 0.0,
             'manifest_path': str(manifest_path),
+            **perturbation_mask_metadata,
         }
         with open(split_dir / 'summary.json', 'w', encoding='utf-8') as summary_file:
             json.dump(summary, summary_file, indent=2)

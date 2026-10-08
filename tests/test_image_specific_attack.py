@@ -2,6 +2,7 @@ import json
 
 import pytest
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
 from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack, TransformSampler
@@ -146,3 +147,39 @@ def test_robust_image_specific_attack_uses_per_image_eot(monkeypatch):
 
     assert result['attack_method'] == 'robust'
     assert result['success']
+
+
+def test_binary_01_mask_is_resized_and_blocks_protected_pixels(tmp_path):
+    mask_path = tmp_path / 'mask.png'
+    # Deliberately encode the mask as 0/1 rather than 0/255. The right half is
+    # allowed to change and the left half must remain exactly untouched.
+    Image.fromarray(torch.tensor([[0, 1]], dtype=torch.uint8).numpy()).save(mask_path)
+
+    attack = AdversarialAttack(MeanThresholdModel(-0.1), device='cpu', use_multi_gpu=False)
+    loader = DataLoader(
+        TensorDataset(torch.zeros(1, 3, 2, 4), torch.tensor([0.0])),
+        batch_size=1,
+    )
+    summary = attack.learn_image_specific_trigger(
+        loader,
+        {'x': 0, 'y': 0, 'width': 4, 'height': 2},
+        steps=5,
+        learning_rate=0.5,
+        epsilon=0.5,
+        output_dir=tmp_path,
+        split_name='test',
+        perturbation_mask_path=mask_path,
+        log_interval=0,
+    )
+
+    payload = torch.load(tmp_path / 'test' / 'artifacts' / '00000000.pt', map_location='cpu')
+    perturbation = payload['perturbation']
+    assert torch.count_nonzero(perturbation[:, :, :, :2]) == 0
+    assert torch.count_nonzero(perturbation[:, :, :, 2:]) > 0
+    assert summary['perturbation_mask_source_size'] == [2, 1]
+    assert summary['perturbation_mask_resolved_size'] == [4, 2]
+    assert summary['perturbation_mask_allowed_fraction'] == pytest.approx(0.5)
+
+    resolved = Image.open(tmp_path / 'resolved_perturbation_mask.png')
+    assert resolved.size == (4, 2)
+    assert set(resolved.getdata()) == {0, 255}

@@ -114,6 +114,7 @@ class Attck(AdversarialAttack):
                                 output_dir,
                                 split_name,
                                 visualization_examples=0,
+                                perturbation_mask_path=None,
                                 checkpoint_interval=None,
                                 checkpoint_path=None):
                                 
@@ -152,4 +153,5 @@ class Attck(AdversarialAttack):
             how_to_attach=how_to_attach,
             output_dir=output_dir,
             split_name=split_name,
-            visualization_examples=visualization_examples)
+            visualization_examples=visualization_examples,
+            perturbation_mask_path=perturbation_mask_path)
