@@ -39,18 +39,25 @@ def test_image_specific_generation_saves_independent_artifacts(tmp_path):
     assert summary['samples_seen'] == 2
     assert summary['eligible_samples'] == 1
     assert summary['successful_attacks'] == 1
+    assert summary['skipped_samples'] == 1
+    assert summary['artifacts_saved'] == 1
 
     manifest_path = tmp_path / 'validation' / 'manifest.jsonl'
     records = [json.loads(line) for line in manifest_path.read_text().splitlines()]
     assert len(records) == 2
-    assert records[0]['artifact'] != records[1]['artifact']
+    assert records[0]['artifact'] == 'artifacts/00000000.pt'
+    assert records[1]['artifact'] is None
     assert records[1]['status'] == 'skipped'
 
     attacked = torch.load(tmp_path / 'validation' / records[0]['artifact'], map_location='cpu')
-    skipped = torch.load(tmp_path / 'validation' / records[1]['artifact'], map_location='cpu')
     assert attacked['linf'] <= 0.5 + 1e-6
     assert not torch.equal(attacked['adversarial_image'], attacked['original_image'])
-    assert torch.equal(skipped['adversarial_image'], skipped['original_image'])
+    assert len(list((tmp_path / 'validation' / 'artifacts').glob('*.pt'))) == 1
+
+    metrics = attack.evaluate_image_specific_artifacts(
+        tmp_path, {'source': attack.model}, split_name='validation'
+    )
+    assert metrics['models']['source']['eligible_samples'] == 1
 
 
 def test_transfer_evaluation_reuses_saved_adversarial_images(tmp_path):

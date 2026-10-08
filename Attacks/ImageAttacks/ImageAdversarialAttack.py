@@ -3649,6 +3649,9 @@ class AdversarialAttack:
         manifest_path = split_dir / 'manifest.jsonl'
         records = []
         sample_offset = 0
+        eligible_count = 0
+        successful_count = 0
+        skipped_count = 0
 
         for batch in data_loader:
             if len(batch) == 4:
@@ -3676,27 +3679,42 @@ class AdversarialAttack:
                     edge_softness=max(float(initial_edge_softness), float(min_edge_softness)),
                     how_to_attach=how_to_attach,
                 )
-                artifact_name = f'{sample_offset + index:08d}.pt'
-                artifact_path = artifact_dir / artifact_name
-                payload = {
+                metadata = {
                     **result,
                     'sample_id': sample_id,
                     'image_path': None if image_paths[index] is None else str(image_paths[index]),
-                    'original_image': inputs[index:index + 1].detach().cpu(),
                     'target_label': float(target_label),
                     'source_filter': source_filter,
                     'patch_update_method': result['attack_method'],
                     'epsilon': float(epsilon),
                 }
-                torch.save(payload, artifact_path)
                 record = {
-                    key: value for key, value in payload.items()
+                    key: value for key, value in metadata.items()
                     if key not in {'original_image', 'adversarial_image', 'perturbation', 'patch', 'mask'}
                 }
-                record['artifact'] = str(Path('artifacts') / artifact_name)
+                if bool(result['eligible']):
+                    artifact_name = f'{sample_offset + index:08d}.pt'
+                    artifact_path = artifact_dir / artifact_name
+                    payload = {
+                        **metadata,
+                        'original_image': inputs[index:index + 1].detach().cpu(),
+                    }
+                    torch.save(payload, artifact_path)
+                    record['artifact'] = str(Path('artifacts') / artifact_name)
+                    eligible_count += 1
+                    successful_count += int(bool(result['success']))
+                else:
+                    # Keep only lightweight audit metadata for samples that are
+                    # outside the source class, already targeted, or clean-misclassified.
+                    record['artifact'] = None
+                    skipped_count += 1
                 records.append(record)
                 if log_interval and len(records) % int(log_interval) == 0:
-                    print(f'{split_name}: generated {len(records)} image-specific attacks')
+                    print(
+                        f'{split_name}: processed={len(records)}, '
+                        f'eligible={eligible_count}, successful={successful_count}, '
+                        f'skipped={skipped_count}'
+                    )
             sample_offset += int(inputs.shape[0])
 
         with open(manifest_path, 'w', encoding='utf-8') as manifest_file:
@@ -3710,6 +3728,8 @@ class AdversarialAttack:
             'samples_seen': len(records),
             'eligible_samples': len(eligible),
             'successful_attacks': len(successful),
+            'skipped_samples': len(records) - len(eligible),
+            'artifacts_saved': len(eligible),
             'source_attack_success_rate': 100.0 * len(successful) / len(eligible) if eligible else 0.0,
             'mean_steps': float(np.mean([record['steps_used'] for record in eligible])) if eligible else 0.0,
             'mean_l1': float(np.mean([record['l1'] for record in eligible])) if eligible else 0.0,
@@ -3740,9 +3760,14 @@ class AdversarialAttack:
             eligible_count = source_success_count = black_box_success = conditional_success = 0
             clean_correct = prediction_changes = 0
             for record in records:
-                payload = torch.load(split_dir / record['artifact'], map_location='cpu')
-                if not bool(payload['eligible']):
+                if not bool(record['eligible']):
                     continue
+                artifact = record.get('artifact')
+                if not artifact:
+                    raise ValueError(
+                        f"Eligible sample {record.get('sample_id')} has no saved artifact."
+                    )
+                payload = torch.load(split_dir / artifact, map_location='cpu')
                 eligible_count += 1
                 source_success = bool(payload['success'])
                 source_success_count += int(source_success)
