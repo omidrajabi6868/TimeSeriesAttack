@@ -298,6 +298,7 @@ class AdversarialAttack:
                 'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
                 'ensemble': trigger.get('ensemble', {}),
+                'perturbation_mask': trigger.get('perturbation_mask', {}),
                 'history_path': str(history_path),
             }
         temporary_output_path = output_path.with_name(f'.{output_path.name}.tmp')
@@ -367,6 +368,7 @@ class AdversarialAttack:
             'smallest_success_patch_area': trigger_payload.get('smallest_success_patch_area'),
             'trigger_previews': trigger_payload.get('trigger_previews', []),
             'ensemble': trigger_payload.get('ensemble', {}),
+            'perturbation_mask': trigger_payload.get('perturbation_mask', {}),
             'history': history,
             'path': str(trigger_path),
             'history_path': resolved_history_path,
@@ -416,7 +418,8 @@ class AdversarialAttack:
                                 enable_compression_phase=True,
                                 how_to_attach='blend',
                                 bandwidth=60,
-                                psp_num_copies=128):
+                                psp_num_copies=128,
+                                perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
 
@@ -434,6 +437,41 @@ class AdversarialAttack:
         channels = 3
         full_patch_size = self._infer_full_patch_size(data_loader, fallback=(width, height))
         max_width, max_height = self._normalize_patch_size(full_patch_size)
+        perturbation_mask = None
+        perturbation_mask_metadata = {}
+        if perturbation_mask_path is not None:
+            if how_to_attach != 'blend':
+                raise ValueError("perturbation_mask_path requires how_to_attach='blend'.")
+            if progressive_resize_enabled:
+                raise ValueError('perturbation_mask_path requires progressive_resize=False.')
+            if randomize_training_location:
+                raise ValueError('perturbation_mask_path requires randomize_training_location=False.')
+            resolved_mask_path = (
+                Path(trigger_preview_dir) / 'resolved_perturbation_mask.png'
+                if trigger_preview_dir is not None else None
+            )
+            perturbation_mask, perturbation_mask_metadata = self._load_perturbation_mask(
+                perturbation_mask_path,
+                image_width=max_width,
+                image_height=max_height,
+                trigger_box=validation_trigger_boxes,
+                resolved_mask_path=resolved_mask_path,
+            )
+            perturbation_mask = self._prepare_perturbation_mask(
+                perturbation_mask,
+                box_count=len(validation_trigger_boxes),
+                channels=channels,
+                height=height,
+                width=width,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            print(
+                'perturbation_mask: '
+                f'{perturbation_mask_metadata["perturbation_mask_path"]} -> '
+                f'{max_width}x{max_height}, '
+                f'allowed={100.0 * perturbation_mask_metadata["perturbation_mask_allowed_fraction"]:.2f}%'
+            )
         min_width, min_height = self._normalize_patch_size(min_patch_size)
         min_width = min(min_width, max_width)
         min_height = min(min_height, max_height)
@@ -564,6 +602,8 @@ class AdversarialAttack:
                 how_to_attach=how_to_attach,
                 overshoot=0.02,
                 max_deepfool_iter=50,
+                perturbation_mask=perturbation_mask,
+                perturbation_mask_metadata=perturbation_mask_metadata,
             )
 
         patch_optimizer = None
@@ -605,7 +645,9 @@ class AdversarialAttack:
                 trigger_preview_max_images=trigger_preview_max_images,
                 edge_softness=current_softness,
                 how_to_attach=how_to_attach,
-                patch_optimizer=patch_optimizer
+                patch_optimizer=patch_optimizer,
+                perturbation_mask=perturbation_mask,
+                perturbation_mask_metadata=perturbation_mask_metadata,
             )
 
         if patch_update_method == 'psp_uap':
@@ -626,6 +668,8 @@ class AdversarialAttack:
                 how_to_attach=how_to_attach,
                 patch_optimizer=patch_optimizer,
                 num_copies=psp_num_copies,
+                perturbation_mask=perturbation_mask,
+                perturbation_mask_metadata=perturbation_mask_metadata,
             )
 
         patch_momentum = torch.zeros_like(trigger_delta, device=self.device)
@@ -649,6 +693,17 @@ class AdversarialAttack:
             ).expand(len(trigger_boxes), -1, -1, -1)
             mask_logits = torch.zeros_like(base_mask, device=self.device).requires_grad_(True)
             mask_optimizer = torch.optim.Adam([mask_logits], lr=mask_learning_rate)
+
+        def current_trigger_mask(current_logits=None):
+            learned = self._compose_trigger_mask(
+                base_mask=base_mask,
+                mask_logits=current_logits,
+            )
+            if perturbation_mask is None:
+                return learned
+            if learned is None:
+                return perturbation_mask
+            return learned * perturbation_mask
 
         preview_records = []
         preview_interval = int(trigger_preview_interval) if trigger_preview_interval is not None else 0
@@ -726,10 +781,7 @@ class AdversarialAttack:
                     continue
 
                 selected_inputs = inputs[source_mask].clone()
-                blend_mask = (
-                    self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
-                    if mask_logits is not None else None
-                )
+                blend_mask = current_trigger_mask(mask_logits)
                 if patch_update_method == 'gap_uap':
                     generator.train()
                     bounded_trigger_patch = render_gap_patch()
@@ -802,10 +854,16 @@ class AdversarialAttack:
                         dtype=trigger_delta.dtype,
                         edge_softness=current_softness,
                     ).expand(len(trigger_boxes), -1, -1, -1)
-                    mask_values = self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits)
-                    mask_growth = torch.relu(mask_values - base_mask)
+                    mask_values = current_trigger_mask(mask_logits)
+                    regularization_base_mask = (
+                        base_mask * perturbation_mask
+                        if perturbation_mask is not None else base_mask
+                    )
+                    mask_growth = torch.relu(mask_values - regularization_base_mask)
                     mask_reg = mask_l1_weight * torch.mean(mask_growth)
-                    softness_reg = softness_alignment_weight * torch.mean((mask_values - base_mask) ** 2)
+                    softness_reg = softness_alignment_weight * torch.mean(
+                        (mask_values - regularization_base_mask) ** 2
+                    )
                 else:
                     mask_reg = torch.tensor(0.0, device=self.device)
                     softness_reg = torch.tensor(0.0, device=self.device)
@@ -870,10 +928,11 @@ class AdversarialAttack:
             else:
                 current_patch_for_metrics = (epsilon * torch.tanh(trigger_delta)).detach()
 
-            current_mask_for_metrics = (
-                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
-                if mask_logits is not None else None
+            current_mask_for_metrics = current_trigger_mask(
+                mask_logits.detach() if mask_logits is not None else None
             )
+            if current_mask_for_metrics is not None:
+                current_mask_for_metrics = current_mask_for_metrics.detach()
             patch_update_l2 = float(torch.norm(
                 (current_patch_for_metrics - previous_patch).reshape(-1),
                 p=2,
@@ -923,9 +982,8 @@ class AdversarialAttack:
                     test_loader=data_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=current_patch_for_metrics,
-                    trigger_mask=(
-                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
-                        if mask_logits is not None else None
+                    trigger_mask=current_trigger_mask(
+                        mask_logits.detach() if mask_logits is not None else None
                     ),
                     target_label=target_label,
                     source_filter=source_filter,
@@ -938,9 +996,8 @@ class AdversarialAttack:
 
                     current_patch = current_patch_for_metrics
 
-                    current_mask = (
-                        self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach())
-                        if mask_logits is not None else None
+                    current_mask = current_trigger_mask(
+                        mask_logits.detach() if mask_logits is not None else None
                     )
                     val_metrics = self.evaluate_attack_success(
                         test_loader=validation_loader,
@@ -1166,10 +1223,11 @@ class AdversarialAttack:
                             size_step_count = 0
                             size_no_improve_steps = 0
                             best_size_asr = float('-inf')
-                            current_mask_for_metrics = (
-                                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).detach()
-                                if mask_logits is not None else None
+                            current_mask_for_metrics = current_trigger_mask(
+                                mask_logits.detach() if mask_logits is not None else None
                             )
+                            if current_mask_for_metrics is not None:
+                                current_mask_for_metrics = current_mask_for_metrics.detach()
                             step_history['resize_decision'] = resize_decision
                             step_history['resize_to_size'] = (int(width), int(height))
                         else:
@@ -1224,6 +1282,7 @@ class AdversarialAttack:
                             ),
                             'trigger_previews': preview_records,
                             'ensemble': self._ensemble_metadata(),
+                            'perturbation_mask': perturbation_mask_metadata,
                         },
                         output_path=checkpoint_path,
                     )
@@ -1301,10 +1360,11 @@ class AdversarialAttack:
             selected_edge_softness = best_softness
         else:
             learned_patch = current_patch_for_metrics.cpu()
-            learned_mask = (
-                self._compose_trigger_mask(base_mask=base_mask, mask_logits=mask_logits.detach()).cpu()
-                if mask_logits is not None else None
+            learned_mask = current_trigger_mask(
+                mask_logits.detach() if mask_logits is not None else None
             )
+            if learned_mask is not None:
+                learned_mask = learned_mask.cpu()
             selected_step = steps
             selection = 'last_step'
             selected_validation_asr = None
@@ -1371,6 +1431,7 @@ class AdversarialAttack:
             },
             'trigger_previews': preview_records,
             'ensemble': self._ensemble_metadata(),
+            'perturbation_mask': perturbation_mask_metadata,
             'selection': selection,
             'selected_step': int(selected_step),
             'selected_validation_asr': (
@@ -1405,7 +1466,9 @@ class AdversarialAttack:
                                     edge_softness,
                                     how_to_attach,
                                     overshoot=0.02,
-                                    max_deepfool_iter=50):
+                                    max_deepfool_iter=50,
+                                    perturbation_mask=None,
+                                    perturbation_mask_metadata=None):
         """Learn a targeted universal perturbation with a DeepFool-style loop.
 
         This keeps the Moosavi-Dezfooli UAP structure: repeatedly scan the
@@ -1472,7 +1535,7 @@ class AdversarialAttack:
                         image.unsqueeze(0),
                         trigger_boxes,
                         trigger_patch=universal_patch.detach(),
-                        trigger_mask=None,
+                        trigger_mask=perturbation_mask,
                         edge_softness=edge_softness,
                         how_to_attach=how_to_attach,
                     )
@@ -1487,6 +1550,7 @@ class AdversarialAttack:
                         how_to_attach=how_to_attach,
                         overshoot=overshoot,
                         max_iter=max_deepfool_iter,
+                        perturbation_mask=perturbation_mask,
                     )
                     if sample_patch is not None:
                         universal_patch = torch.clamp(universal_patch + sample_patch, -epsilon, epsilon).detach()
@@ -1496,7 +1560,7 @@ class AdversarialAttack:
                 test_loader=validation_loader or data_loader,
                 trigger_box=trigger_boxes,
                 trigger_patch=universal_patch.detach(),
-                trigger_mask=None,
+                trigger_mask=perturbation_mask,
                 target_label=target_class,
                 source_filter=source_filter,
                 edge_softness=edge_softness,
@@ -1509,7 +1573,7 @@ class AdversarialAttack:
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch.detach(),
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1519,7 +1583,7 @@ class AdversarialAttack:
                     data_loader=validation_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch.detach(),
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1535,6 +1599,10 @@ class AdversarialAttack:
                     best_val_asr = float(val_metrics['attack_success_rate'])
                     best_val_loss = float(val_loss_metrics['loss'])
 
+            effective_universal_patch = (
+                universal_patch * perturbation_mask
+                if perturbation_mask is not None else universal_patch
+            )
             step_history = {
                 'step': step_idx + 1,
                 'patch_update_method': 'deepfool_uap',
@@ -1542,7 +1610,7 @@ class AdversarialAttack:
                 'deepfool_updates': changed_samples,
                 'targeted_attack_success_rate': target_asr,
                 'patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
-                'effective_patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
+                'effective_patch_linf_norm': float(torch.norm(effective_universal_patch.reshape(-1), p=float('inf')).item()),
             }
             if val_metrics is not None:
                 step_history['validation_asr'] = float(val_metrics['attack_success_rate'])
@@ -1556,7 +1624,7 @@ class AdversarialAttack:
                     step=step_idx + 1,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch.detach(),
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1575,9 +1643,12 @@ class AdversarialAttack:
         learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
         learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
         learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        learned_mask = perturbation_mask.detach().cpu() if perturbation_mask is not None else None
+        effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        effective_linf = float(torch.norm(effective_patch.reshape(-1), p=float('inf')).item())
         return {
             'patch': learned_patch,
-            'mask': None,
+            'mask': learned_mask,
             'history': history,
             'trigger_box': trigger_boxes[0],
             'trigger_boxes': trigger_boxes,
@@ -1586,11 +1657,12 @@ class AdversarialAttack:
             'patch_update_method': 'deepfool_uap',
             'how_to_attach': how_to_attach,
             'epsilon': learned_patch_linf_norm,
-            'effective_epsilon': learned_patch_linf_norm,
-            'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
+            'effective_epsilon': effective_linf,
+            'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': effective_linf},
             'softness': {'initial_edge_softness': float(edge_softness), 'final_edge_softness': float(edge_softness)},
             'progressive_resize': {'enabled': False, 'events': []},
             'trigger_previews': preview_records,
+            'perturbation_mask': perturbation_mask_metadata or {},
             'selection': 'best_targeted_attack_success_rate',
             'selected_step': int(best_step or steps),
             'best_validation_loss': None if validation_loader is None else float(best_val_loss),
@@ -1613,6 +1685,7 @@ class AdversarialAttack:
                                                how_to_attach,
                                                overshoot,
                                                max_iter,
+                                               perturbation_mask=None,
                                                min_norm=1e-12):
         patch_update = torch.zeros_like(universal_patch, requires_grad=True)
         for _ in range(int(max_iter)):
@@ -1621,7 +1694,7 @@ class AdversarialAttack:
                 image.unsqueeze(0),
                 trigger_boxes,
                 trigger_patch=candidate_patch,
-                trigger_mask=None,
+                trigger_mask=perturbation_mask,
                 edge_softness=edge_softness,
                 how_to_attach=how_to_attach,
             )
@@ -1661,7 +1734,9 @@ class AdversarialAttack:
                                     trigger_preview_max_images,
                                     edge_softness,
                                     how_to_attach,
-                                    patch_optimizer):
+                                    patch_optimizer,
+                                    perturbation_mask=None,
+                                    perturbation_mask_metadata=None):
         target_class = int(target_label)
         if float(target_label) not in (0.0, 1.0):
             raise ValueError('Targeted RobustUAP currently supports binary target_label values 0 or 1.')
@@ -1734,6 +1809,7 @@ class AdversarialAttack:
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach,
                     max_batch_size=robust_config.max_batch_size,
+                    trigger_mask=perturbation_mask,
                 )
                 batch_robustness_values.append(float(batch_robustness))
 
@@ -1764,7 +1840,7 @@ class AdversarialAttack:
                                 input_batch,
                                 trigger_boxes,
                                 trigger_patch=transformed_patch,
-                                trigger_mask=None,
+                                trigger_mask=perturbation_mask,
                                 edge_softness=edge_softness,
                                 how_to_attach=how_to_attach,
                             )
@@ -1802,6 +1878,7 @@ class AdversarialAttack:
                         edge_softness=edge_softness,
                         how_to_attach=how_to_attach,
                         max_batch_size=robust_config.max_batch_size,
+                        trigger_mask=perturbation_mask,
                     )
                     batch_robustness_values.append(float(batch_robustness))
                     if batch_robustness >= robust_config.zeta:
@@ -1819,7 +1896,7 @@ class AdversarialAttack:
                 test_loader=validation_loader or data_loader,
                 trigger_box=trigger_boxes,
                 trigger_patch=universal_patch,
-                trigger_mask=None,
+                trigger_mask=perturbation_mask,
                 target_label=target_class,
                 source_filter=source_filter,
                 edge_softness=edge_softness,
@@ -1832,7 +1909,7 @@ class AdversarialAttack:
                     test_loader=validation_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch,
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1842,7 +1919,7 @@ class AdversarialAttack:
                     data_loader=validation_loader,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch,
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1859,6 +1936,10 @@ class AdversarialAttack:
                     best_val_loss = float(val_loss_metrics['loss'])
 
             step_loss = (sum(step_losses) / step_samples) if step_samples else 0.0
+            effective_universal_patch = (
+                universal_patch * perturbation_mask
+                if perturbation_mask is not None else universal_patch
+            )
             step_history = {
                 'step': step_idx + 1,
                 'patch_update_method': 'robust_uap',
@@ -1872,7 +1953,7 @@ class AdversarialAttack:
                 'transform_samples': int(num_transform_samples),
                 'inner_updates': int(inner_updates),
                 'patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
-                'effective_patch_linf_norm': float(torch.norm(universal_patch.reshape(-1), p=float('inf')).item()),
+                'effective_patch_linf_norm': float(torch.norm(effective_universal_patch.reshape(-1), p=float('inf')).item()),
             }
             if val_metrics is not None:
                 step_history['validation_asr'] = float(val_metrics['attack_success_rate'])
@@ -1886,7 +1967,7 @@ class AdversarialAttack:
                     step=step_idx + 1,
                     trigger_box=trigger_boxes,
                     trigger_patch=universal_patch.detach(),
-                    trigger_mask=None,
+                    trigger_mask=perturbation_mask,
                     target_label=target_class,
                     source_filter=source_filter,
                     edge_softness=edge_softness,
@@ -1907,9 +1988,12 @@ class AdversarialAttack:
         learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1), p=1).item())
         learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2).item())
         learned_patch_linf_norm = float(torch.norm(learned_patch.reshape(-1), p=float('inf')).item())
+        learned_mask = perturbation_mask.detach().cpu() if perturbation_mask is not None else None
+        effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        effective_linf = float(torch.norm(effective_patch.reshape(-1), p=float('inf')).item())
         return {
             'patch': learned_patch,
-            'mask': None,
+            'mask': learned_mask,
             'history': history,
             'trigger_box': trigger_boxes[0],
             'trigger_boxes': trigger_boxes,
@@ -1918,8 +2002,8 @@ class AdversarialAttack:
             'patch_update_method': 'robust_uap',
             'how_to_attach': how_to_attach,
             'epsilon': learned_patch_linf_norm,
-            'effective_epsilon': learned_patch_linf_norm,
-            'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': learned_patch_linf_norm},
+            'effective_epsilon': effective_linf,
+            'patch_norms': {'l1': learned_patch_l1_norm, 'l2': learned_patch_l2_norm, 'linf': learned_patch_linf_norm, 'effective_linf': effective_linf},
             'softness': {'initial_edge_softness': float(edge_softness), 'final_edge_softness': float(edge_softness)},
             'progressive_resize': {'enabled': False, 'events': []},
             'robust_uap': {
@@ -1935,6 +2019,7 @@ class AdversarialAttack:
             },
             'ensemble': self._ensemble_metadata(),
             'trigger_previews': preview_records,
+            'perturbation_mask': perturbation_mask_metadata or {},
             'selection': 'best_targeted_attack_success_rate',
             'selected_step': int(best_step or steps),
             'best_validation_loss': None if validation_loader is None else float(best_val_loss),
@@ -1961,6 +2046,8 @@ class AdversarialAttack:
                                 how_to_attach,
                                 patch_optimizer,
                                 num_copies=10,
+                                perturbation_mask=None,
+                                perturbation_mask_metadata=None,
                             ):
         target_class = int(target_label)
 
@@ -2025,7 +2112,9 @@ class AdversarialAttack:
             step_losses = []
             step_samples = 0
 
-            universal_patch = (epsilon*torch.tanh(trigger_delta))
+            universal_patch = (epsilon * torch.tanh(trigger_delta))
+            if perturbation_mask is not None:
+                universal_patch = universal_patch * perturbation_mask
 
             semantic_prior, semantic_delta = (
                 psp_sampler.sample(
@@ -2051,7 +2140,9 @@ class AdversarialAttack:
             patch_optimizer.step()
 
             with torch.no_grad():
-                universal_patch = (epsilon*torch.tanh(trigger_delta))
+                universal_patch = (epsilon * torch.tanh(trigger_delta))
+                if perturbation_mask is not None:
+                    universal_patch = universal_patch * perturbation_mask
 
             batch_loss_value = float(batch_loss.detach().item())
 
@@ -2083,7 +2174,7 @@ class AdversarialAttack:
                         step=step_idx + 1,
                         trigger_box=trigger_boxes,
                         trigger_patch=universal_patch.detach(),
-                        trigger_mask=None,
+                        trigger_mask=perturbation_mask,
                         target_label=target_class,
                         source_filter=source_filter,
                         edge_softness=edge_softness,
@@ -2101,7 +2192,7 @@ class AdversarialAttack:
                         test_loader=validation_loader,
                         trigger_box=trigger_boxes,
                         trigger_patch=universal_patch.detach(),
-                        trigger_mask=None,
+                        trigger_mask=perturbation_mask,
                         target_label=target_class,
                         source_filter=source_filter,
                         edge_softness=edge_softness,
@@ -2118,7 +2209,7 @@ class AdversarialAttack:
                             test_loader=validation_loader,
                             trigger_box=trigger_boxes,
                             trigger_patch=universal_patch.detach(),
-                            trigger_mask=None,
+                            trigger_mask=perturbation_mask,
                             target_label=target_class,
                             source_filter=source_filter,
                             edge_softness=edge_softness,
@@ -2147,11 +2238,17 @@ class AdversarialAttack:
             learned_patch = best_patch
         else:
             with torch.no_grad():
-                learned_patch = (epsilon* torch.tanh(trigger_delta)).detach().cpu()
+                learned_patch = (epsilon * torch.tanh(trigger_delta))
+                if perturbation_mask is not None:
+                    learned_patch = learned_patch * perturbation_mask
+                learned_patch = learned_patch.detach().cpu()
 
         learned_patch_l1_norm = float(torch.norm(learned_patch.reshape(-1),p=1,).item())
         learned_patch_l2_norm = float(torch.norm(learned_patch.reshape(-1), p=2,).item())
         learned_patch_linf_norm = float(learned_patch.reshape(-1).abs().max().item())
+        learned_mask = perturbation_mask.detach().cpu() if perturbation_mask is not None else None
+        effective_patch = learned_patch * learned_mask if learned_mask is not None else learned_patch
+        effective_linf = float(effective_patch.reshape(-1).abs().max().item())
 
         # Do not leave hooks alive after optimization; later inference would
         # otherwise retain feature maps that no caller consumes.
@@ -2159,7 +2256,7 @@ class AdversarialAttack:
 
         return {
             "patch": learned_patch,
-            "mask": None,
+            "mask": learned_mask,
             "history": history,
             "trigger_box": trigger_boxes[0],
             "trigger_boxes": trigger_boxes,
@@ -2168,12 +2265,12 @@ class AdversarialAttack:
             "patch_update_method": "psp_uap",
             "how_to_attach": how_to_attach,
             "epsilon": learned_patch_linf_norm,
-            "effective_epsilon": learned_patch_linf_norm,
+            "effective_epsilon": effective_linf,
             "patch_norms": {
                 "l1": learned_patch_l1_norm,
                 "l2": learned_patch_l2_norm,
                 "linf": learned_patch_linf_norm,
-                "effective_linf": learned_patch_linf_norm,
+                "effective_linf": effective_linf,
             },
             "softness": {
                 "initial_edge_softness": float(edge_softness),
@@ -2185,6 +2282,7 @@ class AdversarialAttack:
             },
             "ensemble": self._ensemble_metadata(),
             "trigger_previews": preview_records,
+            "perturbation_mask": perturbation_mask_metadata or {},
             "selection": ("best_targeted_attack_success_rate"),
             "selected_step": int(best_step or steps),
             "best_validation_asr": (None if validation_loader is None else float(best_val_asr)),
@@ -3648,6 +3746,35 @@ class AdversarialAttack:
             'l2': float(torch.linalg.vector_norm(flat_delta, ord=2).item()),
             'linf': float(flat_delta.abs().max().item()),
         }
+
+    @staticmethod
+    def _prepare_perturbation_mask(mask, box_count, channels, height, width, device, dtype):
+        """Validate and expand a binary trigger-box mask to NCHW."""
+        prepared = torch.as_tensor(mask, device=device, dtype=dtype)
+        if prepared.ndim == 2:
+            prepared = prepared.unsqueeze(0).unsqueeze(0)
+        elif prepared.ndim == 3:
+            prepared = prepared.unsqueeze(0)
+        if prepared.ndim != 4:
+            raise ValueError('perturbation_mask must be HW, CHW, or NCHW tensor-like.')
+        if tuple(prepared.shape[-2:]) != (int(height), int(width)):
+            raise ValueError(
+                'perturbation_mask spatial dimensions must match the trigger box: '
+                f'expected {(int(height), int(width))}, got {tuple(prepared.shape[-2:])}.'
+            )
+        if prepared.shape[0] == 1 and int(box_count) > 1:
+            prepared = prepared.expand(int(box_count), -1, -1, -1)
+        elif prepared.shape[0] != int(box_count):
+            raise ValueError(
+                'perturbation_mask batch dimension must be 1 or match the number of trigger boxes.'
+            )
+        if prepared.shape[1] == 1:
+            prepared = prepared.expand(-1, int(channels), -1, -1)
+        elif prepared.shape[1] != int(channels):
+            raise ValueError(
+                'perturbation_mask channel dimension must be 1 or match the input channels.'
+            )
+        return (prepared > 0).to(dtype=dtype).clone()
 
     @staticmethod
     def _load_perturbation_mask(mask_path, image_width, image_height, trigger_box,

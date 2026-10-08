@@ -39,6 +39,7 @@ class Attck(AdversarialAttack):
                             patch_update_method,
                             epsilon,
                             bandwidth,
+                            perturbation_mask_path=None,
                             checkpoint_interval=None,
                             checkpoint_path=None):
 
@@ -90,7 +91,8 @@ class Attck(AdversarialAttack):
             randomize_training_location=False,
             enable_compression_phase=False,
             how_to_attach=how_to_attach,
-            bandwidth=bandwidth)
+            bandwidth=bandwidth,
+            perturbation_mask_path=perturbation_mask_path)
 
     def learn_image_specific_patch(self,
                                 dataset,

@@ -73,7 +73,7 @@ def build_parser():
         '--perturbation-mask-path',
         default=None,
         help=(
-            'Binary spatial mask for image-specific attacks. Nonzero pixels allow perturbation; '
+            'Binary spatial mask for universal or image-specific attacks. Nonzero pixels allow perturbation; '
             'zero pixels are protected. The mask is resized to --image-size with nearest-neighbor '
             'interpolation.'
         ),
@@ -113,8 +113,6 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.perturbation_mask_path and args.attack_scope != 'image_specific':
-        parser.error('--perturbation-mask-path currently requires --attack-scope image_specific.')
     allowed_methods = (
         IMAGE_SPECIFIC_ATTACK_METHODS
         if args.attack_scope == 'image_specific'
@@ -284,7 +282,8 @@ def main(argv=None):
                                             patch_count=patch_count,
                                             patch_update_method=patch_update_method,
                                             epsilon=epsilon,
-                                            bandwidth=bandwidth)
+                                            bandwidth=bandwidth,
+                                            perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
         print(f'saved_adversarial_trigger: {saved_trigger_path}')
@@ -335,6 +334,7 @@ def main(argv=None):
         num_examples=args.visualization_examples,
         trigger_box=learned_trigger['trigger_boxes'],
         trigger_delta=learned_trigger['patch'],
+        trigger_mask=learned_trigger.get('mask'),
         model=classification.model,
         target_label=args.target_label,
         source_filter=args.source_filter,
