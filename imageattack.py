@@ -216,6 +216,9 @@ def main(argv=None):
                     eot_samples=args.eot_samples,
                     output_dir=trigger_preview_dir,
                     split_name=split_name,
+                    visualization_examples=(
+                        args.visualization_examples if split_name == 'test' else 0
+                    ),
                 )
                 print(f'image_specific_{split_name}_generation: {summary}')
 

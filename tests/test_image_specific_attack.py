@@ -33,6 +33,7 @@ def test_image_specific_generation_saves_independent_artifacts(tmp_path):
         patch_update_method='pgd',
         output_dir=tmp_path,
         split_name='validation',
+        visualization_examples=1,
         log_interval=0,
     )
 
@@ -41,6 +42,7 @@ def test_image_specific_generation_saves_independent_artifacts(tmp_path):
     assert summary['successful_attacks'] == 1
     assert summary['skipped_samples'] == 1
     assert summary['artifacts_saved'] == 1
+    assert summary['visualizations_saved'] == 1
 
     manifest_path = tmp_path / 'validation' / 'manifest.jsonl'
     records = [json.loads(line) for line in manifest_path.read_text().splitlines()]
@@ -53,6 +55,7 @@ def test_image_specific_generation_saves_independent_artifacts(tmp_path):
     assert attacked['linf'] <= 0.5 + 1e-6
     assert not torch.equal(attacked['adversarial_image'], attacked['original_image'])
     assert len(list((tmp_path / 'validation' / 'artifacts').glob('*.pt'))) == 1
+    assert len(list((tmp_path / 'validation' / 'visualizations').glob('*.png'))) == 4
 
     metrics = attack.evaluate_image_specific_artifacts(
         tmp_path, {'source': attack.model}, split_name='validation'
