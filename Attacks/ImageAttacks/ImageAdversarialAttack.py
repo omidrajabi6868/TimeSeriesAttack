@@ -3620,6 +3620,63 @@ class AdversarialAttack:
             'linf': float(flat_delta.abs().max().item()),
         }
 
+    def _save_image_specific_visualizations(self, split_dir, records, max_examples):
+        """Save PNG previews, preferring successful image-specific attacks."""
+        max_examples = max(0, int(max_examples))
+        if max_examples == 0:
+            return []
+
+        eligible = [record for record in records if record['eligible'] and record.get('artifact')]
+        selected = (
+            [record for record in eligible if record['success']]
+            + [record for record in eligible if not record['success']]
+        )[:max_examples]
+        if not selected:
+            return []
+
+        output_dir = Path(split_dir) / 'visualizations'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for record in selected:
+            payload = torch.load(Path(split_dir) / record['artifact'], map_location='cpu')
+            stem = Path(record['artifact']).stem
+            original = self._image_tensor_to_pil(payload['original_image'])
+            adversarial = self._image_tensor_to_pil(payload['adversarial_image'])
+
+            perturbation = payload['perturbation'].detach().cpu().float()
+            display_scale = max(
+                float(payload.get('epsilon', 0.0)),
+                float(perturbation.abs().max().item()),
+                1e-12,
+            )
+            perturbation_preview = torch.clamp(perturbation / display_scale, -1.0, 1.0)
+            perturbation_image = self._image_tensor_to_pil(
+                perturbation_preview, scale_from_signed=True
+            )
+
+            original_path = output_dir / f'{stem}_original.png'
+            adversarial_path = output_dir / f'{stem}_adversarial.png'
+            perturbation_path = output_dir / f'{stem}_perturbation.png'
+            comparison_path = output_dir / f'{stem}_comparison.png'
+            original.save(original_path)
+            adversarial.save(adversarial_path)
+            perturbation_image.save(perturbation_path)
+
+            comparison = Image.new('RGB', (original.width * 3, original.height))
+            comparison.paste(original, (0, 0))
+            comparison.paste(adversarial, (original.width, 0))
+            comparison.paste(perturbation_image, (original.width * 2, 0))
+            comparison.save(comparison_path)
+            saved.append({
+                'sample_id': record['sample_id'],
+                'success': bool(record['success']),
+                'original': str(original_path),
+                'adversarial': str(adversarial_path),
+                'perturbation': str(perturbation_path),
+                'comparison': str(comparison_path),
+            })
+        return saved
+
     def learn_image_specific_trigger(self,
                                      data_loader,
                                      trigger_box,
@@ -3641,6 +3698,7 @@ class AdversarialAttack:
                                      how_to_attach='blend',
                                      output_dir='backups/image_specific',
                                      split_name='test',
+                                     visualization_examples=0,
                                      **_unused):
         """Generate and save one independently optimized attack per sample."""
         split_dir = Path(output_dir) / split_name
@@ -3723,6 +3781,9 @@ class AdversarialAttack:
 
         eligible = [record for record in records if record['eligible']]
         successful = [record for record in eligible if record['success']]
+        visualizations = self._save_image_specific_visualizations(
+            split_dir, records, visualization_examples
+        )
         summary = {
             'split': split_name,
             'samples_seen': len(records),
@@ -3730,6 +3791,8 @@ class AdversarialAttack:
             'successful_attacks': len(successful),
             'skipped_samples': len(records) - len(eligible),
             'artifacts_saved': len(eligible),
+            'visualizations_saved': len(visualizations),
+            'visualization_records': visualizations,
             'source_attack_success_rate': 100.0 * len(successful) / len(eligible) if eligible else 0.0,
             'mean_steps': float(np.mean([record['steps_used'] for record in eligible])) if eligible else 0.0,
             'mean_l1': float(np.mean([record['l1'] for record in eligible])) if eligible else 0.0,

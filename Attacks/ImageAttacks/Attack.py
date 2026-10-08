@@ -113,6 +113,7 @@ class Attck(AdversarialAttack):
                                 eot_samples,
                                 output_dir,
                                 split_name,
+                                visualization_examples=0,
                                 checkpoint_interval=None,
                                 checkpoint_path=None):
                                 
@@ -150,4 +151,5 @@ class Attck(AdversarialAttack):
             log_interval=5,
             how_to_attach=how_to_attach,
             output_dir=output_dir,
-            split_name=split_name)
+            split_name=split_name,
+            visualization_examples=visualization_examples)
