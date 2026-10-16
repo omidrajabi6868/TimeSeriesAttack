@@ -33,11 +33,16 @@ def _default_output_dir(args):
     else:
         optimization_dir = Path('single_model') / args.model_name
     scope_name = '_image_specific' if args.attack_scope == 'image_specific' else ''
+    spatial_mask_name = (
+        f'_spatial_mask_{Path(args.perturbation_mask_path).stem}'
+        if args.perturbation_mask_path else ''
+    )
     run_name = (
         f'{args.task}{scope_name}_{args.patch_update_method}_{args.how_to_attach}'
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
+        f'{spatial_mask_name}'
     )
     return str(Path('backups') / optimization_dir / run_name)
 
@@ -64,6 +69,15 @@ def build_parser():
     parser.add_argument('--steps', type=int, default=100)
     parser.add_argument('--learning-rate', type=float, default=0.001)
     parser.add_argument('--optimize-mask', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        '--perturbation-mask-path',
+        default=None,
+        help=(
+            'Binary spatial mask for universal or image-specific attacks. Nonzero pixels allow perturbation; '
+            'zero pixels are protected. The mask is resized to --image-size with nearest-neighbor '
+            'interpolation.'
+        ),
+    )
     parser.add_argument('--mask-learning-rate', type=float, default=0.001)
     parser.add_argument('--mask-l1-weight', type=float, default=0.0)
     parser.add_argument('--patch-l2-weight', type=float, default=0.0)
@@ -219,6 +233,7 @@ def main(argv=None):
                     visualization_examples=(
                         args.visualization_examples if split_name == 'test' else 0
                     ),
+                    perturbation_mask_path=args.perturbation_mask_path,
                 )
                 print(f'image_specific_{split_name}_generation: {summary}')
 
@@ -267,7 +282,8 @@ def main(argv=None):
                                             patch_count=patch_count,
                                             patch_update_method=patch_update_method,
                                             epsilon=epsilon,
-                                            bandwidth=bandwidth)
+                                            bandwidth=bandwidth,
+                                            perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
         print(f'saved_adversarial_trigger: {saved_trigger_path}')
@@ -318,6 +334,7 @@ def main(argv=None):
         num_examples=args.visualization_examples,
         trigger_box=learned_trigger['trigger_boxes'],
         trigger_delta=learned_trigger['patch'],
+        trigger_mask=learned_trigger.get('mask'),
         model=classification.model,
         target_label=args.target_label,
         source_filter=args.source_filter,

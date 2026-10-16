@@ -338,6 +338,7 @@ class ImageDataset(TorchDataset):
                                     num_examples=4,
                                     trigger_box=None,
                                     trigger_delta=None,
+                                    trigger_mask=None,
                                     model=None,
                                     target_label=None,
                                     source_filter='bad',
@@ -370,6 +371,7 @@ class ImageDataset(TorchDataset):
                     model=model,
                     trigger_box=selected_box,
                     trigger_delta=trigger_delta,
+                    trigger_mask=trigger_mask,
                     target_label=float(target_label),
                     max_examples=num_examples,
                 )
@@ -380,6 +382,7 @@ class ImageDataset(TorchDataset):
                     model=model,
                     trigger_box=selected_box,
                     trigger_delta=trigger_delta,
+                    trigger_mask=trigger_mask,
                     target_label=float(target_label),
                     max_examples=num_examples,
                 )
@@ -390,6 +393,7 @@ class ImageDataset(TorchDataset):
                     model=model,
                     trigger_box=selected_box,
                     trigger_delta=trigger_delta,
+                    trigger_mask=trigger_mask,
                     target_label=float(target_label),
                     max_examples=num_examples,
                 )
@@ -398,6 +402,7 @@ class ImageDataset(TorchDataset):
                     model=model,
                     trigger_box=selected_box,
                     trigger_delta=trigger_delta,
+                    trigger_mask=trigger_mask,
                     target_label=float(target_label),
                     max_examples=num_examples,
                 )
@@ -417,7 +422,9 @@ class ImageDataset(TorchDataset):
                 self._save_rgb_image(boxed, boxed_path)
 
                 if trigger_delta is not None:
-                    triggered = self._apply_delta_trigger(image_np, selected_box, trigger_delta)
+                    triggered = self._apply_delta_trigger(
+                        image_np, selected_box, trigger_delta, trigger_mask=trigger_mask
+                    )
                     triggered_path = os.path.join(output_dir, f'{group_name}_{sample_pos}_triggered.png')
                     self._save_rgb_image(triggered, triggered_path)
 
@@ -426,6 +433,7 @@ class ImageDataset(TorchDataset):
                                           model,
                                           trigger_box,
                                           trigger_delta,
+                                          trigger_mask,
                                           target_label,
                                           max_examples):
         successful_indices = []
@@ -435,7 +443,9 @@ class ImageDataset(TorchDataset):
             if clean_pred == int(target_label):
                 continue
 
-            poisoned_np = self._apply_delta_trigger(image_np, trigger_box, trigger_delta)
+            poisoned_np = self._apply_delta_trigger(
+                image_np, trigger_box, trigger_delta, trigger_mask=trigger_mask
+            )
             poisoned_pred = self._predict_binary(model, poisoned_np)
             if poisoned_pred == int(target_label):
                 successful_indices.append(int(idx))
@@ -495,7 +505,7 @@ class ImageDataset(TorchDataset):
         return boxed
 
     @staticmethod
-    def _apply_delta_trigger(image_np, trigger_box, trigger_delta):
+    def _apply_delta_trigger(image_np, trigger_box, trigger_delta, trigger_mask=None):
         boxes = trigger_box if isinstance(trigger_box, list) else [trigger_box]
 
         if hasattr(trigger_delta, 'detach'):
@@ -506,6 +516,17 @@ class ImageDataset(TorchDataset):
             delta_bank = trigger_delta
         else:
             raise ValueError('trigger_delta must have shape (C, H, W) or (N, C, H, W).')
+
+        mask_bank = None
+        if trigger_mask is not None:
+            if hasattr(trigger_mask, 'detach'):
+                trigger_mask = trigger_mask.detach().cpu().numpy()
+            if trigger_mask.ndim == 3:
+                mask_bank = np.expand_dims(trigger_mask, axis=0)
+            elif trigger_mask.ndim == 4:
+                mask_bank = trigger_mask
+            else:
+                raise ValueError('trigger_mask must have shape (C, H, W) or (N, C, H, W).')
 
         patched = image_np.copy()
         for idx, box in enumerate(boxes):
@@ -520,6 +541,17 @@ class ImageDataset(TorchDataset):
                 delta_hwc = np.transpose(delta_bank[0], (1, 2, 0))
             else:
                 raise ValueError('trigger_delta first dimension must be 1 or match number of trigger boxes.')
+
+            if mask_bank is not None:
+                if mask_bank.shape[0] == len(boxes):
+                    mask_hwc = np.transpose(mask_bank[idx], (1, 2, 0))
+                elif mask_bank.shape[0] == 1:
+                    mask_hwc = np.transpose(mask_bank[0], (1, 2, 0))
+                else:
+                    raise ValueError(
+                        'trigger_mask first dimension must be 1 or match number of trigger boxes.'
+                    )
+                delta_hwc = delta_hwc * np.clip(mask_hwc, 0.0, 1.0)
 
             patched[y:y + height, x:x + width, :] = np.clip(
                 patched[y:y + height, x:x + width, :] + delta_hwc,

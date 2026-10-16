@@ -140,6 +140,7 @@ def estimate_robustness(
     edge_softness,
     how_to_attach,
     max_batch_size=None,
+    trigger_mask=None,
 ):
     """Estimate how often transformed UAP neighbors remain successful."""
     robust_successes = 0
@@ -156,7 +157,7 @@ def estimate_robustness(
                     input_batch,
                     trigger_boxes,
                     trigger_patch=transformed_patch,
-                    trigger_mask=None,
+                    trigger_mask=trigger_mask,
                     edge_softness=edge_softness,
                     how_to_attach=how_to_attach,
                 )
