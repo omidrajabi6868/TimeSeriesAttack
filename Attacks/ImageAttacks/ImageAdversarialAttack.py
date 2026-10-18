@@ -418,7 +418,7 @@ class AdversarialAttack:
                                 enable_compression_phase=True,
                                 how_to_attach='blend',
                                 bandwidth=60,
-                                psp_num_copies=128,
+                                psp_num_copies=64,
                                 perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
