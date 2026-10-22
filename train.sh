@@ -26,21 +26,22 @@ crun python imageattack.py \
   --training \
   --image-size 608x256 \
   --batch-size 32 \
-  --model-name SwinT \
+  --model-name InceptionV3 \
   --patch-size 608x256 \
   --patch-count 1 \
-  --patch-update-method hp \
+  --patch-update-method psp_uap \
   --how-to-attach blend \
-  --steps 50 \
-  --learning-rate 0.05 \
-  --epsilon 0.03 \
+  --steps 1000 \
+  --learning-rate 0.001 \
+  --epsilon 0.05 \
   --bandwidth 60 \
   --target-label 1 \
   --source-filter bad \
   --no-optimize-mask \
   --no-multimodel-optimization \
   --aggregation mean \
-  --attack-scope image_specific 
-  # --output-dir /home/oraja001/Jlab/TimeSeriesAttack/backups/single_model/InceptionV3/perturbation_attack_hp_uap_blend_count_1_size_608by256_epsilon_0.03_lr_0.001_mlr_0.001_mask_weight_0.0_patch_weight_0.0/
+  --attack-scope universal \
+  --black-box-models AlexNet ResNet34 MobileNetV3Small SwinT InceptionV3 \
+  # --output-dir /home/oraja001/Jlab/TimeSeriesAttack/backups/single_model/SwinT/perturbation_attack_image_specific_robust_blend_count_1_size_608by256_epsilon_0.03_lr_0.05_mlr_0.001_mask_weight_0.0_patch_weight_0.0/
   # --perturbation-mask-path /home/oraja001/Jlab/TimeSeriesAttack/assets/heatmap_binary_mask.png \
-  # --black-box-models ResNet34 MobileNetV3Small SwinT InceptionV3 
+ 

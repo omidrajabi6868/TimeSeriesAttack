@@ -224,7 +224,7 @@ class AdversarialAttack:
                     feature_extractor=extractor,
                     p_active=True,
                     re_weight=True,
-                    maximize_activations=False,
+                    maximize_activations=True,
                 )
 
             # Preserve the historical single-model attributes for callers that
