@@ -84,6 +84,12 @@ def build_parser():
     parser.add_argument('--patch-update-method', choices=PATCH_UPDATE_METHODS, default='adam')
     parser.add_argument('--epsilon', type=float, default=0.03)
     parser.add_argument('--bandwidth', type=int, default=60)
+    parser.add_argument(
+        '--psp-num-copies',
+        type=int,
+        default=10,
+        help='Number of pseudo-semantic samples per PSP-UAP optimization step.',
+    )
     parser.add_argument('--eot-samples', type=int, default=4,
                         help='Number of transformations per step for image-specific robust attacks.')
     parser.add_argument('--target-label', type=float, default=1.0)
@@ -283,6 +289,7 @@ def main(argv=None):
                                             patch_update_method=patch_update_method,
                                             epsilon=epsilon,
                                             bandwidth=bandwidth,
+                                            psp_num_copies=args.psp_num_copies,
                                             perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')

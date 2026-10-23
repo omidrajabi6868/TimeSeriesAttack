@@ -8,6 +8,17 @@ from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler
 
 
 class PSPUAPTests(unittest.TestCase):
+    def test_attack_builds_activation_maximizing_psp_objective(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        model = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU(), nn.Flatten(), nn.Linear(144, 1))
+        attack = AdversarialAttack(model, device='cpu', use_multi_gpu=False)
+
+        attack._build_cost_function('psp_uap')
+
+        self.assertTrue(attack.cost_function.maximize_activations)
+        attack._remove_feature_extractor()
+
     def test_objective_supports_both_activation_directions(self):
         minimizing_feature = torch.tensor([[[[2.0]]]], requires_grad=True)
         maximizing_feature = torch.tensor([[[[2.0]]]], requires_grad=True)

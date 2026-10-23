@@ -224,6 +224,9 @@ class AdversarialAttack:
                     feature_extractor=extractor,
                     p_active=True,
                     re_weight=True,
+                    # PSP-UAP minimizes the negative log activation energy.
+                    # Adam therefore needs the negative objective so its
+                    # gradient-descent update maximizes feature activations.
                     maximize_activations=True,
                 )
 
@@ -418,7 +421,7 @@ class AdversarialAttack:
                                 enable_compression_phase=True,
                                 how_to_attach='blend',
                                 bandwidth=60,
-                                psp_num_copies=64,
+                                psp_num_copies=10,
                                 perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
@@ -2104,6 +2107,7 @@ class AdversarialAttack:
         best_step = 0
 
         best_target_asr = float("-inf")
+        best_psp_loss = float("inf")
         best_val_asr = float("-inf")
         best_val_loss = float("inf")
 
@@ -2200,37 +2204,44 @@ class AdversarialAttack:
                     )
                 )
 
-                val_metrics = None
+                # PSP has no dataset training pass, so the target metrics above
+                # are already its validation metrics. Avoid evaluating the
+                # complete validation loader twice at every logging interval.
+                val_metrics = target_metrics
 
+                # PSP-UAP is feature based. For this binary 0 -> 1 attack,
+                # evaluate and select the perturbation only on clean-correct
+                # source samples. Any prediction change in that population is
+                # necessarily a change to the target class.
+                target_asr = float(
+                    target_metrics["conditional_attack_success_rate"]
+                )
+                prediction_change_rate = float(
+                    target_metrics["prediction_change_rate"]
+                )
+                step_history["conditional_target_asr"] = target_asr
+                step_history["prediction_change_rate"] = prediction_change_rate
 
-                if validation_loader is not None:
-                    val_metrics = (
-                        self.evaluate_attack_success(
-                            test_loader=validation_loader,
-                            trigger_box=trigger_boxes,
-                            trigger_patch=universal_patch.detach(),
-                            trigger_mask=perturbation_mask,
-                            target_label=target_class,
-                            source_filter=source_filter,
-                            edge_softness=edge_softness,
-                            how_to_attach=how_to_attach,
-                        )
+                if (
+                    target_asr > best_target_asr
+                    or (
+                        target_asr == best_target_asr
+                        and step_loss < best_psp_loss
                     )
-
-                target_asr = float(target_metrics["attack_success_rate"])
-
-                if target_asr > best_target_asr:
+                ):
                     best_target_asr = target_asr
+                    best_psp_loss = step_loss
                     best_patch = (universal_patch.detach().cpu().clone())
                     best_step = step_idx + 1
                     if val_metrics is not None:
                         best_val_asr = float(
-                            val_metrics["attack_success_rate"])
+                            val_metrics["conditional_attack_success_rate"])
                 print(
                     "[Targeted PSP-UAP] "
                     f"step={step_idx + 1} "
                     f"loss={step_loss:.6f} "
-                    f"target_asr={target_asr:.4f} "
+                    f"conditional_target_asr={target_asr:.4f} "
+                    f"prediction_change_rate={prediction_change_rate:.4f} "
                     f"linf={patch_linf:.6f}"
                 )
 
@@ -2283,7 +2294,7 @@ class AdversarialAttack:
             "ensemble": self._ensemble_metadata(),
             "trigger_previews": preview_records,
             "perturbation_mask": perturbation_mask_metadata or {},
-            "selection": ("best_targeted_attack_success_rate"),
+            "selection": ("best_conditional_targeted_attack_success_rate"),
             "selected_step": int(best_step or steps),
             "best_validation_asr": (None if validation_loader is None else float(best_val_asr)),
             "smallest_success_validation_loss": None,
