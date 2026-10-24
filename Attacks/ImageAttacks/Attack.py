@@ -40,6 +40,9 @@ class Attck(AdversarialAttack):
                             epsilon,
                             bandwidth,
                             psp_num_copies=10,
+                            psp_feature_weight=0.001,
+                            psp_target_weight=1.0,
+                            psp_prior='auto',
                             perturbation_mask_path=None,
                             checkpoint_interval=None,
                             checkpoint_path=None):
@@ -94,6 +97,9 @@ class Attck(AdversarialAttack):
             how_to_attach=how_to_attach,
             bandwidth=bandwidth,
             psp_num_copies=psp_num_copies,
+            psp_feature_weight=psp_feature_weight,
+            psp_target_weight=psp_target_weight,
+            psp_prior=psp_prior,
             perturbation_mask_path=perturbation_mask_path)
 
     def learn_image_specific_patch(self,

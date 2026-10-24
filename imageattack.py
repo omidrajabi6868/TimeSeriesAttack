@@ -5,7 +5,7 @@ from Attacks.ImageAttacks.Aggregation import available_aggregators
 
 UNIVERSAL_ATTACK_METHODS = (
     'deepfool_uap', 'mi_fgsm', 'pgd_sign', 'adam', 'gd_uap', 'gap_uap',
-    'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap',
+    'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap', 'targeted_psp_uap',
 )
 IMAGE_SPECIFIC_ATTACK_METHODS = (
     'fgsm', 'ifgsm', 'mi_fgsm', 'pgd', 'adam', 'deepfool', 'robust', 'hp',
@@ -89,6 +89,18 @@ def build_parser():
         type=int,
         default=10,
         help='Number of pseudo-semantic samples per PSP-UAP optimization step.',
+    )
+    parser.add_argument(
+        '--psp-feature-weight', type=float, default=0.001,
+        help='Weight of the PSP feature loss in targeted_psp_uap.',
+    )
+    parser.add_argument(
+        '--psp-target-weight', type=float, default=1.0,
+        help='Weight of the supervised target-label loss in targeted_psp_uap.',
+    )
+    parser.add_argument(
+        '--psp-prior', choices=('auto', 'gauss', 'jigsaw'), default='auto',
+        help='Pseudo-semantic prior. auto uses the published Inception/other-model convention.',
     )
     parser.add_argument('--eot-samples', type=int, default=4,
                         help='Number of transformations per step for image-specific robust attacks.')
@@ -290,6 +302,9 @@ def main(argv=None):
                                             epsilon=epsilon,
                                             bandwidth=bandwidth,
                                             psp_num_copies=args.psp_num_copies,
+                                            psp_feature_weight=args.psp_feature_weight,
+                                            psp_target_weight=args.psp_target_weight,
+                                            psp_prior=args.psp_prior,
                                             perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
@@ -335,6 +350,35 @@ def main(argv=None):
         **selected_trigger_eval_kwargs,
     )
     print(f'final_test_adversarial_eval: {learned_adversarial_eval}')
+
+    # Transfer evaluation is deliberately separate from optimization. The
+    # saved perturbation is applied unchanged to each black-box classifier and
+    # scored with the same conditional targeted ASR used for the white box.
+    if args.black_box_models:
+        black_box_classification = ClassificationBase(
+            model_name=args.black_box_models[0],
+            optimizer_name=args.optimizer_name,
+            checkpoint_dir=args.checkpoint_dir,
+            multimodel_load=True,
+            model_names=args.black_box_models,
+            gpu_ids=args.gpu_ids,
+        )
+        black_box_classification.load_checkpoints(args.checkpoint_dir)
+        for black_box_name, black_box_model in black_box_classification.models.items():
+            black_box_attack = AdversarialAttack(
+                model=black_box_model,
+                gpu_ids=args.gpu_ids,
+                use_multi_gpu=False,
+            )
+            for split_name, split_loader in (('validation', val_loader), ('test', test_loader)):
+                black_box_metrics = black_box_attack.evaluate_attack_success(
+                    test_loader=split_loader,
+                    **selected_trigger_eval_kwargs,
+                )
+                print(
+                    f'black_box_{split_name}_adversarial_eval[{black_box_name}]: '
+                    f'{black_box_metrics}'
+                )
 
     dataset.save_trigger_visualizations(
         output_dir=f'{trigger_preview_dir}/trigger_visualization',
