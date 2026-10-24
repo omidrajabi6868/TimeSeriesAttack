@@ -4,7 +4,7 @@
 #SBATCH --error=logs/%j_out.txt
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --partition=gpu
+#SBATCH --partition=high-gpu-mem
 #SBATCH --gres=gpu:2
 #SBATCH --nodes=1
 
@@ -32,10 +32,11 @@ crun python imageattack.py \
   --patch-update-method psp_uap \
   --how-to-attach blend \
   --steps 1000 \
-  --learning-rate 0.001 \
+  --learning-rate 0.01 \
   --epsilon 0.05 \
   --bandwidth 60 \
   --target-label 1 \
+  --psp-num-copies 10 \
   --source-filter bad \
   --no-optimize-mask \
   --no-multimodel-optimization \

@@ -82,7 +82,7 @@ class Attck(AdversarialAttack):
             patch_update_method=patch_update_method,
             epsilon=epsilon,
             log_interval=5,
-            trigger_preview_interval=10,
+            trigger_preview_interval=100,
             trigger_preview_dir=trigger_preview_dir,
             trigger_preview_loader=trigger_preview_loader,
             trigger_preview_max_images=trigger_preview_max_images,
