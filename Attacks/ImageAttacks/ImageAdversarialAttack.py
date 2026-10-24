@@ -2,10 +2,11 @@ import json
 import math
 import time
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from Network.ClassificationMetrics import binary_classification_metrics
 from PIL import Image
 from typing import Callable, Optional, Sequence
@@ -111,6 +112,32 @@ class AdversarialAttack:
         for _, model in self._model_items():
             model.zero_grad(set_to_none=True)
 
+    @staticmethod
+    def _tensor_logits(output):
+        """Return logits from plain tensors and torchvision named outputs."""
+        return output.logits if hasattr(output, 'logits') else output
+
+    @contextmanager
+    def _suspend_feature_capture(self):
+        """Suspend every active hook during classification-only forwards."""
+        extractors = getattr(self, 'feature_extractors', None) or {}
+        single = getattr(self, 'feature_extractor', None)
+        with ExitStack() as stack:
+            seen = set()
+            for extractor in ([single] if single is not None else []) + list(extractors.values()):
+                if id(extractor) not in seen:
+                    stack.enter_context(extractor.suspend_capture())
+                    seen.add(id(extractor))
+            yield
+
+    def _targeted_binary_loss(self, inputs, target_label):
+        losses = []
+        for _, model in self._model_items():
+            logits = self._tensor_logits(model(inputs.to(self._module_device(model))))
+            targets = torch.full_like(logits, float(target_label))
+            losses.append(F.binary_cross_entropy_with_logits(logits, targets))
+        return aggregate(losses, self.aggregation, self.model_weights)
+
     def _psp_loss(self, semantic_prior, semantic_delta):
         losses = []
         for name, model in self._model_items():
@@ -166,7 +193,7 @@ class AdversarialAttack:
         self.feature_extractors = None
         self.psp_objectives = None
 
-    def _build_cost_function(self, name):
+    def _build_cost_function(self, name, psp_p_rate=None, psp_temperature=None):
         self._remove_feature_extractor()
         if name == 'classification':
             self.cost_function = ClassificationObjective()
@@ -210,10 +237,13 @@ class AdversarialAttack:
                 exclude_last_layers=1,
             )
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
-        elif name == 'psp_uap':
+        elif name in ('psp_uap', 'targeted_psp_uap'):
             self.feature_extractors = {}
             self.psp_objectives = {}
             for model_name, model in self._model_items():
+                base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+                model_identity = f'{model_name} {type(base_model).__name__}'.lower()
+                is_inception = 'inception' in model_identity
                 extractor = FeatureExtractor(
                     model,
                     n_last_layers=0,
@@ -223,7 +253,12 @@ class AdversarialAttack:
                 self.psp_objectives[model_name] = PSPUAPObjective(
                     feature_extractor=extractor,
                     p_active=True,
+                    p_rate=float(psp_p_rate) if psp_p_rate is not None else (0.2 if is_inception else 1.0),
                     re_weight=True,
+                    temperature=(
+                        float(psp_temperature)
+                        if psp_temperature is not None else (3.0 if is_inception else 1.0)
+                    ),
                     # PSP-UAP minimizes the negative log activation energy.
                     # Adam therefore needs the negative objective so its
                     # gradient-descent update maximizes feature activations.
@@ -302,6 +337,7 @@ class AdversarialAttack:
                 'trigger_previews': trigger.get('trigger_previews', []),
                 'ensemble': trigger.get('ensemble', {}),
                 'perturbation_mask': trigger.get('perturbation_mask', {}),
+                'psp_uap': trigger.get('psp_uap', {}),
                 'history_path': str(history_path),
             }
         temporary_output_path = output_path.with_name(f'.{output_path.name}.tmp')
@@ -320,6 +356,7 @@ class AdversarialAttack:
             'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
             'trigger_previews': trigger.get('trigger_previews', []),
             'ensemble': trigger.get('ensemble', {}),
+            'psp_uap': trigger.get('psp_uap', {}),
             'patch_path': str(output_path),
         }
         temporary_history_path = history_path.with_name(f'.{history_path.name}.tmp')
@@ -372,6 +409,7 @@ class AdversarialAttack:
             'trigger_previews': trigger_payload.get('trigger_previews', []),
             'ensemble': trigger_payload.get('ensemble', {}),
             'perturbation_mask': trigger_payload.get('perturbation_mask', {}),
+            'psp_uap': trigger_payload.get('psp_uap', {}),
             'history': history,
             'path': str(trigger_path),
             'history_path': resolved_history_path,
@@ -422,6 +460,9 @@ class AdversarialAttack:
                                 how_to_attach='blend',
                                 bandwidth=60,
                                 psp_num_copies=10,
+                                psp_feature_weight=0.001,
+                                psp_target_weight=1.0,
+                                psp_prior='auto',
                                 perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
@@ -555,7 +596,7 @@ class AdversarialAttack:
         elif patch_update_method in ('psp', 'psp_uap'):
             patch_update_method = 'psp_uap'
 
-        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'}
+        valid_patch_update_methods = {'adam', 'pgd_sign', 'momentum_sign', 'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap', 'targeted_psp_uap'}
         if patch_update_method not in valid_patch_update_methods:
             raise ValueError(
                 'patch_update_method must be one of: '
@@ -565,7 +606,7 @@ class AdversarialAttack:
             raise ValueError(
                 f"Multi-model optimization is not supported for '{patch_update_method}' because it "
                 "uses model-specific features or update rules. Use adam, pgd_sign, momentum_sign, "
-                "gap_uap, hp_uap, robust_uap, or psp_uap."
+                "gap_uap, hp_uap, robust_uap, psp_uap, or targeted_psp_uap."
             )
 
         epsilon = float(epsilon)
@@ -610,7 +651,7 @@ class AdversarialAttack:
             )
 
         patch_optimizer = None
-        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap'):
+        if patch_update_method in ('adam', 'hp_uap', 'fg_uap', 'gd_uap', 'robust_uap', 'psp_uap', 'targeted_psp_uap'):
             patch_optimizer = torch.optim.Adam([trigger_delta], lr=learning_rate)
             if patch_update_method == 'hp_uap':
                 hp_filtering = FourierFilter(mode='high_pass', bandwidth=bandwidth)
@@ -653,8 +694,9 @@ class AdversarialAttack:
                 perturbation_mask_metadata=perturbation_mask_metadata,
             )
 
-        if patch_update_method == 'psp_uap':
+        if patch_update_method in ('psp_uap', 'targeted_psp_uap'):
             return self._learn_psp_uap_trigger(
+                data_loader=data_loader,
                 validation_loader=validation_loader,
                 trigger_boxes=trigger_boxes,
                 trigger_delta=trigger_delta,
@@ -671,6 +713,10 @@ class AdversarialAttack:
                 how_to_attach=how_to_attach,
                 patch_optimizer=patch_optimizer,
                 num_copies=psp_num_copies,
+                attack_mode=patch_update_method,
+                feature_weight=psp_feature_weight,
+                target_weight=psp_target_weight,
+                prior=psp_prior,
                 perturbation_mask=perturbation_mask,
                 perturbation_mask_metadata=perturbation_mask_metadata,
             )
@@ -2033,6 +2079,7 @@ class AdversarialAttack:
         }
 
     def _learn_psp_uap_trigger(self,
+                                data_loader,
                                 validation_loader,
                                 trigger_boxes,
                                 trigger_delta,
@@ -2049,6 +2096,10 @@ class AdversarialAttack:
                                 how_to_attach,
                                 patch_optimizer,
                                 num_copies=10,
+                                attack_mode='psp_uap',
+                                feature_weight=0.001,
+                                target_weight=1.0,
+                                prior='auto',
                                 perturbation_mask=None,
                                 perturbation_mask_metadata=None,
                             ):
@@ -2086,10 +2137,33 @@ class AdversarialAttack:
         if (preview_interval > 0 and preview_output_dir is not None):
             preview_output_dir.mkdir(parents=True, exist_ok=True)
 
+        validation_loader = validation_loader or data_loader
         preview_data_loader = (trigger_preview_loader or validation_loader)
 
-        self._build_cost_function("psp_uap")
-        psp_sampler = PSPTransformSampler(image_size=(height, width), device=self.device)
+        if attack_mode not in {'psp_uap', 'targeted_psp_uap'}:
+            raise ValueError("attack_mode must be 'psp_uap' or 'targeted_psp_uap'.")
+        feature_weight = float(feature_weight)
+        target_weight = float(target_weight)
+        if feature_weight < 0 or target_weight < 0:
+            raise ValueError('PSP loss weights must be non-negative.')
+        if attack_mode == 'targeted_psp_uap' and target_weight == 0:
+            raise ValueError('targeted_psp_uap requires psp_target_weight > 0.')
+        effective_feature_weight = feature_weight if attack_mode == 'targeted_psp_uap' else 1.0
+
+        self._build_cost_function(attack_mode)
+        if prior == 'auto':
+            model_identities = []
+            for model_name, model in self._model_items():
+                base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+                model_identities.append(f'{model_name} {type(base_model).__name__}'.lower())
+            prior = 'jigsaw' if any('inception' in identity for identity in model_identities) else 'gauss'
+        if prior not in {'gauss', 'jigsaw'}:
+            raise ValueError("psp_prior must be one of: 'auto', 'gauss', 'jigsaw'.")
+        psp_sampler = PSPTransformSampler(
+            image_size=(height, width),
+            device=self.device,
+            prior=prior,
+        )
 
         num_copies = int(num_copies)
         if num_copies <= 0:
@@ -2103,20 +2177,30 @@ class AdversarialAttack:
         if not trigger_delta.requires_grad:
             trigger_delta.requires_grad_(True)
 
+        # The published PSP optimizer updates the perturbation directly and
+        # projects it onto the L-infinity ball. A tanh parameterization can
+        # saturate its gradients before the feature objective changes a class.
+        with torch.no_grad():
+            trigger_delta.uniform_(-epsilon, epsilon)
+            if perturbation_mask is not None:
+                trigger_delta.mul_(perturbation_mask)
+
+        training_iterator = iter(data_loader) if attack_mode == 'targeted_psp_uap' else None
+
         best_patch = None
         best_step = 0
 
         best_target_asr = float("-inf")
-        best_psp_loss = float("inf")
+        best_target_score = float("-inf")
         best_val_asr = float("-inf")
-        best_val_loss = float("inf")
+        saturation_rescales = 0
 
         for step_idx in range(int(steps)):
 
             step_losses = []
             step_samples = 0
 
-            universal_patch = (epsilon * torch.tanh(trigger_delta))
+            universal_patch = trigger_delta.clamp(-epsilon, epsilon)
             if perturbation_mask is not None:
                 universal_patch = universal_patch * perturbation_mask
 
@@ -2134,17 +2218,74 @@ class AdversarialAttack:
             patch_optimizer.zero_grad(set_to_none=True)
             self._zero_model_grad()
 
-            batch_loss = self._psp_loss(
+            psp_loss = self._psp_loss(
                 semantic_prior=semantic_prior,
                 semantic_delta=semantic_delta,
             )
+
+            targeted_loss = torch.zeros((), device=psp_loss.device)
+            targeted_samples = 0
+            if attack_mode == 'targeted_psp_uap':
+                try:
+                    inputs, targets = next(training_iterator)
+                except StopIteration:
+                    training_iterator = iter(data_loader)
+                    inputs, targets = next(training_iterator)
+                inputs = inputs.to(self.device)
+                flat_targets = targets.float().to(self.device).view(-1)
+                if source_filter == 'bad':
+                    source_mask = flat_targets == 0
+                elif source_filter == 'good':
+                    source_mask = flat_targets == 1
+                else:
+                    source_mask = torch.ones_like(flat_targets, dtype=torch.bool)
+                if source_mask.any():
+                    poisoned_inputs = self._inject_trigger(
+                        inputs[source_mask],
+                        trigger_boxes,
+                        trigger_patch=universal_patch,
+                        trigger_mask=perturbation_mask,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach,
+                    )
+                    # The PSP hooks are unnecessary for the supervised branch
+                    # and retaining those maps greatly increases GPU memory.
+                    with self._suspend_feature_capture():
+                        targeted_loss = self._targeted_binary_loss(poisoned_inputs, target_label)
+                    targeted_samples = int(source_mask.sum().item())
+
+            batch_loss = effective_feature_weight * psp_loss + target_weight * targeted_loss
 
             batch_loss.backward()
 
             patch_optimizer.step()
 
             with torch.no_grad():
-                universal_patch = (epsilon * torch.tanh(trigger_delta))
+                trigger_delta.clamp_(-epsilon, epsilon)
+                if perturbation_mask is not None:
+                    trigger_delta.mul_(perturbation_mask)
+                active_values = (
+                    trigger_delta[perturbation_mask.expand_as(trigger_delta) > 0]
+                    if perturbation_mask is not None else trigger_delta.reshape(-1)
+                )
+                saturation_rate = float(
+                    (active_values.abs() >= epsilon * 0.999).float().mean().item()
+                ) if active_values.numel() else 0.0
+                # The reference data-free optimizer periodically backs away
+                # from a saturated L-inf boundary so projected Adam updates can
+                # keep changing the perturbation. The targeted hybrid keeps its
+                # boundary solution because its BCE gradient is label-aligned.
+                if (
+                    attack_mode == 'psp_uap'
+                    and (step_idx + 1) % 100 == 0
+                    and saturation_rate >= 0.5
+                ):
+                    trigger_delta.mul_(0.5)
+                    saturation_rescales += 1
+                    saturation_rate = float(
+                        (trigger_delta.abs() >= epsilon * 0.999).float().mean().item()
+                    )
+                universal_patch = trigger_delta.detach().clone()
                 if perturbation_mask is not None:
                     universal_patch = universal_patch * perturbation_mask
 
@@ -2161,8 +2302,12 @@ class AdversarialAttack:
 
             step_history = {
                 "step": step_idx + 1,
-                "patch_update_method": "psp_uap",
+                "patch_update_method": attack_mode,
                 "loss": step_loss,
+                "psp_feature_loss": float(psp_loss.detach().item()),
+                "targeted_loss": float(targeted_loss.detach().item()),
+                "targeted_training_samples": targeted_samples,
+                "saturation_rate": saturation_rate,
                 "patch_linf_norm": patch_linf,
                 "effective_patch_linf_norm": patch_linf,
             }
@@ -2219,27 +2364,31 @@ class AdversarialAttack:
                 prediction_change_rate = float(
                     target_metrics["prediction_change_rate"]
                 )
+                target_score = float(target_metrics["mean_attacked_target_logit"])
                 step_history["conditional_target_asr"] = target_asr
                 step_history["prediction_change_rate"] = prediction_change_rate
+                step_history["mean_attacked_target_logit"] = target_score
 
                 if (
                     target_asr > best_target_asr
                     or (
                         target_asr == best_target_asr
-                        and step_loss < best_psp_loss
+                        and target_score > best_target_score
                     )
                 ):
                     best_target_asr = target_asr
-                    best_psp_loss = step_loss
+                    best_target_score = target_score
                     best_patch = (universal_patch.detach().cpu().clone())
                     best_step = step_idx + 1
                     if val_metrics is not None:
                         best_val_asr = float(
                             val_metrics["conditional_attack_success_rate"])
                 print(
-                    "[Targeted PSP-UAP] "
+                    f"[{'Targeted hybrid' if attack_mode == 'targeted_psp_uap' else 'Data-free'} PSP-UAP] "
                     f"step={step_idx + 1} "
                     f"loss={step_loss:.6f} "
+                    f"psp_loss={float(psp_loss.detach().item()):.6f} "
+                    f"target_loss={float(targeted_loss.detach().item()):.6f} "
                     f"conditional_target_asr={target_asr:.4f} "
                     f"prediction_change_rate={prediction_change_rate:.4f} "
                     f"linf={patch_linf:.6f}"
@@ -2249,7 +2398,7 @@ class AdversarialAttack:
             learned_patch = best_patch
         else:
             with torch.no_grad():
-                learned_patch = (epsilon * torch.tanh(trigger_delta))
+                learned_patch = trigger_delta.clamp(-epsilon, epsilon)
                 if perturbation_mask is not None:
                     learned_patch = learned_patch * perturbation_mask
                 learned_patch = learned_patch.detach().cpu()
@@ -2273,7 +2422,7 @@ class AdversarialAttack:
             "trigger_boxes": trigger_boxes,
             "target_label": float(target_class),
             "source_filter": source_filter,
-            "patch_update_method": "psp_uap",
+            "patch_update_method": attack_mode,
             "how_to_attach": how_to_attach,
             "epsilon": learned_patch_linf_norm,
             "effective_epsilon": effective_linf,
@@ -2294,6 +2443,16 @@ class AdversarialAttack:
             "ensemble": self._ensemble_metadata(),
             "trigger_previews": preview_records,
             "perturbation_mask": perturbation_mask_metadata or {},
+            "psp_uap": {
+                "training_mode": "targeted_hybrid" if attack_mode == 'targeted_psp_uap' else "data_free",
+                "prior": prior,
+                "num_copies": num_copies,
+                "feature_weight": effective_feature_weight,
+                "target_weight": target_weight if attack_mode == 'targeted_psp_uap' else 0.0,
+                "validation_metric": "conditional_targeted_attack_success_rate",
+                "image_size": [width, height],
+                "saturation_rescales": saturation_rescales,
+            },
             "selection": ("best_conditional_targeted_attack_success_rate"),
             "selected_step": int(best_step or steps),
             "best_validation_asr": (None if validation_loader is None else float(best_val_asr)),
@@ -2443,6 +2602,7 @@ class AdversarialAttack:
 
         if patch_update_method == 'psp_uap':
             return self._learn_psp_uap_trigger(
+                data_loader=data_loader,
                 validation_loader=validation_loader,
                 trigger_boxes=trigger_boxes,
                 trigger_delta=trigger_delta,
@@ -3556,7 +3716,7 @@ class AdversarialAttack:
             raise ValueError(
                 f"Image-specific attack method '{patch_update_method}' is not supported. "
                 f"Choose from: {', '.join(sorted(valid_methods))}. Universal-only methods "
-                "such as gd_uap, gap_uap, fg_uap, and psp_uap cannot be used here."
+                "such as gd_uap, gap_uap, fg_uap, psp_uap, and targeted_psp_uap cannot be used here."
             )
         if method == 'deepfool' and optimize_mask:
             raise ValueError('deepfool does not optimize a mask; set optimize_mask=False.')
@@ -4131,6 +4291,7 @@ class AdversarialAttack:
         prediction_changes = 0
         clean_prediction_not_target = 0
         targeted_prediction_changes = 0
+        attacked_target_logit_sum = 0.0
         clean_tp = clean_tn = clean_fp = clean_fn = 0
         attacked_tp = attacked_tn = attacked_fp = attacked_fn = 0
 
@@ -4140,16 +4301,9 @@ class AdversarialAttack:
         if effective_source_filter not in {'bad', 'good', 'all'}:
             raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
 
-        feature_extractor = getattr(self, 'feature_extractor', None)
-        capture_context = (
-            feature_extractor.suspend_capture()
-            if feature_extractor is not None
-            else nullcontext()
-        )
-
         # ASR evaluation needs logits only. Feature hooks can otherwise retain
         # an entire loader's convolution maps between optimization steps.
-        with torch.no_grad(), capture_context:
+        with torch.no_grad(), self._suspend_feature_capture():
             for inputs, targets in test_loader:
                 inputs = inputs.to(self.device)
                 targets = targets.float().to(self.device)
@@ -4204,6 +4358,11 @@ class AdversarialAttack:
                 # from target-label ASR.  In a binary classifier every changed
                 # decision is necessarily a flip to the other class.
                 source_poisoned_preds = flat_poisoned_preds[source_mask]
+                source_poisoned_logits = poisoned_outputs.view(-1)[source_mask]
+                target_direction = 1.0 if float(target_label) == 1.0 else -1.0
+                attacked_target_logit_sum += float(
+                    (target_direction * source_poisoned_logits).sum().item()
+                )
                 changed = source_poisoned_preds != source_clean_preds
                 prediction_changes += int(changed.sum().item())
                 clean_not_target = source_clean_preds != float(target_label)
@@ -4258,6 +4417,9 @@ class AdversarialAttack:
             'conditional_attack_success_rate': (
                 (conditional_attack_success / clean_correct_and_not_target) * 100
                 if clean_correct_and_not_target else 0.0
+            ),
+            'mean_attacked_target_logit': (
+                attacked_target_logit_sum / source_total if source_total else 0.0
             ),
             'target_label': float(target_label),
             'trigger_box': trigger_box,

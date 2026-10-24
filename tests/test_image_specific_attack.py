@@ -114,7 +114,10 @@ def test_supported_image_specific_method_names(method):
 
 @pytest.mark.parametrize(
     'method',
-    ['deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap', 'robust_uap', 'psp_uap'],
+    [
+        'deepfool_uap', 'gd_uap', 'gap_uap', 'hp_uap', 'fg_uap',
+        'robust_uap', 'psp_uap', 'targeted_psp_uap',
+    ],
 )
 def test_universal_method_names_are_rejected_for_image_specific_attacks(method):
     attack = AdversarialAttack(MeanThresholdModel(), device='cpu', use_multi_gpu=False)

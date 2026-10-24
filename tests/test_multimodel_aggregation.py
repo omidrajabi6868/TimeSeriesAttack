@@ -152,6 +152,37 @@ def test_multimodel_psp_uap_aggregates_each_models_feature_loss():
     assert all(model.forward_calls >= 2 for model in models.values())
 
 
+def test_targeted_psp_uap_is_available_for_multimodel_optimization():
+    models = {'first': TinyConvModel(0.5), 'second': TinyConvModel(1.0)}
+    attack = AdversarialAttack(
+        models,
+        device='cpu',
+        use_multi_gpu=False,
+        aggregation='mean',
+    )
+    loader = _tiny_image_loader()
+
+    result = attack.learn_universal_trigger(
+        data_loader=loader,
+        trigger_box={'x': 0, 'y': 0, 'width': 8, 'height': 8},
+        validation_loader=loader,
+        steps=1,
+        learning_rate=0.01,
+        optimize_mask=False,
+        patch_update_method='targeted_psp_uap',
+        epsilon=0.03,
+        log_interval=0,
+        trigger_preview_interval=0,
+        progressive_resize=False,
+        randomize_training_location=False,
+        psp_num_copies=2,
+    )
+
+    assert result['ensemble']['multi_model'] is True
+    assert result['psp_uap']['training_mode'] == 'targeted_hybrid'
+    assert result['history'][0]['targeted_training_samples'] == 2
+
+
 def test_multimodel_robust_uap_aggregates_each_models_classification_loss(monkeypatch):
     class TinyRobustConfig:
         def __init__(self, alpha=0.01):

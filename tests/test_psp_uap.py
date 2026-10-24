@@ -2,12 +2,33 @@ import unittest
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from Attacks.ImageAttacks.CostFunction import FeatureExtractor, PSPUAPObjective
 from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler
 
 
 class PSPUAPTests(unittest.TestCase):
+    def test_inception_profile_uses_published_layer_fraction_and_temperature(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        class TinyInceptionV3(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv2d(3, 2, 1)
+                self.pool = nn.AdaptiveAvgPool2d(1)
+                self.fc = nn.Linear(2, 1)
+
+            def forward(self, inputs):
+                return self.fc(self.pool(self.conv(inputs)).flatten(1))
+
+        attack = AdversarialAttack(TinyInceptionV3(), device='cpu', use_multi_gpu=False)
+        attack._build_cost_function('psp_uap')
+
+        self.assertEqual(attack.cost_function.p_rate, 0.2)
+        self.assertEqual(attack.cost_function.temperature, 3.0)
+        attack._remove_feature_extractor()
+
     def test_attack_builds_activation_maximizing_psp_objective(self):
         from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
@@ -69,6 +90,46 @@ class PSPUAPTests(unittest.TestCase):
         model(inputs)
         self.assertEqual(len(extractor.activations), 1)
         extractor.remove()
+
+    def test_targeted_psp_mode_records_hybrid_objective_and_keeps_image_size(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        class TinyBinaryModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv2d(3, 2, 1)
+                self.pool = nn.AdaptiveAvgPool2d(1)
+                self.fc = nn.Linear(2, 1)
+
+            def forward(self, inputs):
+                return self.fc(self.pool(self.conv(inputs)).flatten(1))
+
+        inputs = torch.zeros(2, 3, 8, 12)
+        targets = torch.zeros(2, 1)
+        loader = DataLoader(TensorDataset(inputs, targets), batch_size=2)
+        attack = AdversarialAttack(TinyBinaryModel(), device='cpu', use_multi_gpu=False)
+
+        result = attack.learn_universal_trigger(
+            data_loader=loader,
+            validation_loader=loader,
+            trigger_box={'x': 0, 'y': 0, 'width': 12, 'height': 8},
+            patch_update_method='targeted_psp_uap',
+            steps=1,
+            learning_rate=0.01,
+            epsilon=0.03,
+            optimize_mask=False,
+            progressive_resize=False,
+            randomize_training_location=False,
+            log_interval=0,
+            trigger_preview_interval=0,
+            psp_num_copies=2,
+        )
+
+        self.assertEqual(result['patch_update_method'], 'targeted_psp_uap')
+        self.assertEqual(result['psp_uap']['training_mode'], 'targeted_hybrid')
+        self.assertEqual(result['psp_uap']['image_size'], [12, 8])
+        self.assertGreater(result['history'][0]['targeted_training_samples'], 0)
+        self.assertGreater(result['history'][0]['targeted_loss'], 0)
 
 
 if __name__ == "__main__":
