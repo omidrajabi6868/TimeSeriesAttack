@@ -34,10 +34,11 @@ class FeaturBaseObjective(AdversarialObjective):
             for feature in features
         ]
 
-    def __init__(self, feature_extractor=None, eps=1e-8):
+    def __init__(self, feature_extractor=None, eps=1e-8, maximize_activations=False):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.eps = eps
+        self.maximize_activations = bool(maximize_activations)
 
     @staticmethod
     def _align_feature_pair(clean_feat, adv_feat):
@@ -98,7 +99,8 @@ class FeaturBaseObjective(AdversarialObjective):
                     continue
                 norm = torch.norm(feat, p=2)
                 layer_loss = torch.log(norm + self.eps)
-                loss = loss + layer_loss.to(loss_device)
+                signed_layer_loss = -layer_loss if self.maximize_activations else layer_loss
+                loss = loss + signed_layer_loss.to(loss_device)
         return loss
 
 class PSPUAPObjective(AdversarialObjective):
@@ -698,7 +700,8 @@ class PSPUAPObjective(AdversarialObjective):
         return loss
 
 class FeatureExtractor:
-    def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,), exclude_last_layers=0):
+    def __init__(self, model, n_last_layers=10, layer_types=(nn.Conv2d,),
+                 exclude_last_layers=0, selection='last'):
         self._activation_records = []
         self.hooks = []
         self.capture_enabled = True
@@ -717,7 +720,15 @@ class FeatureExtractor:
         if exclude_last_layers < 0:
             raise ValueError('exclude_last_layers must be non-negative.')
         selectable_layers = named_layers[:-exclude_last_layers] if exclude_last_layers else named_layers
-        selected_layers = selectable_layers[-n_last_layers:] if n_last_layers else selectable_layers
+        if selection not in {'first', 'last'}:
+            raise ValueError("selection must be either 'first' or 'last'.")
+        if n_last_layers:
+            selected_layers = (
+                selectable_layers[:n_last_layers]
+                if selection == 'first' else selectable_layers[-n_last_layers:]
+            )
+        else:
+            selected_layers = selectable_layers
         if not selected_layers:
             raise RuntimeError(
                 f'FeatureExtractor found {len(named_layers)} candidate layers, but selected none after '

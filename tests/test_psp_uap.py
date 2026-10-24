@@ -25,8 +25,12 @@ class PSPUAPTests(unittest.TestCase):
         attack = AdversarialAttack(TinyInceptionV3(), device='cpu', use_multi_gpu=False)
         attack._build_cost_function('psp_uap')
 
-        self.assertEqual(attack.cost_function.p_rate, 0.2)
+        # The extractor now hooks only the selected first 20%, so the
+        # objective consumes all already-filtered activations.
+        self.assertEqual(attack.cost_function.p_rate, 1.0)
         self.assertEqual(attack.cost_function.temperature, 3.0)
+        self.assertEqual(attack.feature_profiles['model']['p_rate'], 0.2)
+        self.assertEqual(attack.feature_profiles['model']['selected_count'], 1)
         attack._remove_feature_extractor()
 
     def test_attack_builds_activation_maximizing_psp_objective(self):

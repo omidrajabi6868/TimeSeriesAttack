@@ -171,6 +171,14 @@ class AdversarialAttack:
             'model_weights': self.model_weights,
             'gpu_ids': self.gpu_ids,
         }
+
+    def _feature_profile_metadata(self):
+        metadata = {}
+        for name, profile in (getattr(self, 'feature_profiles', None) or {}).items():
+            public_profile = dict(profile)
+            public_profile.pop('layer_types', None)
+            metadata[name] = public_profile
+        return metadata
     
     def _remove_feature_extractor(self):
         extractors = []
@@ -193,76 +201,164 @@ class AdversarialAttack:
         self.feature_extractors = None
         self.psp_objectives = None
 
+    @staticmethod
+    def _activation_profile(model_name, model):
+        """Return architecture-aware settings for activation-based UAPs.
+
+        PSP-UAP publishes different hyperparameters per CNN family. Models not
+        present in the paper use the nearest architectural family and are
+        marked as project adaptations. Swin uses Linear transformer features
+        because its only Conv2d is the patch embedding.
+        """
+        base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+        identity = f'{model_name} {type(base_model).__name__}'.lower()
+        conv_count = sum(isinstance(module, torch.nn.Conv2d) for module in base_model.modules())
+        linear_count = sum(isinstance(module, torch.nn.Linear) for module in base_model.modules())
+        swin_block_types = tuple({
+            type(module) for module in base_model.modules()
+            if type(module).__name__ == 'SwinTransformerBlock'
+        })
+
+        profile = {
+            'family': 'generic_cnn', 'p_rate': 0.65, 'prior': 'gauss',
+            'temperature': 1.0, 'layer_types': (torch.nn.Conv2d,),
+            'exclude_last_layers': 0, 'source': 'project_adaptation',
+        }
+        if 'alexnet' in identity:
+            profile.update(family='alexnet', p_rate=1.0, prior='gauss', temperature=1.0,
+                           source='official_psp_uap')
+        elif 'inception' in identity:
+            profile.update(family='inception_v3', p_rate=0.2, prior='jigsaw', temperature=3.0,
+                           source='official_psp_uap')
+        elif 'mobilenet' in identity:
+            profile.update(family='mobilenet_v3', p_rate=0.9, prior='gauss', temperature=2.0,
+                           source='adapted_from_official_mobilenet_v3_large')
+        elif 'efficientnet' in identity:
+            profile.update(family='efficientnet', p_rate=0.9, prior='gauss', temperature=2.0,
+                           source='project_adaptation')
+        elif 'swin' in identity or linear_count > max(4, conv_count * 2):
+            profile.update(
+                family='swin_transformer', p_rate=0.2, prior='gauss', temperature=1.0,
+                # Block outputs retain the true image batch dimension. Internal
+                # attention Linear layers use window batches and cannot be
+                # reweighted by PSP's one weight per pseudo-semantic image.
+                layer_types=(
+                    swin_block_types if swin_block_types else (torch.nn.Linear,)
+                ),
+                exclude_last_layers=(0 if swin_block_types else 1),
+                source='project_transformer_adaptation',
+            )
+        elif 'resnet' in identity:
+            # Torchvision ResNet instances do not retain the requested depth in
+            # their class name, so distinguish ResNet50 by its convolution count.
+            if conv_count == 53 or 'resnet50' in identity:
+                profile.update(family='resnet50', p_rate=0.7, prior='jigsaw', temperature=3.0,
+                               source='official_psp_uap')
+            else:
+                profile.update(family='resnet', p_rate=0.65, prior='jigsaw', temperature=3.0,
+                               source='adapted_from_official_resnet152')
+
+        candidates = [
+            (name, module) for name, module in model.named_modules()
+            if isinstance(module, profile['layer_types'])
+        ]
+        excluded = int(profile['exclude_last_layers'])
+        selectable_count = max(0, len(candidates) - excluded)
+        selected_count = max(1, int(selectable_count * float(profile['p_rate'])))
+        selected_count = min(selected_count, selectable_count)
+        profile.update(
+            candidate_count=len(candidates), selectable_count=selectable_count,
+            selected_count=selected_count,
+            layer_type_names=[layer_type.__name__ for layer_type in profile['layer_types']],
+        )
+        return profile
+
     def _build_cost_function(self, name, psp_p_rate=None, psp_temperature=None):
         self._remove_feature_extractor()
+        self.feature_profiles = {}
         if name == 'classification':
             self.cost_function = ClassificationObjective()
         elif name == 'gd_uap':
-            conv_count = sum(
-                isinstance(module, torch.nn.Conv2d)
-                for module in self.model.modules()
-            )
-            linear_count = sum(
-                isinstance(module, torch.nn.Linear)
-                for module in self.model.modules()
-            )
-            if linear_count > conv_count:
-                # Transformer backbones such as Swin perform almost all feature
-                # transformations with Linear layers.  Their lone Conv2d is only
-                # the patch embedding, so hooking Conv2d alone does not represent
-                # the backbone.  Omit the final Linear classifier just as FG-UAP
-                # does and limit the hooks to avoid retaining every transformer
-                # block's (potentially large) activation.
-                self.feature_extractor = FeatureExtractor(
-                    self.model,
-                    n_last_layers=4,
-                    layer_types=(torch.nn.Linear,),
-                    exclude_last_layers=1,
-                )
-            else:
-                self.feature_extractor = FeatureExtractor(
-                    self.model,
-                    n_last_layers=100,
-                    layer_types=(torch.nn.Conv2d,),
-                )
-            self.cost_function = FeaturBaseObjective(self.feature_extractor)
-        elif name == 'fg_uap':
-            # Gather the last feature-producing layers while omitting the output
-            # classifier.  ResNets only have one Linear layer, so limiting this
-            # to Linear modules used to leave ResNet18/34/50/101 with no hooks.
+            profile = self._activation_profile('model', self.model)
             self.feature_extractor = FeatureExtractor(
-                self.model,
-                n_last_layers=4,
-                layer_types=(torch.nn.Conv2d, torch.nn.Linear),
-                exclude_last_layers=1,
+                self.model, n_last_layers=profile['selected_count'],
+                layer_types=profile['layer_types'],
+                exclude_last_layers=profile['exclude_last_layers'], selection='first',
             )
+            profile['selected_layer_names'] = list(self.feature_extractor.layer_names)
+            self.feature_profiles = {'model': profile}
+            # GD-UAP minimizes a negative log-activation objective. The old
+            # positive sign suppressed activations and commonly produced 0 ASR.
+            self.cost_function = FeaturBaseObjective(
+                self.feature_extractor, maximize_activations=True
+            )
+            print(
+                'activation_feature_profile: '
+                f'method=gd_uap, family={profile["family"]}, '
+                f'layers={profile["selected_count"]}/{profile["selectable_count"]}, '
+                f'p_rate={profile["p_rate"]:.2f}'
+            )
+        elif name == 'fg_uap':
+            profile = self._activation_profile('model', self.model)
+            self.feature_extractor = FeatureExtractor(
+                self.model, n_last_layers=profile['selected_count'],
+                layer_types=profile['layer_types'],
+                exclude_last_layers=profile['exclude_last_layers'], selection='first',
+            )
+            profile['selected_layer_names'] = list(self.feature_extractor.layer_names)
+            self.feature_profiles = {'model': profile}
             self.cost_function = FeaturBaseObjective(self.feature_extractor)
+            print(
+                'activation_feature_profile: '
+                f'method=fg_uap, family={profile["family"]}, '
+                f'layers={profile["selected_count"]}/{profile["selectable_count"]}, '
+                f'p_rate={profile["p_rate"]:.2f}'
+            )
         elif name in ('psp_uap', 'targeted_psp_uap'):
             self.feature_extractors = {}
             self.psp_objectives = {}
+            self.feature_profiles = {}
             for model_name, model in self._model_items():
-                base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-                model_identity = f'{model_name} {type(base_model).__name__}'.lower()
-                is_inception = 'inception' in model_identity
-                extractor = FeatureExtractor(
-                    model,
-                    n_last_layers=0,
-                    layer_types=(torch.nn.Conv2d,),
+                profile = self._activation_profile(model_name, model)
+                requested_p_rate = (
+                    float(psp_p_rate) if psp_p_rate is not None else float(profile['p_rate'])
                 )
+                if not 0.0 < requested_p_rate <= 1.0:
+                    raise ValueError('psp_p_rate must be in the interval (0, 1].')
+                selected_count = max(1, int(profile['selectable_count'] * requested_p_rate))
+                selected_count = min(selected_count, profile['selectable_count'])
+                extractor = FeatureExtractor(
+                    model, n_last_layers=selected_count,
+                    layer_types=profile['layer_types'],
+                    exclude_last_layers=profile['exclude_last_layers'], selection='first',
+                )
+                profile['p_rate'] = requested_p_rate
+                profile['selected_count'] = selected_count
+                profile['selected_layer_names'] = list(extractor.layer_names)
+                self.feature_profiles[model_name] = profile
                 self.feature_extractors[model_name] = extractor
                 self.psp_objectives[model_name] = PSPUAPObjective(
                     feature_extractor=extractor,
                     p_active=True,
-                    p_rate=float(psp_p_rate) if psp_p_rate is not None else (0.2 if is_inception else 1.0),
+                    # The extractor already retains exactly the first p_rate
+                    # fraction, avoiding hooks and memory for unused layers.
+                    p_rate=1.0,
                     re_weight=True,
                     temperature=(
                         float(psp_temperature)
-                        if psp_temperature is not None else (3.0 if is_inception else 1.0)
+                        if psp_temperature is not None else float(profile['temperature'])
                     ),
                     # PSP-UAP minimizes the negative log activation energy.
                     # Adam therefore needs the negative objective so its
                     # gradient-descent update maximizes feature activations.
                     maximize_activations=True,
+                )
+                print(
+                    'activation_feature_profile: '
+                    f'model={model_name}, family={profile["family"]}, '
+                    f'layers={selected_count}/{profile["selectable_count"]}, '
+                    f'p_rate={requested_p_rate:.2f}, prior={profile["prior"]}, '
+                    f'temperature={self.psp_objectives[model_name].temperature:g}'
                 )
 
             # Preserve the historical single-model attributes for callers that
@@ -336,6 +432,7 @@ class AdversarialAttack:
                 'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
                 'trigger_previews': trigger.get('trigger_previews', []),
                 'ensemble': trigger.get('ensemble', {}),
+                'feature_profiles': trigger.get('feature_profiles', {}),
                 'perturbation_mask': trigger.get('perturbation_mask', {}),
                 'psp_uap': trigger.get('psp_uap', {}),
                 'history_path': str(history_path),
@@ -356,6 +453,7 @@ class AdversarialAttack:
             'smallest_success_patch_area': trigger.get('smallest_success_patch_area'),
             'trigger_previews': trigger.get('trigger_previews', []),
             'ensemble': trigger.get('ensemble', {}),
+            'feature_profiles': trigger.get('feature_profiles', {}),
             'psp_uap': trigger.get('psp_uap', {}),
             'patch_path': str(output_path),
         }
@@ -408,6 +506,7 @@ class AdversarialAttack:
             'smallest_success_patch_area': trigger_payload.get('smallest_success_patch_area'),
             'trigger_previews': trigger_payload.get('trigger_previews', []),
             'ensemble': trigger_payload.get('ensemble', {}),
+            'feature_profiles': trigger_payload.get('feature_profiles', {}),
             'perturbation_mask': trigger_payload.get('perturbation_mask', {}),
             'psp_uap': trigger_payload.get('psp_uap', {}),
             'history': history,
@@ -777,6 +876,7 @@ class AdversarialAttack:
         best_step = 0
         best_val_loss = float('inf')
         best_val_asr = float('-inf')
+        best_val_target_score = float('-inf')
         best_softness = None
         smallest_success_patch = None
         smallest_success_mask = None
@@ -1072,9 +1172,19 @@ class AdversarialAttack:
                         how_to_attach=how_to_attach,
                         use_clean_feature_targets=(patch_update_method == 'fg_uap'),
                     )
-                    val_asr = float(val_metrics['attack_success_rate'])
+                    activation_based = patch_update_method in {'gd_uap', 'fg_uap'}
+                    val_asr = float(
+                        val_metrics['conditional_attack_success_rate']
+                        if activation_based else val_metrics['attack_success_rate']
+                    )
+                    val_target_score = float(val_metrics['mean_attacked_target_logit'])
                     val_loss = float(val_loss_metrics['loss'])
                     step_history['validation_asr'] = val_asr
+                    step_history['validation_asr_metric'] = (
+                        'conditional_targeted_attack_success_rate'
+                        if activation_based else 'attack_success_rate'
+                    )
+                    step_history['validation_mean_attacked_target_logit'] = val_target_score
                     step_history['validation_loss'] = val_loss
                     step_history['validation_attack_loss'] = float(val_loss_metrics['attack_loss'])
                     step_history['validation_patch_regularization_loss'] = float(
@@ -1088,9 +1198,20 @@ class AdversarialAttack:
                     )
                     step_history['validation_samples'] = int(val_loss_metrics['samples_evaluated'])
                     step_history['edge_softness'] = current_softness
-                    if val_loss < best_val_loss:
+                    improves_best = (
+                        (
+                            val_asr > best_val_asr
+                            or (
+                                val_asr == best_val_asr
+                                and val_target_score > best_val_target_score
+                            )
+                        )
+                        if activation_based else val_loss < best_val_loss
+                    )
+                    if improves_best:
                         best_val_loss = val_loss
                         best_val_asr = val_asr
+                        best_val_target_score = val_target_score
                         best_patch = current_patch.cpu().clone()
                         best_mask = current_mask.cpu().clone() if current_mask is not None else None
                         best_trigger_boxes = [dict(box) for box in trigger_boxes]
@@ -1404,7 +1525,11 @@ class AdversarialAttack:
             learned_mask = best_mask
             trigger_boxes = best_trigger_boxes
             selected_step = best_step
-            selection = 'best_validation_loss'
+            selection = (
+                'best_conditional_targeted_attack_success_rate'
+                if patch_update_method in {'gd_uap', 'fg_uap'}
+                else 'best_validation_loss'
+            )
             selected_validation_asr = best_val_asr
             selected_edge_softness = best_softness
         else:
@@ -1480,6 +1605,7 @@ class AdversarialAttack:
             },
             'trigger_previews': preview_records,
             'ensemble': self._ensemble_metadata(),
+            'feature_profiles': self._feature_profile_metadata(),
             'perturbation_mask': perturbation_mask_metadata,
             'selection': selection,
             'selected_step': int(selected_step),
@@ -2152,11 +2278,14 @@ class AdversarialAttack:
 
         self._build_cost_function(attack_mode)
         if prior == 'auto':
-            model_identities = []
-            for model_name, model in self._model_items():
-                base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-                model_identities.append(f'{model_name} {type(base_model).__name__}'.lower())
-            prior = 'jigsaw' if any('inception' in identity for identity in model_identities) else 'gauss'
+            configured_priors = [
+                profile['prior'] for profile in self.feature_profiles.values()
+            ]
+            prior = (
+                configured_priors[0]
+                if len(set(configured_priors)) == 1
+                else ('jigsaw' if 'jigsaw' in configured_priors else 'gauss')
+            )
         if prior not in {'gauss', 'jigsaw'}:
             raise ValueError("psp_prior must be one of: 'auto', 'gauss', 'jigsaw'.")
         psp_sampler = PSPTransformSampler(
@@ -2441,6 +2570,7 @@ class AdversarialAttack:
                 "events": [],
             },
             "ensemble": self._ensemble_metadata(),
+            "feature_profiles": self._feature_profile_metadata(),
             "trigger_previews": preview_records,
             "perturbation_mask": perturbation_mask_metadata or {},
             "psp_uap": {
@@ -2452,6 +2582,7 @@ class AdversarialAttack:
                 "validation_metric": "conditional_targeted_attack_success_rate",
                 "image_size": [width, height],
                 "saturation_rescales": saturation_rescales,
+                "feature_profiles": self._feature_profile_metadata(),
             },
             "selection": ("best_conditional_targeted_attack_success_rate"),
             "selected_step": int(best_step or steps),
