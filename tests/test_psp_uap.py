@@ -58,6 +58,19 @@ class PSPUAPTests(unittest.TestCase):
         self.assertGreater(minimizing_feature.grad.item(), 0.0)
         self.assertLess(maximizing_feature.grad.item(), 0.0)
 
+    def test_gradient_cosine_detects_opposing_objectives(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        parameter = torch.tensor([1.0, -1.0], requires_grad=True)
+        first_loss = (parameter * 2.0).sum()
+        second_loss = (parameter * -3.0).sum()
+
+        cosine = AdversarialAttack._gradient_cosine(
+            first_loss, second_loss, parameter
+        )
+
+        self.assertAlmostEqual(cosine, -1.0, places=6)
+
     def test_sampler_uses_requested_copy_count_and_keeps_delta_gradient(self):
         torch.manual_seed(0)
         delta = torch.zeros(1, 3, 16, 16, requires_grad=True)
@@ -134,9 +147,57 @@ class PSPUAPTests(unittest.TestCase):
         self.assertEqual(result['psp_uap']['image_size'], [12, 8])
         self.assertEqual(result['psp_uap']['target_eot_samples'], 4)
         self.assertEqual(result['psp_uap']['target_eot']['applies_to'], 'single_and_multi_model')
+        self.assertEqual(result['psp_uap']['activation_direction_mode'], 'auto')
+        self.assertEqual(result['psp_uap']['direction_warmup_steps'], 20)
+        self.assertEqual(result['psp_uap']['target_logit_margin'], 3.0)
+        self.assertEqual(result['psp_uap']['max_psp_gradient_ratio'], 0.5)
         self.assertGreater(result['history'][0]['targeted_training_samples'], 0)
         self.assertGreater(result['history'][0]['targeted_loss'], 0)
         self.assertEqual(result['history'][0]['targeted_eot_views'], 4)
+        self.assertFalse(result['history'][0]['psp_active'])
+        self.assertEqual(result['history'][0]['psp_activation_directions'], {'model': 'off'})
+
+    def test_targeted_psp_can_enable_manual_activation_after_zero_warmup(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 2, 1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(), nn.Linear(2, 1),
+        )
+        inputs = torch.zeros(2, 3, 8, 8)
+        targets = torch.zeros(2, 1)
+        loader = DataLoader(TensorDataset(inputs, targets), batch_size=2)
+        attack = AdversarialAttack(model, device='cpu', use_multi_gpu=False)
+
+        result = attack.learn_universal_trigger(
+            data_loader=loader,
+            validation_loader=loader,
+            trigger_box={'x': 0, 'y': 0, 'width': 8, 'height': 8},
+            patch_update_method='targeted_psp_uap',
+            steps=1,
+            learning_rate=0.01,
+            epsilon=0.03,
+            optimize_mask=False,
+            progressive_resize=False,
+            randomize_training_location=False,
+            log_interval=0,
+            trigger_preview_interval=0,
+            psp_num_copies=2,
+            psp_activation_direction='off',
+            psp_model_activation_directions={'model': 'maximize'},
+            psp_direction_warmup_steps=0,
+            psp_feature_ramp_steps=0,
+        )
+
+        self.assertTrue(result['history'][0]['psp_active'])
+        self.assertEqual(
+            result['history'][0]['psp_activation_directions'],
+            {'model': 'maximize'},
+        )
+        self.assertEqual(
+            result['psp_uap']['model_activation_direction_overrides'],
+            {'model': 'maximize'},
+        )
 
 
 if __name__ == "__main__":

@@ -130,38 +130,170 @@ class AdversarialAttack:
                     seen.add(id(extractor))
             yield
 
-    def _targeted_binary_loss(self, inputs, target_label):
+    @classmethod
+    def _binary_target_margin(cls, logits, target_label):
+        """Return the target-vs-other logit margin for a binary classifier."""
+        logits = cls._tensor_logits(logits)
+        if logits.ndim == 1:
+            logits = logits.unsqueeze(-1)
+        target_class = int(float(target_label))
+        if target_class not in (0, 1):
+            raise ValueError('Binary target_label must be 0 or 1.')
+        if logits.shape[-1] == 1:
+            signed_logits = logits[..., 0]
+            return signed_logits if target_class == 1 else -signed_logits
+        if logits.shape[-1] == 2:
+            other_class = 1 - target_class
+            return logits[..., target_class] - logits[..., other_class]
+        raise ValueError(
+            'Targeted PSP-UAP requires a one-logit sigmoid or two-logit binary model.'
+        )
+
+    def _targeted_binary_model_loss(self, model, inputs, target_label, logit_margin=0.0):
+        logits = self._tensor_logits(model(inputs.to(self._module_device(model))))
+        signed_margin = self._binary_target_margin(logits, target_label)
+        # At logit_margin=0 this is exactly binary cross entropy for a
+        # one-logit classifier. A positive margin prevents the target gradient
+        # from disappearing immediately after the decision boundary is crossed.
+        return F.softplus(float(logit_margin) - signed_margin).mean()
+
+    def _targeted_binary_loss(self, inputs, target_label, logit_margin=0.0):
         losses = []
         for _, model in self._model_items():
-            logits = self._tensor_logits(model(inputs.to(self._module_device(model))))
-            targets = torch.full_like(logits, float(target_label))
-            losses.append(F.binary_cross_entropy_with_logits(logits, targets))
-        return aggregate(losses, self.aggregation, self.model_weights)
-
-    def _psp_loss(self, semantic_prior, semantic_delta):
-        losses = []
-        for name, model in self._model_items():
-            extractor = self.feature_extractors[name]
-            objective = self.psp_objectives[name]
-            model_device = self._module_device(model)
-
-            # The semantic prior is the fixed teacher. PSP features are only
-            # captured for the differentiable semantic-delta forward pass.
-            with torch.no_grad(), extractor.suspend_capture():
-                semantic_logits = model(semantic_prior.to(model_device))
-
-            extractor.clear()
-            delta_logits = model(semantic_delta.to(model_device))
             losses.append(
-                objective(
-                    outputs=extractor.activations,
-                    semantic_logits=semantic_logits,
-                    delta_logits=delta_logits,
+                self._targeted_binary_model_loss(
+                    model, inputs, target_label, logit_margin=logit_margin
                 )
             )
-            extractor.clear()
+        return aggregate(losses, self.aggregation, self.model_weights)
+
+    def _psp_model_loss(self, name, model, semantic_prior, semantic_delta):
+        extractor = self.feature_extractors[name]
+        objective = self.psp_objectives[name]
+        model_device = self._module_device(model)
+
+        # The semantic prior is the fixed teacher. PSP features are only
+        # captured for the differentiable semantic-delta forward pass.
+        with torch.no_grad(), extractor.suspend_capture():
+            semantic_logits = model(semantic_prior.to(model_device))
+
+        extractor.clear()
+        delta_logits = model(semantic_delta.to(model_device))
+        loss = objective(
+            outputs=extractor.activations,
+            semantic_logits=semantic_logits,
+            delta_logits=delta_logits,
+        )
+        extractor.clear()
+        return loss
+
+    def _psp_loss(self, semantic_prior, semantic_delta, directions=None):
+        losses = []
+        for name, model in self._model_items():
+            direction = 1.0 if directions is None else float(directions.get(name, 0.0))
+            if direction == 0.0:
+                # Preserve ensemble weighting while avoiding an expensive
+                # forward through a model whose PSP branch is disabled.
+                losses.append(semantic_delta.sum() * 0.0)
+                continue
+            loss = self._psp_model_loss(
+                name, model, semantic_prior, semantic_delta
+            )
+            losses.append(direction * loss)
 
         return aggregate(losses, self.aggregation, self.model_weights)
+
+    @staticmethod
+    def _gradient_tensor_cosine(first_grad, second_grad):
+        if first_grad is None or second_grad is None:
+            return 0.0
+        first_flat = first_grad.detach().reshape(-1).float()
+        second_flat = second_grad.detach().reshape(-1).float()
+        denominator = first_flat.norm(p=2) * second_flat.norm(p=2)
+        if not torch.isfinite(denominator) or denominator.item() <= 1e-20:
+            return 0.0
+        cosine = torch.dot(first_flat, second_flat) / denominator
+        if not torch.isfinite(cosine):
+            return 0.0
+        return float(cosine.clamp(-1.0, 1.0).item())
+
+    @classmethod
+    def _gradient_cosine(cls, first_loss, second_loss, parameter, retain_graph=False):
+        """Cosine similarity of two loss gradients with respect to one tensor."""
+        first_grad = torch.autograd.grad(
+            first_loss,
+            parameter,
+            retain_graph=retain_graph,
+            allow_unused=True,
+        )[0]
+        second_grad = torch.autograd.grad(
+            second_loss,
+            parameter,
+            retain_graph=False,
+            allow_unused=True,
+        )[0]
+        return cls._gradient_tensor_cosine(first_grad, second_grad)
+
+    def _targeted_psp_gradient_alignment(
+        self,
+        semantic_prior,
+        semantic_delta,
+        selected_inputs,
+        trigger_delta,
+        epsilon,
+        trigger_boxes,
+        perturbation_mask,
+        edge_softness,
+        how_to_attach,
+        target_label,
+        target_logit_margin,
+    ):
+        """Measure per-model PSP/target gradient agreement on the current UAP."""
+        alignments = {}
+        model_items = list(self._model_items())
+        for model_index, (name, model) in enumerate(model_items):
+            psp_loss = self._psp_model_loss(
+                name, model, semantic_prior, semantic_delta
+            )
+            psp_grad = torch.autograd.grad(
+                psp_loss,
+                trigger_delta,
+                retain_graph=(model_index + 1 < len(model_items)),
+                allow_unused=True,
+            )[0]
+            del psp_loss
+
+            # Build the real-image graph only after the PSP gradient has been
+            # extracted, avoiding simultaneous Inception-sized graphs.
+            target_patch = trigger_delta.clamp(-epsilon, epsilon)
+            if perturbation_mask is not None:
+                target_patch = target_patch * perturbation_mask
+            poisoned_inputs = self._inject_trigger(
+                selected_inputs,
+                trigger_boxes,
+                trigger_patch=target_patch,
+                trigger_mask=perturbation_mask,
+                edge_softness=edge_softness,
+                how_to_attach=how_to_attach,
+            )
+            with self._suspend_feature_capture():
+                target_loss = self._targeted_binary_model_loss(
+                    model,
+                    poisoned_inputs,
+                    target_label,
+                    logit_margin=target_logit_margin,
+                )
+            target_grad = torch.autograd.grad(
+                target_loss,
+                trigger_delta,
+                retain_graph=False,
+                allow_unused=True,
+            )[0]
+            alignments[name] = self._gradient_tensor_cosine(
+                psp_grad, target_grad
+            )
+            self._zero_model_grad()
+        return alignments
 
     def _ensemble_metadata(self):
         return {
@@ -563,6 +695,15 @@ class AdversarialAttack:
                                 psp_target_weight=1.0,
                                 psp_prior='auto',
                                 target_eot_samples=4,
+                                psp_activation_direction='auto',
+                                psp_model_activation_directions=None,
+                                psp_direction_warmup_steps=20,
+                                psp_feature_ramp_steps=20,
+                                psp_direction_update_interval=20,
+                                psp_direction_cosine_threshold=0.05,
+                                psp_direction_ema_decay=0.9,
+                                psp_target_logit_margin=3.0,
+                                psp_max_gradient_ratio=0.5,
                                 perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
@@ -818,6 +959,15 @@ class AdversarialAttack:
                 target_weight=psp_target_weight,
                 prior=psp_prior,
                 target_eot_samples=target_eot_samples,
+                activation_direction=psp_activation_direction,
+                model_activation_directions=psp_model_activation_directions,
+                direction_warmup_steps=psp_direction_warmup_steps,
+                feature_ramp_steps=psp_feature_ramp_steps,
+                direction_update_interval=psp_direction_update_interval,
+                direction_cosine_threshold=psp_direction_cosine_threshold,
+                direction_ema_decay=psp_direction_ema_decay,
+                target_logit_margin=psp_target_logit_margin,
+                max_psp_gradient_ratio=psp_max_gradient_ratio,
                 perturbation_mask=perturbation_mask,
                 perturbation_mask_metadata=perturbation_mask_metadata,
             )
@@ -2229,6 +2379,15 @@ class AdversarialAttack:
                                 target_weight=1.0,
                                 prior='auto',
                                 target_eot_samples=4,
+                                activation_direction='auto',
+                                model_activation_directions=None,
+                                direction_warmup_steps=20,
+                                feature_ramp_steps=20,
+                                direction_update_interval=20,
+                                direction_cosine_threshold=0.05,
+                                direction_ema_decay=0.9,
+                                target_logit_margin=3.0,
+                                max_psp_gradient_ratio=0.5,
                                 perturbation_mask=None,
                                 perturbation_mask_metadata=None,
                             ):
@@ -2280,6 +2439,30 @@ class AdversarialAttack:
         target_eot_samples = int(target_eot_samples)
         if target_eot_samples <= 0:
             raise ValueError('target_eot_samples must be a positive integer.')
+        activation_direction = str(activation_direction).lower()
+        if activation_direction not in {'maximize', 'minimize', 'auto', 'off'}:
+            raise ValueError(
+                "activation_direction must be one of: maximize, minimize, auto, off."
+            )
+        direction_warmup_steps = int(direction_warmup_steps)
+        feature_ramp_steps = int(feature_ramp_steps)
+        direction_update_interval = int(direction_update_interval)
+        direction_cosine_threshold = float(direction_cosine_threshold)
+        direction_ema_decay = float(direction_ema_decay)
+        target_logit_margin = float(target_logit_margin)
+        max_psp_gradient_ratio = float(max_psp_gradient_ratio)
+        if direction_warmup_steps < 0 or feature_ramp_steps < 0:
+            raise ValueError('PSP warm-up and ramp steps must be non-negative.')
+        if direction_update_interval <= 0:
+            raise ValueError('PSP direction update interval must be positive.')
+        if not 0.0 <= direction_cosine_threshold <= 1.0:
+            raise ValueError('PSP direction cosine threshold must be in [0, 1].')
+        if not 0.0 <= direction_ema_decay < 1.0:
+            raise ValueError('PSP direction EMA decay must be in [0, 1).')
+        if target_logit_margin < 0:
+            raise ValueError('PSP target logit margin must be non-negative.')
+        if max_psp_gradient_ratio < 0:
+            raise ValueError('Maximum PSP gradient ratio must be non-negative.')
         effective_feature_weight = feature_weight if attack_mode == 'targeted_psp_uap' else 1.0
 
         self._build_cost_function(attack_mode)
@@ -2322,6 +2505,46 @@ class AdversarialAttack:
 
         training_iterator = iter(data_loader) if attack_mode == 'targeted_psp_uap' else None
         target_eot_sampler = None
+        model_names = [name for name, _ in self._model_items()]
+        if isinstance(model_activation_directions, Mapping):
+            override_items = list(model_activation_directions.items())
+        else:
+            override_items = []
+            for entry in model_activation_directions or []:
+                text = str(entry)
+                separator = '=' if '=' in text else ':' if ':' in text else None
+                if separator is None:
+                    raise ValueError(
+                        'Per-model PSP directions must use MODEL=DIRECTION syntax.'
+                    )
+                override_items.append(text.split(separator, 1))
+        model_direction_overrides = {}
+        for raw_name, raw_direction in override_items:
+            name = str(raw_name).strip()
+            direction = str(raw_direction).strip().lower()
+            if direction not in {'maximize', 'minimize', 'off'}:
+                raise ValueError(
+                    f"Invalid PSP direction '{direction}' for model '{name}'. "
+                    'Use maximize, minimize, or off.'
+                )
+            model_direction_overrides[name] = direction
+        if self.models is None and model_direction_overrides:
+            if 'model' not in model_direction_overrides and len(model_direction_overrides) == 1:
+                model_direction_overrides = {
+                    'model': next(iter(model_direction_overrides.values()))
+                }
+        unknown_direction_models = set(model_direction_overrides) - set(model_names)
+        if unknown_direction_models:
+            raise ValueError(
+                'Unknown PSP model direction override(s): '
+                + ', '.join(sorted(unknown_direction_models))
+            )
+        activation_directions = {
+            name: (1.0 if attack_mode == 'psp_uap' else 0.0)
+            for name in model_names
+        }
+        direction_cosines = {name: None for name in model_names}
+        direction_cosine_ema = {name: None for name in model_names}
 
         best_patch = None
         best_step = 0
@@ -2335,38 +2558,15 @@ class AdversarialAttack:
 
             step_losses = []
             step_samples = 0
-
-            universal_patch = trigger_delta.clamp(-epsilon, epsilon)
-            if perturbation_mask is not None:
-                universal_patch = universal_patch * perturbation_mask
-
-            semantic_prior, semantic_delta = (
-                psp_sampler.sample(
-                    delta=universal_patch,
-                    num_copies=num_copies,
-                    input_transform=True,
-                )
-            )
-
-            semantic_prior = semantic_prior.to(self.device)
-            semantic_delta = semantic_delta.to(self.device)
+            step_number = step_idx + 1
 
             patch_optimizer.zero_grad(set_to_none=True)
-            self._zero_model_grad()
-
-            psp_loss = self._psp_loss(
-                semantic_prior=semantic_prior,
-                semantic_delta=semantic_delta,
-            )
-            psp_loss_value = float(psp_loss.detach().item())
-            (effective_feature_weight * psp_loss).backward()
-            # Model-parameter gradients are not optimized by the attack. Clear
-            # them between EOT views while retaining the accumulated patch grad.
             self._zero_model_grad()
 
             targeted_loss_value = 0.0
             targeted_samples = 0
             targeted_eot_views = 0
+            selected_inputs = None
             if attack_mode == 'targeted_psp_uap':
                 try:
                     inputs, targets = next(training_iterator)
@@ -2384,55 +2584,208 @@ class AdversarialAttack:
                 if source_mask.any():
                     targeted_samples = int(source_mask.sum().item())
                     selected_inputs = inputs[source_mask]
-                    if target_eot_sampler is None:
-                        target_eot_sampler = TransformSampler(
-                            height=int(selected_inputs.shape[-2]),
-                            width=int(selected_inputs.shape[-1]),
-                            p_brightness=0.5,
-                            p_contrast=0.5,
-                            p_affine=0.8,
-                            brightness=0.05,
-                            contrast=0.05,
-                            degrees=2.0,
-                            translate=(0.01, 0.01),
-                            scale=(0.99, 1.01),
-                            shear=0.0,
+
+            direction_updated = False
+            warmup_complete = step_number > direction_warmup_steps
+            if attack_mode == 'targeted_psp_uap' and warmup_complete:
+                if activation_direction == 'maximize':
+                    activation_directions = {name: 1.0 for name in model_names}
+                elif activation_direction == 'minimize':
+                    activation_directions = {name: -1.0 for name in model_names}
+                elif activation_direction == 'off':
+                    activation_directions = {name: 0.0 for name in model_names}
+                elif (
+                    selected_inputs is not None
+                    and any(name not in model_direction_overrides for name in model_names)
+                    and (
+                        any(value is None for value in direction_cosine_ema.values())
+                        or (step_number - direction_warmup_steps - 1)
+                        % direction_update_interval == 0
+                    )
+                ):
+                    alignment_patch = trigger_delta.clamp(-epsilon, epsilon)
+                    if perturbation_mask is not None:
+                        alignment_patch = alignment_patch * perturbation_mask
+                    alignment_prior, alignment_delta = psp_sampler.sample(
+                        delta=alignment_patch,
+                        num_copies=num_copies,
+                        input_transform=True,
+                    )
+                    raw_cosines = self._targeted_psp_gradient_alignment(
+                        semantic_prior=alignment_prior.to(self.device),
+                        semantic_delta=alignment_delta.to(self.device),
+                        selected_inputs=selected_inputs,
+                        trigger_delta=trigger_delta,
+                        epsilon=epsilon,
+                        trigger_boxes=trigger_boxes,
+                        perturbation_mask=perturbation_mask,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach,
+                        target_label=target_label,
+                        target_logit_margin=target_logit_margin,
+                    )
+                    for name, cosine in raw_cosines.items():
+                        previous = direction_cosine_ema[name]
+                        smoothed = (
+                            cosine
+                            if previous is None
+                            else direction_ema_decay * previous
+                            + (1.0 - direction_ema_decay) * cosine
                         )
-                    # Identity is always included. Each additional view gets a
-                    # fresh patch graph and is backpropagated immediately so EOT
-                    # does not multiply Inception's activation memory.
-                    augmentations = [None] + target_eot_sampler.sample(target_eot_samples - 1)
-                    for augmentation in augmentations:
-                        target_patch = trigger_delta.clamp(-epsilon, epsilon)
-                        if perturbation_mask is not None:
-                            target_patch = target_patch * perturbation_mask
-                        poisoned_inputs = self._inject_trigger(
-                            selected_inputs,
-                            trigger_boxes,
-                            trigger_patch=target_patch,
-                            trigger_mask=perturbation_mask,
-                            edge_softness=edge_softness,
-                            how_to_attach=how_to_attach,
+                        direction_cosines[name] = cosine
+                        direction_cosine_ema[name] = smoothed
+                        if smoothed > direction_cosine_threshold:
+                            activation_directions[name] = 1.0
+                        elif smoothed < -direction_cosine_threshold:
+                            activation_directions[name] = -1.0
+                        else:
+                            activation_directions[name] = 0.0
+                    direction_updated = True
+                    self._zero_model_grad()
+
+                for name, direction in model_direction_overrides.items():
+                    activation_directions[name] = {
+                        'maximize': 1.0,
+                        'minimize': -1.0,
+                        'off': 0.0,
+                    }[direction]
+
+            if attack_mode == 'psp_uap':
+                current_feature_weight = 1.0
+            elif not warmup_complete:
+                current_feature_weight = 0.0
+            else:
+                ramp_progress = (
+                    1.0
+                    if feature_ramp_steps == 0
+                    else min(
+                        1.0,
+                        float(step_number - direction_warmup_steps)
+                        / float(feature_ramp_steps),
+                    )
+                )
+                current_feature_weight = effective_feature_weight * ramp_progress
+
+            psp_active = (
+                current_feature_weight > 0.0
+                and any(direction != 0.0 for direction in activation_directions.values())
+                and (attack_mode == 'psp_uap' or selected_inputs is not None)
+            )
+            psp_loss_value = 0.0
+            psp_gradient = None
+            psp_gradient_norm = 0.0
+            target_gradient_norm = 0.0
+            psp_gradient_scale = 1.0
+            if psp_active:
+                psp_patch = trigger_delta.clamp(-epsilon, epsilon)
+                if perturbation_mask is not None:
+                    psp_patch = psp_patch * perturbation_mask
+                semantic_prior, semantic_delta = psp_sampler.sample(
+                    delta=psp_patch,
+                    num_copies=num_copies,
+                    input_transform=True,
+                )
+                semantic_prior = semantic_prior.to(self.device)
+                semantic_delta = semantic_delta.to(self.device)
+                psp_loss = self._psp_loss(
+                    semantic_prior=semantic_prior,
+                    semantic_delta=semantic_delta,
+                    directions=activation_directions,
+                )
+                psp_loss_value = float(psp_loss.detach().item())
+                (current_feature_weight * psp_loss).backward()
+                if (
+                    attack_mode == 'targeted_psp_uap'
+                    and trigger_delta.grad is not None
+                ):
+                    psp_gradient = trigger_delta.grad.detach().clone()
+                    psp_gradient_norm = float(psp_gradient.norm(p=2).item())
+                    trigger_delta.grad = None
+                step_samples = int(semantic_prior.shape[0])
+                # Model-parameter gradients are not optimized by the attack.
+                # Clear them while retaining the accumulated patch gradient.
+                self._zero_model_grad()
+
+            if selected_inputs is not None:
+                if target_eot_sampler is None:
+                    target_eot_sampler = TransformSampler(
+                        height=int(selected_inputs.shape[-2]),
+                        width=int(selected_inputs.shape[-1]),
+                        p_brightness=0.5,
+                        p_contrast=0.5,
+                        p_affine=0.8,
+                        brightness=0.05,
+                        contrast=0.05,
+                        degrees=2.0,
+                        translate=(0.01, 0.01),
+                        scale=(0.99, 1.01),
+                        shear=0.0,
+                    )
+                # Identity is always included. Each additional view gets a
+                # fresh patch graph and is backpropagated immediately so EOT
+                # does not multiply Inception's activation memory.
+                augmentations = [None] + target_eot_sampler.sample(target_eot_samples - 1)
+                for augmentation in augmentations:
+                    target_patch = trigger_delta.clamp(-epsilon, epsilon)
+                    if perturbation_mask is not None:
+                        target_patch = target_patch * perturbation_mask
+                    poisoned_inputs = self._inject_trigger(
+                        selected_inputs,
+                        trigger_boxes,
+                        trigger_patch=target_patch,
+                        trigger_mask=perturbation_mask,
+                        edge_softness=edge_softness,
+                        how_to_attach=how_to_attach,
+                    )
+                    transformed_inputs = (
+                        poisoned_inputs if augmentation is None
+                        else torch.clamp(augmentation(poisoned_inputs), 0.0, 1.0)
+                    )
+                    # This helper aggregates the same transformed batch over
+                    # one model or all ensemble models, so EOT is independent
+                    # of the optimization mode.
+                    with self._suspend_feature_capture():
+                        view_loss = self._targeted_binary_loss(
+                            transformed_inputs,
+                            target_label,
+                            logit_margin=target_logit_margin,
                         )
-                        transformed_inputs = (
-                            poisoned_inputs if augmentation is None
-                            else torch.clamp(augmentation(poisoned_inputs), 0.0, 1.0)
+                    scaled_view_loss = (
+                        target_weight * view_loss / float(target_eot_samples)
+                    )
+                    scaled_view_loss.backward()
+                    targeted_loss_value += float(view_loss.detach().item())
+                    targeted_eot_views += 1
+                    self._zero_model_grad()
+                targeted_loss_value /= float(targeted_eot_views)
+
+            if attack_mode == 'targeted_psp_uap':
+                target_gradient = (
+                    trigger_delta.grad.detach().clone()
+                    if trigger_delta.grad is not None else None
+                )
+                if target_gradient is not None:
+                    target_gradient_norm = float(target_gradient.norm(p=2).item())
+                if psp_gradient is not None:
+                    if target_gradient_norm <= 0.0 or max_psp_gradient_ratio == 0.0:
+                        psp_gradient_scale = 0.0
+                    elif psp_gradient_norm > 0.0:
+                        psp_gradient_scale = min(
+                            1.0,
+                            max_psp_gradient_ratio
+                            * target_gradient_norm
+                            / (psp_gradient_norm + 1e-20),
                         )
-                        # This helper aggregates the same transformed batch over
-                        # one model or all ensemble models, so EOT is independent
-                        # of the optimization mode.
-                        with self._suspend_feature_capture():
-                            view_loss = self._targeted_binary_loss(
-                                transformed_inputs, target_label
-                            )
-                        scaled_view_loss = (
-                            target_weight * view_loss / float(target_eot_samples)
+                    if target_gradient is None:
+                        trigger_delta.grad = (
+                            None
+                            if psp_gradient_scale == 0.0
+                            else psp_gradient.mul(psp_gradient_scale)
                         )
-                        scaled_view_loss.backward()
-                        targeted_loss_value += float(view_loss.detach().item())
-                        targeted_eot_views += 1
-                        self._zero_model_grad()
-                    targeted_loss_value /= float(targeted_eot_views)
+                    else:
+                        trigger_delta.grad = target_gradient.add(
+                            psp_gradient, alpha=psp_gradient_scale
+                        )
 
             patch_optimizer.step()
 
@@ -2466,18 +2819,22 @@ class AdversarialAttack:
                     universal_patch = universal_patch * perturbation_mask
 
             batch_loss_value = (
-                effective_feature_weight * psp_loss_value
+                current_feature_weight * psp_loss_value * psp_gradient_scale
                 + target_weight * targeted_loss_value
             )
 
             step_losses.append(batch_loss_value)
-
-            step_samples += int(semantic_prior.shape[0])
-
-            
             step_loss = (sum(step_losses)/ len(step_losses) if step_losses else 0.0)
 
             patch_linf = float(universal_patch.detach().reshape(-1).abs().max().item())
+            direction_labels = {
+                name: (
+                    'maximize' if direction > 0
+                    else 'minimize' if direction < 0
+                    else 'off'
+                )
+                for name, direction in activation_directions.items()
+            }
 
             step_history = {
                 "step": step_idx + 1,
@@ -2487,6 +2844,23 @@ class AdversarialAttack:
                 "targeted_loss": targeted_loss_value,
                 "targeted_training_samples": targeted_samples,
                 "targeted_eot_views": targeted_eot_views,
+                "target_logit_margin": (
+                    target_logit_margin if attack_mode == 'targeted_psp_uap' else 0.0
+                ),
+                "psp_active": psp_active,
+                "psp_effective_feature_weight": current_feature_weight,
+                "psp_effective_loss_contribution": (
+                    current_feature_weight * psp_loss_value * psp_gradient_scale
+                ),
+                "psp_activation_directions": direction_labels,
+                "psp_direction_updated": direction_updated,
+                "psp_direction_cosines": dict(direction_cosines),
+                "psp_direction_cosine_ema": dict(direction_cosine_ema),
+                "psp_semantic_samples": step_samples,
+                "psp_gradient_norm": psp_gradient_norm,
+                "target_gradient_norm": target_gradient_norm,
+                "psp_gradient_scale": psp_gradient_scale,
+                "psp_max_gradient_ratio": max_psp_gradient_ratio,
                 "saturation_rate": saturation_rate,
                 "patch_linf_norm": patch_linf,
                 "effective_patch_linf_norm": patch_linf,
@@ -2568,6 +2942,9 @@ class AdversarialAttack:
                     f"step={step_idx + 1} "
                     f"loss={step_loss:.6f} "
                     f"psp_loss={psp_loss_value:.6f} "
+                    f"psp_weight={current_feature_weight:.6f} "
+                    f"psp_directions={direction_labels} "
+                    f"psp_grad_scale={psp_gradient_scale:.6f} "
                     f"target_loss={targeted_loss_value:.6f} "
                     f"target_eot_views={targeted_eot_views} "
                     f"conditional_target_asr={target_asr:.4f} "
@@ -2594,6 +2971,14 @@ class AdversarialAttack:
         # Do not leave hooks alive after optimization; later inference would
         # otherwise retain feature maps that no caller consumes.
         self._remove_feature_extractor()
+        final_direction_labels = {
+            name: (
+                'maximize' if direction > 0
+                else 'minimize' if direction < 0
+                else 'off'
+            )
+            for name, direction in activation_directions.items()
+        }
 
         return {
             "patch": learned_patch,
@@ -2631,6 +3016,38 @@ class AdversarialAttack:
                 "num_copies": num_copies,
                 "feature_weight": effective_feature_weight,
                 "target_weight": target_weight if attack_mode == 'targeted_psp_uap' else 0.0,
+                "activation_direction_mode": (
+                    activation_direction
+                    if attack_mode == 'targeted_psp_uap' else 'maximize'
+                ),
+                "model_activation_direction_overrides": (
+                    dict(model_direction_overrides)
+                    if attack_mode == 'targeted_psp_uap' else {}
+                ),
+                "direction_warmup_steps": (
+                    direction_warmup_steps if attack_mode == 'targeted_psp_uap' else 0
+                ),
+                "feature_ramp_steps": (
+                    feature_ramp_steps if attack_mode == 'targeted_psp_uap' else 0
+                ),
+                "direction_update_interval": (
+                    direction_update_interval if attack_mode == 'targeted_psp_uap' else 0
+                ),
+                "direction_cosine_threshold": (
+                    direction_cosine_threshold if attack_mode == 'targeted_psp_uap' else 0.0
+                ),
+                "direction_ema_decay": (
+                    direction_ema_decay if attack_mode == 'targeted_psp_uap' else 0.0
+                ),
+                "target_logit_margin": (
+                    target_logit_margin if attack_mode == 'targeted_psp_uap' else 0.0
+                ),
+                "max_psp_gradient_ratio": (
+                    max_psp_gradient_ratio if attack_mode == 'targeted_psp_uap' else None
+                ),
+                "final_activation_directions": final_direction_labels,
+                "final_direction_cosines": dict(direction_cosines),
+                "final_direction_cosine_ema": dict(direction_cosine_ema),
                 "target_eot_samples": (
                     target_eot_samples if attack_mode == 'targeted_psp_uap' else 0
                 ),

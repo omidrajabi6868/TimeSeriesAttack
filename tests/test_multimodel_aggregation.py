@@ -102,10 +102,22 @@ def test_targeted_psp_eot_option_and_output_directory():
     args = parser.parse_args([
         '--patch-update-method', 'targeted_psp_uap',
         '--target-eot-samples', '6',
+        '--psp-activation-direction', 'minimize',
+        '--psp-model-activation-directions', 'AlexNet=maximize', 'ResNet34=off',
+        '--psp-direction-warmup-steps', '12',
+        '--psp-feature-ramp-steps', '8',
+        '--psp-target-logit-margin', '4.0',
+        '--psp-max-gradient-ratio', '0.25',
     ])
 
     assert args.target_eot_samples == 6
-    assert '_target_eot_6' in _default_output_dir(args)
+    output_dir = _default_output_dir(args)
+    assert '_target_eot_6' in output_dir
+    assert (
+        '_dir_minimize_w12_r8_m4.0_gr0.25'
+        in output_dir
+    )
+    assert '_md_AlexNet-max-ResNet34-off' in output_dir
 
 
 def test_ensemble_metadata_records_reproducibility_settings():
@@ -160,6 +172,11 @@ def test_multimodel_psp_uap_aggregates_each_models_feature_loss():
     assert result['ensemble']['multi_model'] is True
     assert result['ensemble']['model_names'] == ['first', 'second']
     assert result['ensemble']['aggregation'] == 'weighted_mean'
+    assert result['psp_uap']['activation_direction_mode'] == 'maximize'
+    assert result['history'][0]['psp_active'] is True
+    assert result['history'][0]['psp_activation_directions'] == {
+        'first': 'maximize', 'second': 'maximize'
+    }
     assert all(model.forward_calls >= 2 for model in models.values())
 
 
@@ -192,8 +209,12 @@ def test_targeted_psp_uap_is_available_for_multimodel_optimization():
     assert result['ensemble']['multi_model'] is True
     assert result['psp_uap']['training_mode'] == 'targeted_hybrid'
     assert result['psp_uap']['target_eot_samples'] == 4
+    assert result['psp_uap']['activation_direction_mode'] == 'auto'
     assert result['history'][0]['targeted_training_samples'] == 2
     assert result['history'][0]['targeted_eot_views'] == 4
+    assert result['history'][0]['psp_activation_directions'] == {
+        'first': 'off', 'second': 'off'
+    }
 
 
 def test_multimodel_robust_uap_aggregates_each_models_classification_loss(monkeypatch):
