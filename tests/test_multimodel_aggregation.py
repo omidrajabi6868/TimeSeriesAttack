@@ -97,6 +97,17 @@ def test_multimodel_optimization_is_a_boolean_flag():
     assert parser.parse_args(['--no-multimodel-optimization']).multimodel_optimization is False
 
 
+def test_targeted_psp_eot_option_and_output_directory():
+    parser = build_parser()
+    args = parser.parse_args([
+        '--patch-update-method', 'targeted_psp_uap',
+        '--target-eot-samples', '6',
+    ])
+
+    assert args.target_eot_samples == 6
+    assert '_target_eot_6' in _default_output_dir(args)
+
+
 def test_ensemble_metadata_records_reproducibility_settings():
     attack = AdversarialAttack(
         {'small': ScaleModel(1), 'large': ScaleModel(2)},
@@ -180,7 +191,9 @@ def test_targeted_psp_uap_is_available_for_multimodel_optimization():
 
     assert result['ensemble']['multi_model'] is True
     assert result['psp_uap']['training_mode'] == 'targeted_hybrid'
+    assert result['psp_uap']['target_eot_samples'] == 4
     assert result['history'][0]['targeted_training_samples'] == 2
+    assert result['history'][0]['targeted_eot_views'] == 4
 
 
 def test_multimodel_robust_uap_aggregates_each_models_classification_loss(monkeypatch):

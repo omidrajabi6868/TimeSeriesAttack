@@ -562,6 +562,7 @@ class AdversarialAttack:
                                 psp_feature_weight=0.001,
                                 psp_target_weight=1.0,
                                 psp_prior='auto',
+                                target_eot_samples=4,
                                 perturbation_mask_path=None):
         for _, model in self._model_items():
             model.eval()
@@ -816,6 +817,7 @@ class AdversarialAttack:
                 feature_weight=psp_feature_weight,
                 target_weight=psp_target_weight,
                 prior=psp_prior,
+                target_eot_samples=target_eot_samples,
                 perturbation_mask=perturbation_mask,
                 perturbation_mask_metadata=perturbation_mask_metadata,
             )
@@ -2226,6 +2228,7 @@ class AdversarialAttack:
                                 feature_weight=0.001,
                                 target_weight=1.0,
                                 prior='auto',
+                                target_eot_samples=4,
                                 perturbation_mask=None,
                                 perturbation_mask_metadata=None,
                             ):
@@ -2274,6 +2277,9 @@ class AdversarialAttack:
             raise ValueError('PSP loss weights must be non-negative.')
         if attack_mode == 'targeted_psp_uap' and target_weight == 0:
             raise ValueError('targeted_psp_uap requires psp_target_weight > 0.')
+        target_eot_samples = int(target_eot_samples)
+        if target_eot_samples <= 0:
+            raise ValueError('target_eot_samples must be a positive integer.')
         effective_feature_weight = feature_weight if attack_mode == 'targeted_psp_uap' else 1.0
 
         self._build_cost_function(attack_mode)
@@ -2315,6 +2321,7 @@ class AdversarialAttack:
                 trigger_delta.mul_(perturbation_mask)
 
         training_iterator = iter(data_loader) if attack_mode == 'targeted_psp_uap' else None
+        target_eot_sampler = None
 
         best_patch = None
         best_step = 0
@@ -2351,9 +2358,15 @@ class AdversarialAttack:
                 semantic_prior=semantic_prior,
                 semantic_delta=semantic_delta,
             )
+            psp_loss_value = float(psp_loss.detach().item())
+            (effective_feature_weight * psp_loss).backward()
+            # Model-parameter gradients are not optimized by the attack. Clear
+            # them between EOT views while retaining the accumulated patch grad.
+            self._zero_model_grad()
 
-            targeted_loss = torch.zeros((), device=psp_loss.device)
+            targeted_loss_value = 0.0
             targeted_samples = 0
+            targeted_eot_views = 0
             if attack_mode == 'targeted_psp_uap':
                 try:
                     inputs, targets = next(training_iterator)
@@ -2369,23 +2382,57 @@ class AdversarialAttack:
                 else:
                     source_mask = torch.ones_like(flat_targets, dtype=torch.bool)
                 if source_mask.any():
-                    poisoned_inputs = self._inject_trigger(
-                        inputs[source_mask],
-                        trigger_boxes,
-                        trigger_patch=universal_patch,
-                        trigger_mask=perturbation_mask,
-                        edge_softness=edge_softness,
-                        how_to_attach=how_to_attach,
-                    )
-                    # The PSP hooks are unnecessary for the supervised branch
-                    # and retaining those maps greatly increases GPU memory.
-                    with self._suspend_feature_capture():
-                        targeted_loss = self._targeted_binary_loss(poisoned_inputs, target_label)
                     targeted_samples = int(source_mask.sum().item())
-
-            batch_loss = effective_feature_weight * psp_loss + target_weight * targeted_loss
-
-            batch_loss.backward()
+                    selected_inputs = inputs[source_mask]
+                    if target_eot_sampler is None:
+                        target_eot_sampler = TransformSampler(
+                            height=int(selected_inputs.shape[-2]),
+                            width=int(selected_inputs.shape[-1]),
+                            p_brightness=0.5,
+                            p_contrast=0.5,
+                            p_affine=0.8,
+                            brightness=0.05,
+                            contrast=0.05,
+                            degrees=2.0,
+                            translate=(0.01, 0.01),
+                            scale=(0.99, 1.01),
+                            shear=0.0,
+                        )
+                    # Identity is always included. Each additional view gets a
+                    # fresh patch graph and is backpropagated immediately so EOT
+                    # does not multiply Inception's activation memory.
+                    augmentations = [None] + target_eot_sampler.sample(target_eot_samples - 1)
+                    for augmentation in augmentations:
+                        target_patch = trigger_delta.clamp(-epsilon, epsilon)
+                        if perturbation_mask is not None:
+                            target_patch = target_patch * perturbation_mask
+                        poisoned_inputs = self._inject_trigger(
+                            selected_inputs,
+                            trigger_boxes,
+                            trigger_patch=target_patch,
+                            trigger_mask=perturbation_mask,
+                            edge_softness=edge_softness,
+                            how_to_attach=how_to_attach,
+                        )
+                        transformed_inputs = (
+                            poisoned_inputs if augmentation is None
+                            else torch.clamp(augmentation(poisoned_inputs), 0.0, 1.0)
+                        )
+                        # This helper aggregates the same transformed batch over
+                        # one model or all ensemble models, so EOT is independent
+                        # of the optimization mode.
+                        with self._suspend_feature_capture():
+                            view_loss = self._targeted_binary_loss(
+                                transformed_inputs, target_label
+                            )
+                        scaled_view_loss = (
+                            target_weight * view_loss / float(target_eot_samples)
+                        )
+                        scaled_view_loss.backward()
+                        targeted_loss_value += float(view_loss.detach().item())
+                        targeted_eot_views += 1
+                        self._zero_model_grad()
+                    targeted_loss_value /= float(targeted_eot_views)
 
             patch_optimizer.step()
 
@@ -2418,7 +2465,10 @@ class AdversarialAttack:
                 if perturbation_mask is not None:
                     universal_patch = universal_patch * perturbation_mask
 
-            batch_loss_value = float(batch_loss.detach().item())
+            batch_loss_value = (
+                effective_feature_weight * psp_loss_value
+                + target_weight * targeted_loss_value
+            )
 
             step_losses.append(batch_loss_value)
 
@@ -2433,9 +2483,10 @@ class AdversarialAttack:
                 "step": step_idx + 1,
                 "patch_update_method": attack_mode,
                 "loss": step_loss,
-                "psp_feature_loss": float(psp_loss.detach().item()),
-                "targeted_loss": float(targeted_loss.detach().item()),
+                "psp_feature_loss": psp_loss_value,
+                "targeted_loss": targeted_loss_value,
                 "targeted_training_samples": targeted_samples,
+                "targeted_eot_views": targeted_eot_views,
                 "saturation_rate": saturation_rate,
                 "patch_linf_norm": patch_linf,
                 "effective_patch_linf_norm": patch_linf,
@@ -2516,8 +2567,9 @@ class AdversarialAttack:
                     f"[{'Targeted hybrid' if attack_mode == 'targeted_psp_uap' else 'Data-free'} PSP-UAP] "
                     f"step={step_idx + 1} "
                     f"loss={step_loss:.6f} "
-                    f"psp_loss={float(psp_loss.detach().item()):.6f} "
-                    f"target_loss={float(targeted_loss.detach().item()):.6f} "
+                    f"psp_loss={psp_loss_value:.6f} "
+                    f"target_loss={targeted_loss_value:.6f} "
+                    f"target_eot_views={targeted_eot_views} "
                     f"conditional_target_asr={target_asr:.4f} "
                     f"prediction_change_rate={prediction_change_rate:.4f} "
                     f"linf={patch_linf:.6f}"
@@ -2579,6 +2631,19 @@ class AdversarialAttack:
                 "num_copies": num_copies,
                 "feature_weight": effective_feature_weight,
                 "target_weight": target_weight if attack_mode == 'targeted_psp_uap' else 0.0,
+                "target_eot_samples": (
+                    target_eot_samples if attack_mode == 'targeted_psp_uap' else 0
+                ),
+                "target_eot": {
+                    "identity_included": True,
+                    "brightness": 0.05,
+                    "contrast": 0.05,
+                    "degrees": 2.0,
+                    "translate": [0.01, 0.01],
+                    "scale": [0.99, 1.01],
+                    "shear": 0.0,
+                    "applies_to": "single_and_multi_model",
+                },
                 "validation_metric": "conditional_targeted_attack_success_rate",
                 "image_size": [width, height],
                 "saturation_rescales": saturation_rescales,

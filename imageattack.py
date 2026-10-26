@@ -37,12 +37,16 @@ def _default_output_dir(args):
         f'_spatial_mask_{Path(args.perturbation_mask_path).stem}'
         if args.perturbation_mask_path else ''
     )
+    target_eot_name = (
+        f'_target_eot_{args.target_eot_samples}'
+        if args.patch_update_method == 'targeted_psp_uap' else ''
+    )
     run_name = (
         f'{args.task}{scope_name}_{args.patch_update_method}_{args.how_to_attach}'
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
-        f'{spatial_mask_name}'
+        f'{target_eot_name}{spatial_mask_name}'
     )
     return str(Path('backups') / optimization_dir / run_name)
 
@@ -97,6 +101,13 @@ def build_parser():
     parser.add_argument(
         '--psp-target-weight', type=float, default=1.0,
         help='Weight of the supervised target-label loss in targeted_psp_uap.',
+    )
+    parser.add_argument(
+        '--target-eot-samples', type=int, default=4,
+        help=(
+            'Number of real-image targeted-loss views for targeted_psp_uap, including one '
+            'identity view. Applies to both single- and multi-model optimization.'
+        ),
     )
     parser.add_argument(
         '--psp-prior', choices=('auto', 'gauss', 'jigsaw'), default='auto',
@@ -305,6 +316,7 @@ def main(argv=None):
                                             psp_feature_weight=args.psp_feature_weight,
                                             psp_target_weight=args.psp_target_weight,
                                             psp_prior=args.psp_prior,
+                                            target_eot_samples=args.target_eot_samples,
                                             perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
