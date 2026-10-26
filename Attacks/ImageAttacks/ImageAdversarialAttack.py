@@ -217,6 +217,15 @@ class AdversarialAttack:
             return 0.0
         return float(cosine.clamp(-1.0, 1.0).item())
 
+    @staticmethod
+    def _latched_activation_direction(current_direction, cosine, threshold):
+        """Update a PSP direction without dropping a confident choice on weak evidence."""
+        if cosine > threshold:
+            return 1.0
+        if cosine < -threshold:
+            return -1.0
+        return float(current_direction)
+
     @classmethod
     def _gradient_cosine(cls, first_loss, second_loss, parameter, retain_graph=False):
         """Cosine similarity of two loss gradients with respect to one tensor."""
@@ -2634,12 +2643,13 @@ class AdversarialAttack:
                         )
                         direction_cosines[name] = cosine
                         direction_cosine_ema[name] = smoothed
-                        if smoothed > direction_cosine_threshold:
-                            activation_directions[name] = 1.0
-                        elif smoothed < -direction_cosine_threshold:
-                            activation_directions[name] = -1.0
-                        else:
-                            activation_directions[name] = 0.0
+                        activation_directions[name] = (
+                            self._latched_activation_direction(
+                                current_direction=activation_directions[name],
+                                cosine=smoothed,
+                                threshold=direction_cosine_threshold,
+                            )
+                        )
                     direction_updated = True
                     self._zero_model_grad()
 
