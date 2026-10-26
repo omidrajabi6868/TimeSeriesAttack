@@ -165,7 +165,10 @@ def build_parser():
     )
     parser.add_argument(
         '--psp-direction-cosine-threshold', type=float, default=0.05,
-        help='Gradient-cosine dead zone; directions inside it disable PSP for that model.',
+        help=(
+            'Gradient-cosine dead zone. A model remains off until its first confident '
+            'direction; later values inside the dead zone retain its last direction.'
+        ),
     )
     parser.add_argument(
         '--psp-direction-ema-decay', type=float, default=0.9,
