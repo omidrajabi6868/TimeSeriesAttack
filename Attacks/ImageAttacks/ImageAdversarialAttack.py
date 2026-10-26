@@ -2548,10 +2548,33 @@ class AdversarialAttack:
                 'Unknown PSP model direction override(s): '
                 + ', '.join(sorted(unknown_direction_models))
             )
+        resolved_activation_direction = (
+            'maximize'
+            if attack_mode == 'psp_uap' and activation_direction == 'auto'
+            else activation_direction
+        )
+        initial_direction = {
+            'maximize': 1.0,
+            'minimize': -1.0,
+            'off': 0.0,
+            # Targeted auto starts undecided and selects after warm-up.
+            'auto': 0.0,
+        }[resolved_activation_direction]
         activation_directions = {
-            name: (1.0 if attack_mode == 'psp_uap' else 0.0)
+            name: initial_direction
             for name in model_names
         }
+        if attack_mode == 'psp_uap':
+            for name, direction in model_direction_overrides.items():
+                activation_directions[name] = {
+                    'maximize': 1.0,
+                    'minimize': -1.0,
+                    'off': 0.0,
+                }[direction]
+            if not any(direction != 0.0 for direction in activation_directions.values()):
+                raise ValueError(
+                    'psp_uap requires at least one model direction to be maximize or minimize.'
+                )
         direction_cosines = {name: None for name in model_names}
         direction_cosine_ema = {name: None for name in model_names}
 
@@ -3026,14 +3049,9 @@ class AdversarialAttack:
                 "num_copies": num_copies,
                 "feature_weight": effective_feature_weight,
                 "target_weight": target_weight if attack_mode == 'targeted_psp_uap' else 0.0,
-                "activation_direction_mode": (
-                    activation_direction
-                    if attack_mode == 'targeted_psp_uap' else 'maximize'
-                ),
-                "model_activation_direction_overrides": (
-                    dict(model_direction_overrides)
-                    if attack_mode == 'targeted_psp_uap' else {}
-                ),
+                "activation_direction_mode": resolved_activation_direction,
+                "requested_activation_direction": activation_direction,
+                "model_activation_direction_overrides": dict(model_direction_overrides),
                 "direction_warmup_steps": (
                     direction_warmup_steps if attack_mode == 'targeted_psp_uap' else 0
                 ),
