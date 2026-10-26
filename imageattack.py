@@ -49,7 +49,11 @@ def _default_output_dir(args):
         f'_gr{args.psp_max_gradient_ratio}'
         if args.patch_update_method == 'targeted_psp_uap' else ''
     )
-    targeted_psp_model_directions_name = (
+    data_free_psp_direction_name = (
+        f'_dir_{"maximize" if args.psp_activation_direction == "auto" else args.psp_activation_direction}'
+        if args.patch_update_method == 'psp_uap' else ''
+    )
+    psp_model_directions_name = (
         '_md_' + '-'.join(
             str(entry).replace('=maximize', '-max')
             .replace('=minimize', '-min')
@@ -60,7 +64,7 @@ def _default_output_dir(args):
             for entry in args.psp_model_activation_directions
         )
         if (
-            args.patch_update_method == 'targeted_psp_uap'
+            args.patch_update_method in {'psp_uap', 'targeted_psp_uap'}
             and args.psp_model_activation_directions
         ) else ''
     )
@@ -69,8 +73,8 @@ def _default_output_dir(args):
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
-        f'{target_eot_name}{targeted_psp_schedule_name}'
-        f'{targeted_psp_model_directions_name}{spatial_mask_name}'
+        f'{target_eot_name}{targeted_psp_schedule_name}{data_free_psp_direction_name}'
+        f'{psp_model_directions_name}{spatial_mask_name}'
     )
     return str(Path('backups') / optimization_dir / run_name)
 
@@ -138,16 +142,17 @@ def build_parser():
         choices=('maximize', 'minimize', 'auto', 'off'),
         default='auto',
         help=(
-            'Activation direction for targeted_psp_uap. auto selects a direction per model '
-            'from its gradient agreement with the targeted objective. psp_uap remains '
-            'paper-faithful and always maximizes activations.'
+            'PSP activation direction. For targeted_psp_uap, auto selects per model from '
+            'gradient agreement with the targeted objective. For data-free psp_uap, '
+            'maximize and minimize are explicit choices, while auto preserves the '
+            'paper-faithful maximize default.'
         ),
     )
     parser.add_argument(
         '--psp-model-activation-directions', nargs='*', default=None,
         metavar='MODEL=DIRECTION',
         help=(
-            'Optional per-model targeted PSP overrides, for example '
+            'Optional per-model PSP overrides for psp_uap or targeted_psp_uap, for example '
             'AlexNet=maximize ResNet34=minimize. Directions are maximize, minimize, or off.'
         ),
     )
