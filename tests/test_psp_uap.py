@@ -132,8 +132,11 @@ class PSPUAPTests(unittest.TestCase):
         self.assertEqual(result['patch_update_method'], 'targeted_psp_uap')
         self.assertEqual(result['psp_uap']['training_mode'], 'targeted_hybrid')
         self.assertEqual(result['psp_uap']['image_size'], [12, 8])
+        self.assertEqual(result['psp_uap']['target_eot_samples'], 4)
+        self.assertEqual(result['psp_uap']['target_eot']['applies_to'], 'single_and_multi_model')
         self.assertGreater(result['history'][0]['targeted_training_samples'], 0)
         self.assertGreater(result['history'][0]['targeted_loss'], 0)
+        self.assertEqual(result['history'][0]['targeted_eot_views'], 4)
 
 
 if __name__ == "__main__":

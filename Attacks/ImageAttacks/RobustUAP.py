@@ -33,6 +33,12 @@ class TransformSampler:
         p_brightness=0.5,
         p_contrast=0.5,
         p_affine=0.8,
+        brightness=0.2,
+        contrast=0.2,
+        degrees=5.0,
+        translate=(0.03, 0.03),
+        scale=(0.97, 1.03),
+        shear=2.0,
     ):
         self.height = height
         self.width = width
@@ -40,6 +46,12 @@ class TransformSampler:
         self.p_brightness = p_brightness
         self.p_contrast = p_contrast
         self.p_affine = p_affine
+        self.brightness = brightness
+        self.contrast = contrast
+        self.degrees = degrees
+        self.translate = translate
+        self.scale = scale
+        self.shear = shear
 
     def sample(self, n):
 
@@ -55,7 +67,7 @@ class TransformSampler:
             if random.random() < self.p_brightness:
                 ops.append(
                     transforms.ColorJitter(
-                        brightness=0.2
+                        brightness=self.brightness
                     )
                 )
 
@@ -65,7 +77,7 @@ class TransformSampler:
             if random.random() < self.p_contrast:
                 ops.append(
                     transforms.ColorJitter(
-                        contrast=0.2
+                        contrast=self.contrast
                     )
                 )
 
@@ -78,10 +90,10 @@ class TransformSampler:
             if random.random() < self.p_affine:
                 ops.append(
                     transforms.RandomAffine(
-                        degrees=5,
-                        translate=(0.03, 0.03),
-                        scale=(0.97, 1.03),
-                        shear=2,
+                        degrees=self.degrees,
+                        translate=self.translate,
+                        scale=self.scale,
+                        shear=self.shear,
                     )
                 )
 

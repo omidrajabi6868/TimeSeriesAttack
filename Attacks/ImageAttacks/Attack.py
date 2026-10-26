@@ -43,6 +43,7 @@ class Attck(AdversarialAttack):
                             psp_feature_weight=0.001,
                             psp_target_weight=1.0,
                             psp_prior='auto',
+                            target_eot_samples=4,
                             perturbation_mask_path=None,
                             checkpoint_interval=None,
                             checkpoint_path=None):
@@ -100,6 +101,7 @@ class Attck(AdversarialAttack):
             psp_feature_weight=psp_feature_weight,
             psp_target_weight=psp_target_weight,
             psp_prior=psp_prior,
+            target_eot_samples=target_eot_samples,
             perturbation_mask_path=perturbation_mask_path)
 
     def learn_image_specific_patch(self,
