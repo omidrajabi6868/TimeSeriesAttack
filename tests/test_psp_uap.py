@@ -71,6 +71,25 @@ class PSPUAPTests(unittest.TestCase):
 
         self.assertAlmostEqual(cosine, -1.0, places=6)
 
+    def test_auto_direction_latches_during_weak_alignment(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        update = AdversarialAttack._latched_activation_direction
+
+        # An undecided model stays off until the alignment is confident.
+        self.assertEqual(update(0.0, 0.01, 0.05), 0.0)
+        self.assertEqual(update(0.0, 0.20, 0.05), 1.0)
+        self.assertEqual(update(0.0, -0.20, 0.05), -1.0)
+
+        # Weak later evidence retains the selected direction instead of
+        # returning the model to off.
+        self.assertEqual(update(1.0, 0.01, 0.05), 1.0)
+        self.assertEqual(update(-1.0, -0.01, 0.05), -1.0)
+
+        # Only confident evidence in the opposite direction switches it.
+        self.assertEqual(update(1.0, -0.20, 0.05), -1.0)
+        self.assertEqual(update(-1.0, 0.20, 0.05), 1.0)
+
     def test_sampler_uses_requested_copy_count_and_keeps_delta_gradient(self):
         torch.manual_seed(0)
         delta = torch.zeros(1, 3, 16, 16, requires_grad=True)
