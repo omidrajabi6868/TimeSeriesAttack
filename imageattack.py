@@ -41,12 +41,36 @@ def _default_output_dir(args):
         f'_target_eot_{args.target_eot_samples}'
         if args.patch_update_method == 'targeted_psp_uap' else ''
     )
+    targeted_psp_schedule_name = (
+        f'_dir_{args.psp_activation_direction}'
+        f'_w{args.psp_direction_warmup_steps}'
+        f'_r{args.psp_feature_ramp_steps}'
+        f'_m{args.psp_target_logit_margin}'
+        f'_gr{args.psp_max_gradient_ratio}'
+        if args.patch_update_method == 'targeted_psp_uap' else ''
+    )
+    targeted_psp_model_directions_name = (
+        '_md_' + '-'.join(
+            str(entry).replace('=maximize', '-max')
+            .replace('=minimize', '-min')
+            .replace('=off', '-off')
+            .replace(':maximize', '-max')
+            .replace(':minimize', '-min')
+            .replace(':off', '-off')
+            for entry in args.psp_model_activation_directions
+        )
+        if (
+            args.patch_update_method == 'targeted_psp_uap'
+            and args.psp_model_activation_directions
+        ) else ''
+    )
     run_name = (
         f'{args.task}{scope_name}_{args.patch_update_method}_{args.how_to_attach}'
         f'_count_{args.patch_count}_size_{args.patch_size[0]}by{args.patch_size[1]}'
         f'_epsilon_{args.epsilon}_lr_{args.learning_rate}_mlr_{args.mask_learning_rate}'
         f'_mask_weight_{args.mask_l1_weight}_patch_weight_{args.patch_l2_weight}'
-        f'{target_eot_name}{spatial_mask_name}'
+        f'{target_eot_name}{targeted_psp_schedule_name}'
+        f'{targeted_psp_model_directions_name}{spatial_mask_name}'
     )
     return str(Path('backups') / optimization_dir / run_name)
 
@@ -107,6 +131,55 @@ def build_parser():
         help=(
             'Number of real-image targeted-loss views for targeted_psp_uap, including one '
             'identity view. Applies to both single- and multi-model optimization.'
+        ),
+    )
+    parser.add_argument(
+        '--psp-activation-direction',
+        choices=('maximize', 'minimize', 'auto', 'off'),
+        default='auto',
+        help=(
+            'Activation direction for targeted_psp_uap. auto selects a direction per model '
+            'from its gradient agreement with the targeted objective. psp_uap remains '
+            'paper-faithful and always maximizes activations.'
+        ),
+    )
+    parser.add_argument(
+        '--psp-model-activation-directions', nargs='*', default=None,
+        metavar='MODEL=DIRECTION',
+        help=(
+            'Optional per-model targeted PSP overrides, for example '
+            'AlexNet=maximize ResNet34=minimize. Directions are maximize, minimize, or off.'
+        ),
+    )
+    parser.add_argument(
+        '--psp-direction-warmup-steps', type=int, default=20,
+        help='Target-only warm-up steps before PSP activation starts in targeted_psp_uap.',
+    )
+    parser.add_argument(
+        '--psp-feature-ramp-steps', type=int, default=20,
+        help='Steps used to ramp the targeted PSP feature weight from zero to its configured value.',
+    )
+    parser.add_argument(
+        '--psp-direction-update-interval', type=int, default=20,
+        help='Steps between per-model activation-direction updates in auto mode.',
+    )
+    parser.add_argument(
+        '--psp-direction-cosine-threshold', type=float, default=0.05,
+        help='Gradient-cosine dead zone; directions inside it disable PSP for that model.',
+    )
+    parser.add_argument(
+        '--psp-direction-ema-decay', type=float, default=0.9,
+        help='EMA decay applied to per-model PSP/target gradient cosine measurements.',
+    )
+    parser.add_argument(
+        '--psp-target-logit-margin', type=float, default=3.0,
+        help='Target-logit margin maintained after targeted ASR reaches the decision boundary.',
+    )
+    parser.add_argument(
+        '--psp-max-gradient-ratio', type=float, default=0.5,
+        help=(
+            'Maximum targeted-PSP gradient norm as a fraction of the real-image target '
+            'gradient norm; prevents the feature objective from dominating late training.'
         ),
     )
     parser.add_argument(
@@ -317,6 +390,15 @@ def main(argv=None):
                                             psp_target_weight=args.psp_target_weight,
                                             psp_prior=args.psp_prior,
                                             target_eot_samples=args.target_eot_samples,
+                                            psp_activation_direction=args.psp_activation_direction,
+                                            psp_model_activation_directions=args.psp_model_activation_directions,
+                                            psp_direction_warmup_steps=args.psp_direction_warmup_steps,
+                                            psp_feature_ramp_steps=args.psp_feature_ramp_steps,
+                                            psp_direction_update_interval=args.psp_direction_update_interval,
+                                            psp_direction_cosine_threshold=args.psp_direction_cosine_threshold,
+                                            psp_direction_ema_decay=args.psp_direction_ema_decay,
+                                            psp_target_logit_margin=args.psp_target_logit_margin,
+                                            psp_max_gradient_ratio=args.psp_max_gradient_ratio,
                                             perturbation_mask_path=args.perturbation_mask_path)
 
         saved_trigger_path = attack.save_trigger(trigger=learned_trigger, output_path=f'{trigger_preview_dir}/saved_trigger')
