@@ -120,6 +120,17 @@ def test_targeted_psp_eot_option_and_output_directory():
     assert '_md_AlexNet-max-ResNet34-off' in output_dir
 
 
+def test_data_free_psp_direction_is_in_output_directory():
+    parser = build_parser()
+    args = parser.parse_args([
+        '--patch-update-method', 'psp_uap',
+        '--psp-activation-direction', 'minimize',
+    ])
+
+    assert '_psp_uap_' in _default_output_dir(args)
+    assert '_dir_minimize' in _default_output_dir(args)
+
+
 def test_ensemble_metadata_records_reproducibility_settings():
     attack = AdversarialAttack(
         {'small': ScaleModel(1), 'large': ScaleModel(2)},
