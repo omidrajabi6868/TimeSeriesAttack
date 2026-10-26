@@ -176,6 +176,44 @@ class PSPUAPTests(unittest.TestCase):
         self.assertFalse(result['history'][0]['psp_active'])
         self.assertEqual(result['history'][0]['psp_activation_directions'], {'model': 'off'})
 
+    def test_data_free_psp_supports_activation_minimization(self):
+        from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 2, 1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(), nn.Linear(2, 1),
+        )
+        inputs = torch.zeros(2, 3, 8, 8)
+        targets = torch.zeros(2, 1)
+        loader = DataLoader(TensorDataset(inputs, targets), batch_size=2)
+        attack = AdversarialAttack(model, device='cpu', use_multi_gpu=False)
+
+        result = attack.learn_universal_trigger(
+            data_loader=loader,
+            validation_loader=loader,
+            trigger_box={'x': 0, 'y': 0, 'width': 8, 'height': 8},
+            patch_update_method='psp_uap',
+            steps=1,
+            learning_rate=0.01,
+            epsilon=0.03,
+            optimize_mask=False,
+            progressive_resize=False,
+            randomize_training_location=False,
+            log_interval=0,
+            trigger_preview_interval=0,
+            psp_num_copies=2,
+            psp_activation_direction='minimize',
+        )
+
+        self.assertEqual(result['psp_uap']['training_mode'], 'data_free')
+        self.assertEqual(result['psp_uap']['activation_direction_mode'], 'minimize')
+        self.assertEqual(result['psp_uap']['requested_activation_direction'], 'minimize')
+        self.assertTrue(result['history'][0]['psp_active'])
+        self.assertEqual(
+            result['history'][0]['psp_activation_directions'],
+            {'model': 'minimize'},
+        )
+
     def test_targeted_psp_can_enable_manual_activation_after_zero_warmup(self):
         from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
