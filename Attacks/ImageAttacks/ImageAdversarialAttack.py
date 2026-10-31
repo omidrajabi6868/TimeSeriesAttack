@@ -17,7 +17,8 @@ from Network.UNet import ParameterRender
 from Attacks.ImageAttacks.Fourier import FourierFilter
 from Attacks.ImageAttacks.RobustUAP import RobustUAPConfig, TransformSampler, estimate_robustness, project_lp_ball
 from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler 
-from Attacks.ImageAttacks.Aggregation import aggregate\nfrom Attacks.ImageAttacks.GradCAM import compute_gradcam, heatmap_to_pil, overlay_heatmap
+from Attacks.ImageAttacks.Aggregation import aggregate
+from Attacks.ImageAttacks.GradCAM import compute_gradcam, heatmap_to_pil, overlay_heatmap
 from torch.utils.data import TensorDataset, DataLoader
 
 
