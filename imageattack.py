@@ -204,6 +204,13 @@ def build_parser():
     parser.add_argument('--checkpoint-interval', type=int, default=5,
                         help='Save an interruption-safe trigger checkpoint every N steps; 0 disables it.')
     parser.add_argument('--visualization-examples', type=int, default=20)
+    parser.add_argument(
+        '--gradcam-examples', type=int, default=5,
+        help=(
+            'Number of eligible test samples for paired clean/adversarial Grad-CAM output; '
+            '0 disables Grad-CAM generation.'
+        ),
+    )
     parser.add_argument('--multimodel-optimization', action=argparse.BooleanOptionalAction, default=False,
                         help='Train a trigger with knowledge of several models; use --no-multimodel-optimization to load one instead.')
     parser.add_argument('--ensemble-models', nargs='+',
@@ -369,6 +376,17 @@ def main(argv=None):
                 trigger_preview_dir, evaluation_models, split_name=split_name
             )
             print(f'image_specific_{split_name}_evaluation: {transfer_metrics}')
+        gradcam_summary = attack.save_image_specific_gradcam_visualizations(
+            trigger_preview_dir,
+            models=evaluation_models,
+            split_name='test',
+            max_examples=args.gradcam_examples,
+        )
+        print(
+            'image_specific_test_gradcam: '
+            f'saved={gradcam_summary["visualizations_saved"]}, '
+            f'output={Path(trigger_preview_dir) / "test" / "gradcam"}'
+        )
         return
 
     if training:
@@ -456,6 +474,11 @@ def main(argv=None):
     # Transfer evaluation is deliberately separate from optimization. The
     # saved perturbation is applied unchanged to each black-box classifier and
     # scored with the same conditional targeted ASR used for the white box.
+    gradcam_models = {}
+    if classification.models:
+        gradcam_models.update(classification.models)
+    else:
+        gradcam_models[args.model_name] = classification.model
     if args.black_box_models:
         black_box_classification = ClassificationBase(
             model_name=args.black_box_models[0],
@@ -466,6 +489,7 @@ def main(argv=None):
             gpu_ids=args.gpu_ids,
         )
         black_box_classification.load_checkpoints(args.checkpoint_dir)
+        gradcam_models.update(black_box_classification.models)
         for black_box_name, black_box_model in black_box_classification.models.items():
             black_box_attack = AdversarialAttack(
                 model=black_box_model,
@@ -494,6 +518,18 @@ def main(argv=None):
         only_successful_poisoned=True,
     )
     print('Saved trigger visualizations to trigger_visualization/')
+    gradcam_summary = attack.save_universal_gradcam_visualizations(
+        test_loader,
+        output_dir=f'{trigger_preview_dir}/gradcam/test',
+        models=gradcam_models,
+        max_examples=args.gradcam_examples,
+        **selected_trigger_eval_kwargs,
+    )
+    print(
+        'universal_test_gradcam: '
+        f'saved={gradcam_summary["visualizations_saved"]}, '
+        f'output={Path(trigger_preview_dir) / "gradcam" / "test"}'
+    )
     
 
     # if task == 'backdoor_attack':
