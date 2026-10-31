@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from Network.ClassificationMetrics import binary_classification_metrics
-from PIL import Image
+from PIL import Image, ImageDraw
 from typing import Callable, Optional, Sequence
 from pathlib import Path
 from Network import ClassificationModels
@@ -18,6 +18,7 @@ from Attacks.ImageAttacks.Fourier import FourierFilter
 from Attacks.ImageAttacks.RobustUAP import RobustUAPConfig, TransformSampler, estimate_robustness, project_lp_ball
 from Attacks.ImageAttacks.PSPUAP import PSPTransformSampler 
 from Attacks.ImageAttacks.Aggregation import aggregate
+from Attacks.ImageAttacks.GradCAM import compute_gradcam, heatmap_to_pil, overlay_heatmap
 from torch.utils.data import TensorDataset, DataLoader
 
 
@@ -4040,6 +4041,252 @@ class AdversarialAttack:
         image_tensor = torch.clamp(image_tensor, 0.0, 1.0)
         image_array = (image_tensor.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
         return Image.fromarray(image_array)
+
+    @staticmethod
+    def _gradcam_model_mapping(models, fallback_items):
+        if models is None:
+            return dict(fallback_items)
+        if isinstance(models, Mapping):
+            return dict(models)
+        return {'model': models}
+
+    @staticmethod
+    def _safe_visualization_name(value):
+        return ''.join(
+            character if character.isalnum() or character in {'-', '_'} else '_'
+            for character in str(value)
+        )
+
+    def _save_gradcam_pairs(self, pairs, output_dir, models=None):
+        """Save clean/adversarial Grad-CAM files for prepared image pairs."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        model_mapping = self._gradcam_model_mapping(models, self._model_items())
+        records = []
+
+        for model_name, model in model_mapping.items():
+            safe_model_name = self._safe_visualization_name(model_name)
+            model_dir = output_dir / safe_model_name
+            model_dir.mkdir(parents=True, exist_ok=True)
+            for pair_index, pair in enumerate(pairs, start=1):
+                sample_id = str(pair.get('sample_id', pair_index - 1))
+                safe_sample_id = self._safe_visualization_name(sample_id)
+                stem = f'{pair_index:03d}_{safe_sample_id}'
+                try:
+                    clean_result = compute_gradcam(model, pair['clean'])
+                    adversarial_result = compute_gradcam(model, pair['adversarial'])
+                    clean_image = self._image_tensor_to_pil(pair['clean'])
+                    adversarial_image = self._image_tensor_to_pil(pair['adversarial'])
+                    clean_heatmap = heatmap_to_pil(clean_result.heatmap)
+                    adversarial_heatmap = heatmap_to_pil(adversarial_result.heatmap)
+                    clean_overlay = overlay_heatmap(clean_image, clean_result.heatmap)
+                    adversarial_overlay = overlay_heatmap(
+                        adversarial_image, adversarial_result.heatmap
+                    )
+
+                    paths = {
+                        'clean': model_dir / f'{stem}_clean.png',
+                        'clean_heatmap': model_dir / f'{stem}_clean_heatmap.png',
+                        'clean_gradcam': model_dir / f'{stem}_clean_gradcam.png',
+                        'adversarial': model_dir / f'{stem}_adversarial.png',
+                        'adversarial_heatmap': model_dir / f'{stem}_adversarial_heatmap.png',
+                        'adversarial_gradcam': model_dir / f'{stem}_adversarial_gradcam.png',
+                        'comparison': model_dir / f'{stem}_comparison.png',
+                    }
+                    clean_image.save(paths['clean'])
+                    clean_heatmap.save(paths['clean_heatmap'])
+                    clean_overlay.save(paths['clean_gradcam'])
+                    adversarial_image.save(paths['adversarial'])
+                    adversarial_heatmap.save(paths['adversarial_heatmap'])
+                    adversarial_overlay.save(paths['adversarial_gradcam'])
+
+                    panels = [
+                        clean_image,
+                        clean_overlay,
+                        adversarial_image,
+                        adversarial_overlay,
+                    ]
+                    labels = [
+                        f'Clean: pred={clean_result.prediction} ({clean_result.confidence:.3f})',
+                        'Clean Grad-CAM',
+                        (
+                            f'Adversarial: pred={adversarial_result.prediction} '
+                            f'({adversarial_result.confidence:.3f})'
+                        ),
+                        'Adversarial Grad-CAM',
+                    ]
+                    panel_width, panel_height = clean_image.size
+                    header_height = 24
+                    comparison = Image.new(
+                        'RGB', (panel_width * 4, panel_height + header_height), 'white'
+                    )
+                    drawer = ImageDraw.Draw(comparison)
+                    for panel_index, (panel, label) in enumerate(zip(panels, labels)):
+                        x = panel_index * panel_width
+                        comparison.paste(panel.resize((panel_width, panel_height)), (x, header_height))
+                        drawer.text((x + 4, 5), label, fill='black')
+                    comparison.save(paths['comparison'])
+
+                    records.append({
+                        'status': 'saved',
+                        'model': str(model_name),
+                        'sample_id': sample_id,
+                        'success': bool(pair.get('success', False)),
+                        'true_label': float(pair['true_label']),
+                        'target_label': float(pair['target_label']),
+                        'clean_prediction': clean_result.prediction,
+                        'clean_confidence': clean_result.confidence,
+                        'clean_cam_target_class': clean_result.target_class,
+                        'adversarial_prediction': adversarial_result.prediction,
+                        'adversarial_confidence': adversarial_result.confidence,
+                        'adversarial_cam_target_class': adversarial_result.target_class,
+                        'target_layer': clean_result.target_layer,
+                        'layout': 'clean|clean_gradcam|adversarial|adversarial_gradcam',
+                        **{name: str(path) for name, path in paths.items()},
+                    })
+                except (RuntimeError, TypeError, ValueError) as error:
+                    records.append({
+                        'status': 'skipped',
+                        'model': str(model_name),
+                        'sample_id': sample_id,
+                        'error': str(error),
+                    })
+                finally:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        summary = {
+            'examples_requested': len(pairs),
+            'models': list(model_mapping),
+            'visualizations_saved': sum(record['status'] == 'saved' for record in records),
+            'records': records,
+        }
+        with open(output_dir / 'gradcam_summary.json', 'w', encoding='utf-8') as summary_file:
+            json.dump(summary, summary_file, indent=2)
+        return summary
+
+    def save_universal_gradcam_visualizations(
+        self,
+        data_loader,
+        output_dir,
+        trigger_box,
+        trigger_patch,
+        trigger_mask=None,
+        target_label=1.0,
+        source_filter='bad',
+        edge_softness=0.0,
+        how_to_attach='blend',
+        max_examples=5,
+        models=None,
+    ):
+        """Save final UAP Grad-CAM comparisons on eligible test samples."""
+        max_examples = max(0, int(max_examples))
+        if max_examples == 0:
+            return {'examples_requested': 0, 'visualizations_saved': 0, 'records': []}
+        successful_pairs = []
+        fallback_pairs = []
+        sample_offset = 0
+        target_value = float(target_label)
+
+        for batch in data_loader:
+            inputs, targets = batch[0], batch[1]
+            sample_ids = (
+                batch[2]
+                if len(batch) >= 3
+                else [str(sample_offset + index) for index in range(int(inputs.shape[0]))]
+            )
+            inputs = inputs.to(self.device)
+            targets = targets.float().to(self.device).view(-1)
+            with torch.no_grad(), self._suspend_feature_capture():
+                clean_logits = self._forward_logits(inputs)
+                clean_predictions = (self._tensor_logits(clean_logits).view(-1) > 0).float()
+                adversarial_inputs = self._inject_trigger(
+                    inputs,
+                    trigger_box,
+                    trigger_patch=trigger_patch,
+                    trigger_mask=trigger_mask,
+                    edge_softness=edge_softness,
+                    how_to_attach=how_to_attach,
+                )
+                adversarial_logits = self._forward_logits(adversarial_inputs)
+                adversarial_predictions = (
+                    self._tensor_logits(adversarial_logits).view(-1) > 0
+                ).float()
+
+            if source_filter == 'bad':
+                source_mask = targets == 0
+            elif source_filter == 'good':
+                source_mask = targets == 1
+            elif source_filter == 'all':
+                source_mask = torch.ones_like(targets, dtype=torch.bool)
+            else:
+                raise ValueError("source_filter must be one of: 'bad', 'good', 'all'.")
+            eligible = (
+                source_mask
+                & (clean_predictions == targets)
+                & (targets != target_value)
+            )
+            for index in torch.nonzero(eligible, as_tuple=False).view(-1).tolist():
+                success = bool(adversarial_predictions[index].item() == target_value)
+                pair = {
+                    'sample_id': str(sample_ids[index]),
+                    'clean': inputs[index:index + 1].detach().cpu(),
+                    'adversarial': adversarial_inputs[index:index + 1].detach().cpu(),
+                    'true_label': float(targets[index].item()),
+                    'target_label': target_value,
+                    'success': success,
+                }
+                (successful_pairs if success else fallback_pairs).append(pair)
+            sample_offset += int(inputs.shape[0])
+            if len(successful_pairs) >= max_examples:
+                break
+
+        pairs = successful_pairs[:max_examples]
+        if len(pairs) < max_examples:
+            pairs.extend(fallback_pairs[:max_examples - len(pairs)])
+        return self._save_gradcam_pairs(pairs, output_dir, models=models)
+
+    def save_image_specific_gradcam_visualizations(
+        self,
+        output_dir,
+        models=None,
+        split_name='test',
+        max_examples=5,
+    ):
+        """Create Grad-CAM comparisons from saved per-image attack artifacts."""
+        max_examples = max(0, int(max_examples))
+        if max_examples == 0:
+            return {'examples_requested': 0, 'visualizations_saved': 0, 'records': []}
+        split_dir = Path(output_dir) / split_name
+        manifest_path = split_dir / 'manifest.jsonl'
+        if not manifest_path.exists():
+            raise FileNotFoundError(f'Image-specific manifest not found: {manifest_path}')
+        records = [
+            json.loads(line)
+            for line in manifest_path.read_text(encoding='utf-8').splitlines()
+            if line
+        ]
+        eligible = [record for record in records if record['eligible'] and record.get('artifact')]
+        selected = (
+            [record for record in eligible if record['success']]
+            + [record for record in eligible if not record['success']]
+        )[:max_examples]
+        pairs = []
+        for record in selected:
+            payload = torch.load(split_dir / record['artifact'], map_location='cpu')
+            pairs.append({
+                'sample_id': record['sample_id'],
+                'clean': payload['original_image'],
+                'adversarial': payload['adversarial_image'],
+                'true_label': float(payload['true_label']),
+                'target_label': float(payload['target_label']),
+                'success': bool(payload['success']),
+            })
+        return self._save_gradcam_pairs(
+            pairs,
+            split_dir / 'gradcam',
+            models=models,
+        )
 
     def _save_trigger_preview(
         self,
