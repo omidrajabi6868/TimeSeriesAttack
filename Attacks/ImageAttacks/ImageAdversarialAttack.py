@@ -4286,7 +4286,6 @@ class AdversarialAttack:
             split_dir / 'gradcam',
             models=models,
         )
-
     def _save_trigger_preview(
         self,
         data_loader,
