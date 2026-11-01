@@ -9,11 +9,11 @@ from Attacks.ImageAttacks.ImageAdversarialAttack import AdversarialAttack
 
 
 class TinySpatialBinaryModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, bias=-0.2):
         super().__init__()
         self.conv = torch.nn.Conv2d(3, 1, kernel_size=1, bias=False)
         self.pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.bias = torch.nn.Parameter(torch.tensor(-0.2))
+        self.bias = torch.nn.Parameter(torch.tensor(float(bias)))
         with torch.no_grad():
             self.conv.weight.fill_(1.0 / 3.0)
 
@@ -48,7 +48,10 @@ def test_universal_gradcam_saves_clean_and_adversarial_pairs(tmp_path):
         source_filter='bad',
         edge_softness=0.0,
         max_examples=1,
-        models={'TinyModel': model},
+        models={
+            'TinyModel': model,
+            'UnsuccessfulBlackBox': TinySpatialBinaryModel(bias=-1.0),
+        },
     )
 
     assert summary['visualizations_saved'] == 1
@@ -56,9 +59,33 @@ def test_universal_gradcam_saves_clean_and_adversarial_pairs(tmp_path):
     assert record['clean_prediction'] == 0
     assert record['adversarial_prediction'] == 1
     assert record['layout'] == 'clean|clean_gradcam|adversarial|adversarial_gradcam'
+    assert summary['records'][1]['model'] == 'UnsuccessfulBlackBox'
+    assert summary['records'][1]['status'] == 'skipped_unsuccessful'
     for key in ('clean_gradcam', 'adversarial_gradcam', 'comparison'):
         assert Path(record[key]).exists()
     assert (tmp_path / 'gradcam_summary.json').exists()
+
+
+def test_universal_gradcam_does_not_fall_back_to_unsuccessful_samples(tmp_path):
+    model = TinySpatialBinaryModel()
+    attack = AdversarialAttack(model, device='cpu', use_multi_gpu=False)
+    images = torch.full((1, 3, 4, 6), 0.1)
+    loader = DataLoader(TensorDataset(images, torch.tensor([0.0])), batch_size=1)
+
+    summary = attack.save_universal_gradcam_visualizations(
+        loader,
+        tmp_path,
+        trigger_box={'x': 0, 'y': 0, 'width': 6, 'height': 4},
+        trigger_patch=torch.zeros(1, 3, 4, 6),
+        target_label=1.0,
+        source_filter='bad',
+        max_examples=1,
+        models={'TinyModel': model},
+    )
+
+    assert summary['examples_requested'] == 0
+    assert summary['visualizations_saved'] == 0
+    assert summary['records'] == []
 
 
 def test_image_specific_gradcam_reuses_saved_attack_artifacts(tmp_path):
