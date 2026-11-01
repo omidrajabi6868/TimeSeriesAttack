@@ -4073,8 +4073,18 @@ class AdversarialAttack:
                 safe_sample_id = self._safe_visualization_name(sample_id)
                 stem = f'{pair_index:03d}_{safe_sample_id}'
                 try:
-                    clean_result = compute_gradcam(model, pair['clean'])
                     adversarial_result = compute_gradcam(model, pair['adversarial'])
+                    if adversarial_result.prediction != int(float(pair['target_label'])):
+                        records.append({
+                            'status': 'skipped_unsuccessful',
+                            'model': str(model_name),
+                            'sample_id': sample_id,
+                            'target_label': float(pair['target_label']),
+                            'adversarial_prediction': adversarial_result.prediction,
+                            'adversarial_confidence': adversarial_result.confidence,
+                        })
+                        continue
+                    clean_result = compute_gradcam(model, pair['clean'])
                     clean_image = self._image_tensor_to_pil(pair['clean'])
                     adversarial_image = self._image_tensor_to_pil(pair['adversarial'])
                     clean_heatmap = heatmap_to_pil(clean_result.heatmap)
@@ -4179,12 +4189,11 @@ class AdversarialAttack:
         max_examples=5,
         models=None,
     ):
-        """Save final UAP Grad-CAM comparisons on eligible test samples."""
+        """Save final UAP Grad-CAM comparisons for successful test attacks only."""
         max_examples = max(0, int(max_examples))
         if max_examples == 0:
             return {'examples_requested': 0, 'visualizations_saved': 0, 'records': []}
         successful_pairs = []
-        fallback_pairs = []
         sample_offset = 0
         target_value = float(target_label)
 
@@ -4228,6 +4237,8 @@ class AdversarialAttack:
             )
             for index in torch.nonzero(eligible, as_tuple=False).view(-1).tolist():
                 success = bool(adversarial_predictions[index].item() == target_value)
+                if not success:
+                    continue
                 pair = {
                     'sample_id': str(sample_ids[index]),
                     'clean': inputs[index:index + 1].detach().cpu(),
@@ -4236,14 +4247,12 @@ class AdversarialAttack:
                     'target_label': target_value,
                     'success': success,
                 }
-                (successful_pairs if success else fallback_pairs).append(pair)
+                successful_pairs.append(pair)
             sample_offset += int(inputs.shape[0])
             if len(successful_pairs) >= max_examples:
                 break
 
         pairs = successful_pairs[:max_examples]
-        if len(pairs) < max_examples:
-            pairs.extend(fallback_pairs[:max_examples - len(pairs)])
         return self._save_gradcam_pairs(pairs, output_dir, models=models)
 
     def save_image_specific_gradcam_visualizations(
@@ -4267,10 +4276,7 @@ class AdversarialAttack:
             if line
         ]
         eligible = [record for record in records if record['eligible'] and record.get('artifact')]
-        selected = (
-            [record for record in eligible if record['success']]
-            + [record for record in eligible if not record['success']]
-        )[:max_examples]
+        selected = [record for record in eligible if record['success']][:max_examples]
         pairs = []
         for record in selected:
             payload = torch.load(split_dir / record['artifact'], map_location='cpu')
