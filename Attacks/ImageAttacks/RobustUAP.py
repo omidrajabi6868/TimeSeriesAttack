@@ -11,13 +11,13 @@ import torchvision.transforms as transforms
 class RobustUAPConfig:
     """Hyperparameters from the RobustUAP robustness-estimation loop."""
 
-    psi: float = 0.2
+    psi: float = 0.3
     phi: float = 0.2
-    gamma: float = 0.7
-    zeta: float = 0.8
+    gamma: float = 0.65
+    zeta: float = 0.75
     alpha: float = 0.01
-    max_inner_steps: int = 5
-    max_batch_size: int = 128
+    max_inner_steps: int = 3
+    max_batch_size: int = 64
     norm: str = 'linf'
 
     @property
